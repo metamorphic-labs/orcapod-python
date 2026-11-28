@@ -252,6 +252,50 @@ class TestSourceJobNode:
         job_node.bound_source = src
         assert job_node.bound_source is src
 
+    @pytest.mark.parametrize(
+        "length", [1, 2, 3], ids=["direct", "two_slots", "three_slots"]
+    )
+    def test_slot_binding_refuses_cycles(self, tag_schema, data_schema, length):
+        from orcapod.core.sources.dict_source import DictSource
+
+        source = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
+        target = SourceJobNode(
+            name="target",
+            tag_schema=tag_schema,
+            data_schema=data_schema,
+            bound_source=source,
+        )
+        upstream = target
+        for index in range(length - 1):
+            upstream = SourceJobNode(name=f"upstream_{index}", bound_source=upstream)
+        previous_modified = target.last_modified, upstream.last_modified
+
+        with pytest.raises(SourceSpecMismatchError, match=r"slot 'target'.*cycle"):
+            target.bound_source = upstream
+
+        assert target.bound_source is source
+        assert (target.last_modified, upstream.last_modified) == previous_modified
+
+    def test_slot_binding_accepts_acyclic_chain(self, tag_schema, data_schema):
+        from orcapod.core.sources.dict_source import DictSource
+
+        source = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
+        leaf = SourceJobNode(name="slot", bound_source=source)
+        middle = SourceJobNode(name="slot", bound_source=leaf)
+        target = SourceJobNode(
+            name="slot", tag_schema=tag_schema, data_schema=data_schema
+        )
+        target.bound_source = middle
+
+        assert target.bound_source is middle
+        assert target.as_table().equals(source.as_table())
+        target.bound_source = None
+        assert target.bound_source is None
+
     def test_bound_source_setter_clears_content_hash_cache(
         self, tag_schema, data_schema
     ):

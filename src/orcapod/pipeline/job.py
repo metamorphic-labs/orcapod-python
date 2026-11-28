@@ -554,7 +554,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 hash, or sources with one ID differ in schema or key columns
                 (ITL-1506). The job is left as it was.
             SourceSpecMismatchError: If any source's columns differ from its slot's
-                declared names, roles or types.
+                declared names, roles or types, or the bindings would create a cycle
+                of bound slots.
             ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
                 operator node that caches (``LOG`` or ``REPLAY``) would read a
                 restricted source, one this bind binds or one already bound
@@ -638,6 +639,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self, rebinding: Rebinding
     ) -> list[tuple[SourceJobNode, cp.StreamProtocol | None, _DeclaredForm | None]]:
         """Validate the prospective job and prepare each changed slot's row form."""
+        replacements = {id(slot): source for slot, source in rebinding}
+        for slot, source in rebinding:
+            slot._require_acyclic_binding(source, replacements)  # pyright: ignore[reportPrivateUsage]  # validate the proposed slot chain before committing it
         nodes = self._persistent_node_map.values()
         require_consistent_sources(
             ((f"node {node.label!r}", node) for node in nodes), rebinding

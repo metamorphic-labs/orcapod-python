@@ -10,7 +10,7 @@ import pytest
 
 from orcapod import Pipeline, PipelineJob, function_pod, side_effect_pod
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.errors import InconsistentSourceError
+from orcapod.errors import InconsistentSourceError, SourceSpecMismatchError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.side_effects import SideEffectPod
@@ -352,6 +352,33 @@ def test_slot_setter_can_unbind_and_recompile(tmp_path: Path) -> None:
     job.compile()
     assert job.nodes["a"].bound_source is None
     assert job.unbound_sources == ["a"]
+
+
+@pytest.mark.parametrize("setter", [False, True], ids=["batch_bind", "owned_setter"])
+def test_job_binding_refuses_slot_cycles_atomically(
+    tmp_path: Path, setter: bool
+) -> None:
+    job = _job(tmp_path)
+    slot_a, slot_b = job.nodes["a"], job.nodes["b"]
+    original_a, original_b = slot_a.bound_source, slot_b.bound_source
+    previous_modified = slot_a.last_modified, slot_b.last_modified
+    original_database = job.database
+
+    with pytest.raises(SourceSpecMismatchError, match=r"slot 'a'.*cycle"):
+        if setter:
+            slot_a.bound_source = slot_a
+        else:
+            job.bind(
+                sources={"a": slot_b, "b": slot_a},
+                database=InMemoryArrowDatabase(),
+            )
+
+    assert slot_a.bound_source is original_a
+    assert slot_b.bound_source is original_b
+    assert job.sources["a"] is original_a
+    assert job.sources["b"] is original_b
+    assert (slot_a.last_modified, slot_b.last_modified) == previous_modified
+    assert job.database is original_database
 
 
 @pytest.mark.parametrize("binding", ["constructor", "from_stream", "setter"])
