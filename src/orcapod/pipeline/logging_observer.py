@@ -53,6 +53,11 @@ from uuid_utils import uuid7
 
 from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.logging_capture import install_capture_streams
+from orcapod.pipeline.observer_losses import (
+    LOGGING_EVENTS,
+    RunLosses,
+    report_lost_event,
+)
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 
 if TYPE_CHECKING:
@@ -85,11 +90,14 @@ class DataLogger:
         log_path: tuple[str, ...],
         run_id: str,
         tag_data: dict[str, Any],
+        *,
+        losses: RunLosses | None = None,
     ) -> None:
         self._db = db
         self._log_path = log_path
         self._run_id = run_id
         self._tag_data = tag_data
+        self._run_losses = losses
 
     def record(self, **kwargs: Any) -> None:
         """Write one log row to the database.
@@ -101,36 +109,42 @@ class DataLogger:
         """
         import pyarrow as pa
 
-        log_id = uuid7().bytes
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        # Context columns — prefixed with "_log_" to follow system column conventions
-        columns: dict[str, pa.Array] = {
-            "_log_id": pa.array([log_id], type=pa.binary(16)),
-            "_log_run_id": pa.array([self._run_id], type=pa.large_utf8()),
-            "_log_timestamp": pa.array([timestamp], type=pa.large_utf8()),
-        }
-
-        # Execution output columns from kwargs — prefixed with "_log_"
-        for key, value in kwargs.items():
-            col_name = f"_log_{key}"
-            if isinstance(value, bool):
-                columns[col_name] = pa.array([value], type=pa.bool_())
-            else:
-                columns[col_name] = pa.array(
-                    [str(value) if value is not None else None],
-                    type=pa.large_utf8(),
-                )
-
-        # Dynamic tag columns — each tag key becomes its own column (unprefixed)
-        for key, value in self._tag_data.items():
-            columns[key] = pa.array([str(value)], type=pa.large_utf8())
-
-        row = pa.table(columns)
         try:
+            log_id = uuid7().bytes
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            # Context columns — prefixed with "_log_" to follow system column conventions
+            columns: dict[str, pa.Array[Any]] = {
+                "_log_id": pa.array([log_id], type=pa.binary(16)),
+                "_log_run_id": pa.array([self._run_id], type=pa.large_utf8()),
+                "_log_timestamp": pa.array([timestamp], type=pa.large_utf8()),
+            }
+
+            # Execution output columns from kwargs — prefixed with "_log_"
+            for key, value in kwargs.items():
+                col_name = f"_log_{key}"
+                if isinstance(value, bool):
+                    columns[col_name] = pa.array([value], type=pa.bool_())
+                else:
+                    columns[col_name] = pa.array(
+                        [str(value) if value is not None else None],
+                        type=pa.large_utf8(),
+                    )
+
+            # Dynamic tag columns — each tag key becomes its own column (unprefixed)
+            for key, value in self._tag_data.items():
+                columns[key] = pa.array([str(value)], type=pa.large_utf8())
+
+            row = pa.Table.from_pydict(columns)
             self._db.add_record(self._log_path, log_id, row, flush=True)
-        except Exception:
-            logger.exception(
+        except Exception as error:
+            # The run goes on: its results do not depend on this row. The loss is
+            # logged here and reported by the run (ITL-1556).
+            report_lost_event(
+                self._run_losses,
+                LOGGING_EVENTS,
+                error,
+                logger,
                 "LoggingObserver: failed to write log row",
             )
 
@@ -321,13 +335,17 @@ class _ContextualizedLoggingObserver:
         self,
         db: ArrowDatabaseProtocol,
         run_id: str = "",
+        losses: RunLosses | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
+        self._run_losses = losses
 
     def contextualize(self, *identity_path: str) -> "_ContextualizedLoggingObserver":
         """Re-contextualize with a new identity path (scopes the DB)."""
-        return _ContextualizedLoggingObserver(self._db.at(*identity_path), self._run_id)
+        return _ContextualizedLoggingObserver(
+            self._db.at(*identity_path), self._run_id, self._run_losses
+        )
 
     def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
         pass
@@ -378,4 +396,5 @@ class _ContextualizedLoggingObserver:
             log_path=DEFAULT_LOG_PATH,
             run_id=self._run_id,
             tag_data=tag_data,
+            losses=self._run_losses,
         )

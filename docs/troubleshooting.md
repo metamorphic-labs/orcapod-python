@@ -207,6 +207,20 @@ same (`Run of job '...': 1 row failed.`).
 `orcapod.pipeline`) so that the first failure stops the run and raises. See the tutorial
 [Handling errors](tutorial/handling-errors.md).
 
+### `ObserverEventsLostWarning: Observer events were not recorded in this run: ...`
+
+**Cause.** A `StatusObserver` or `LoggingObserver` could not encode an event row or write
+it to its database. The run continues with its usual results and incomplete status or
+log records. The warning is issued once, at the end of the run, and gives, per observer
+kind, how many events were lost and the first error.
+
+**Fix.** Check the first error in the message and the traceback in the
+`orcapod.pipeline` logs. The counts are in `job.last_run.lost_observer_events`. For a
+write error, use a database that accepts the observer's rows, such as in-memory or Delta.
+For an encoding error, correct the reported value before it is used in another event.
+These changes apply to future writes. A later `job.run()` can reuse work from the
+completed run and may never emit replacement events for the missing records.
+
 ### `TypeError: ...() got an unexpected keyword argument 'ctx'` from a `sink_pod`
 
 **Cause.** A function decorated with `@sink_pod`, `@tap_pod` or `@side_effect_pod` must

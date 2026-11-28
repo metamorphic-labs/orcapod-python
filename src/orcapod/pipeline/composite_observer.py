@@ -22,11 +22,24 @@ Example::
 
 from __future__ import annotations
 
-from typing import Any, cast
+from types import MethodType
+from typing import TYPE_CHECKING, Any, cast
 
+from orcapod.pipeline.logging_observer import (
+    LoggingObserver,
+    _ContextualizedLoggingObserver,  # pyright: ignore[reportPrivateUsage]
+)
 from orcapod.pipeline.observer import NoOpLogger
+from orcapod.pipeline.status_observer import (
+    StatusObserver,
+    _ContextualizedStatusObserver,  # pyright: ignore[reportPrivateUsage]
+)
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
+
+if TYPE_CHECKING:
+    from orcapod.pipeline.observer_losses import RunLosses
+    from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 _NOOP_LOGGER = NoOpLogger()
 
@@ -39,18 +52,62 @@ class CompositeObserver:
             ``ExecutionObserverProtocol``.
     """
 
+    __run_losses: RunLosses | None = None
+
     def __init__(self, *observers: Any) -> None:
         self._observers = list(observers)
 
     def contextualize(self, *identity_path: str) -> "CompositeObserver":
         """Return a new CompositeObserver wrapping each child's contextualized version."""
+        return self.__contextualize(identity_path, self.__run_losses)
+
+    @classmethod
+    def _for_run(
+        cls,
+        observer: ExecutionObserverProtocol,
+        counter: ExecutionObserverProtocol,
+        losses: RunLosses,
+    ) -> CompositeObserver:
+        """Keep the original observers for lifecycle calls and count node event losses."""
+        composite = cls(observer, counter)
+        composite.__run_losses = losses
+        return composite
+
+    def __contextualize(
+        self, identity_path: tuple[str, ...], losses: RunLosses | None
+    ) -> CompositeObserver:
+        """Scope the children and attach the job's counter to the built-in results."""
         if not identity_path:
             raise ValueError(
                 "CompositeObserver.contextualize() requires a non-empty identity_path."
             )
-        return CompositeObserver(
-            *[o.contextualize(*identity_path) for o in self._observers]
-        )
+        if losses is None:
+            return CompositeObserver(
+                *[o.contextualize(*identity_path) for o in self._observers]
+            )
+
+        children: list[Any] = []
+        for child in self._observers:
+            contextualize = child.contextualize
+            child_type = type(child)
+            # Custom hooks can return a shared or delegated observer. Only
+            # the default factories on concrete built-ins give us owned scopes.
+            uses_default_scope = (
+                type(contextualize) is MethodType
+                and contextualize.__self__ is child
+                and any(
+                    child_type is kind and contextualize.__func__ is factory
+                    for kind, factory in _BUILT_IN_SCOPES
+                )
+            )
+            if uses_default_scope and child_type is CompositeObserver:
+                scoped = child.__contextualize(identity_path, losses)
+            else:
+                scoped = contextualize(*identity_path)
+                if uses_default_scope:
+                    scoped._run_losses = losses
+            children.append(scoped)
+        return CompositeObserver(*children)
 
     def on_run_start(self, run_id: str, **kwargs: Any) -> None:
         for o in self._observers:
@@ -150,3 +207,13 @@ class CompositeObserver:
             cast("dict[str, object] | None", db_registry),
         )
         return cls(*(build() for build in children))
+
+
+# Keep the original functions so hooks replaced on a class are custom too.
+_BUILT_IN_SCOPES = (
+    (CompositeObserver, CompositeObserver.contextualize),
+    (LoggingObserver, LoggingObserver.contextualize),
+    (StatusObserver, StatusObserver.contextualize),
+    (_ContextualizedLoggingObserver, _ContextualizedLoggingObserver.contextualize),
+    (_ContextualizedStatusObserver, _ContextualizedStatusObserver.contextualize),
+)

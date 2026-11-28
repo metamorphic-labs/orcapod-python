@@ -60,12 +60,17 @@ from uuid_utils import uuid7
 
 from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.observer import NoOpLogger
+from orcapod.pipeline.observer_losses import (
+    STATUS_EVENTS,
+    report_lost_event,
+)
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
 
 if TYPE_CHECKING:
     import pyarrow as pa
 
+    from orcapod.pipeline.observer_losses import RunLosses
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 
 logger = logging.getLogger(__name__)
@@ -271,38 +276,46 @@ class StatusObserver:
         """Build and write a single status event row."""
         import pyarrow as pa
 
-        tag_schema = self._tag_schema_per_node.get(node_label, {})
-
-        status_id = uuid7().bytes
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        columns: dict[str, pa.Array] = {
-            "_status_id": pa.array([status_id], type=pa.binary(16)),
-            "_status_run_id": pa.array([self._current_run_id], type=pa.large_utf8()),
-            "_status_pipeline_uri": pa.array(
-                [self._current_pipeline_uri], type=pa.large_utf8()
-            ),
-            "_status_state": pa.array([state], type=pa.large_utf8()),
-            "_status_timestamp": pa.array([timestamp], type=pa.large_utf8()),
-            "_status_error_summary": pa.array(
-                [str(error) if error is not None else None],
-                type=pa.large_utf8(),
-            ),
-        }
-
-        # Tag columns — use statically-known schema from on_node_start
-        for key in tag_schema:
-            value = tag.get(key, None)
-            columns[key] = pa.array(
-                [str(value) if value is not None else None],
-                type=pa.large_utf8(),
-            )
-
-        row = pa.table(columns)
         try:
+            tag_schema = self._tag_schema_per_node.get(node_label, {})
+
+            status_id = uuid7().bytes
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            columns: dict[str, pa.Array[Any]] = {
+                "_status_id": pa.array([status_id], type=pa.binary(16)),
+                "_status_run_id": pa.array(
+                    [self._current_run_id], type=pa.large_utf8()
+                ),
+                "_status_pipeline_uri": pa.array(
+                    [self._current_pipeline_uri], type=pa.large_utf8()
+                ),
+                "_status_state": pa.array([state], type=pa.large_utf8()),
+                "_status_timestamp": pa.array([timestamp], type=pa.large_utf8()),
+                "_status_error_summary": pa.array(
+                    [str(error) if error is not None else None],
+                    type=pa.large_utf8(),
+                ),
+            }
+
+            # Tag columns — use statically-known schema from on_node_start
+            for key in tag_schema:
+                value = tag.get(key, None)
+                columns[key] = pa.array(
+                    [str(value) if value is not None else None],
+                    type=pa.large_utf8(),
+                )
+
+            row = pa.Table.from_pydict(columns)
             self._db.add_record(DEFAULT_STATUS_PATH, status_id, row, flush=True)
-        except Exception:
-            logger.exception(
+        except Exception as event_error:
+            # The run goes on: its results do not depend on this row. The loss is
+            # logged here and reported by the run (ITL-1556).
+            report_lost_event(
+                None,
+                STATUS_EVENTS,
+                event_error,
+                logger,
                 "StatusObserver: failed to write status event for node=%s state=%s",
                 node_label,
                 state,
@@ -328,10 +341,13 @@ class _ContextualizedStatusObserver:
         self._current_run_id: str = ""
         self._current_pipeline_uri: str = ""
         self._tag_schema: SchemaLike = {}
+        self._run_losses: RunLosses | None = None
 
     def contextualize(self, *identity_path: str) -> "_ContextualizedStatusObserver":
         """Re-contextualize with a new identity path (scopes the DB)."""
-        return _ContextualizedStatusObserver(self._db.at(*identity_path))
+        ctx = _ContextualizedStatusObserver(self._db.at(*identity_path))
+        ctx._run_losses = self._run_losses
+        return ctx
 
     def on_run_start(
         self,
@@ -402,37 +418,43 @@ class _ContextualizedStatusObserver:
         """Build and write a single status event row to the scoped database."""
         import pyarrow as pa
 
-        status_id = uuid7().bytes
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        columns: dict[str, pa.Array] = {
-            "_status_id": pa.array([status_id], type=pa.binary(16)),
-            "_status_run_id": pa.array([self._current_run_id], type=pa.large_utf8()),
-            "_status_pipeline_uri": pa.array(
-                [self._current_pipeline_uri], type=pa.large_utf8()
-            ),
-            "_status_state": pa.array([state], type=pa.large_utf8()),
-            "_status_timestamp": pa.array([timestamp], type=pa.large_utf8()),
-            "_status_error_summary": pa.array(
-                [str(error) if error is not None else None],
-                type=pa.large_utf8(),
-            ),
-        }
-
-        for key in self._tag_schema:
-            value = tag.get(key, None)
-            columns[key] = pa.array(
-                [str(value) if value is not None else None],
-                type=pa.large_utf8(),
-            )
-
-        row = pa.table(columns)
-        # TODO: re-evaluate broad exception absorption — ideally narrow to DB-specific
-        # errors (e.g. IOError, ArrowInvalid) once the full set of failure modes is known.
         try:
+            status_id = uuid7().bytes
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            columns: dict[str, pa.Array[Any]] = {
+                "_status_id": pa.array([status_id], type=pa.binary(16)),
+                "_status_run_id": pa.array(
+                    [self._current_run_id], type=pa.large_utf8()
+                ),
+                "_status_pipeline_uri": pa.array(
+                    [self._current_pipeline_uri], type=pa.large_utf8()
+                ),
+                "_status_state": pa.array([state], type=pa.large_utf8()),
+                "_status_timestamp": pa.array([timestamp], type=pa.large_utf8()),
+                "_status_error_summary": pa.array(
+                    [str(error) if error is not None else None],
+                    type=pa.large_utf8(),
+                ),
+            }
+
+            for key in self._tag_schema:
+                value = tag.get(key, None)
+                columns[key] = pa.array(
+                    [str(value) if value is not None else None],
+                    type=pa.large_utf8(),
+                )
+
+            row = pa.Table.from_pydict(columns)
             self._db.add_record(DEFAULT_STATUS_PATH, status_id, row, flush=True)
-        except Exception:
-            logger.exception(
+        except Exception as event_error:
+            # The run goes on; the loss is logged here and reported by the run
+            # (ITL-1556).
+            report_lost_event(
+                self._run_losses,
+                STATUS_EVENTS,
+                event_error,
+                logger,
                 "_ContextualizedStatusObserver: failed to write status event "
                 "for node=%s state=%s",
                 node_label,

@@ -64,7 +64,10 @@ Among `job.run()`'s optional arguments, the tutorial
 default policy skips failed rows and continues) and `observer=` (`StatusObserver`,
 `LoggingObserver`) to record what happened during the run. Both observers raise
 `SpiralDBObserverNotSupportedError` at setup if given a SpiralDB store, so give them
-another database such as Delta (ITL-1540). An observer only watches: one
+another database such as Delta (ITL-1540). If a built-in observer cannot encode or write
+an event, the failure is logged, the run continues, the summary counts the lost events
+per observer kind in `lost_observer_events`, and one `ObserverEventsLostWarning` is
+issued at the end of the run (ITL-1556). An observer only watches: one
 that changes the job, its nodes or its bound sources during a run is unsupported, and what
 the run then does is undefined (ITL-1369). `load_only=True` fills the nodes
 from what is already stored and computes nothing; see

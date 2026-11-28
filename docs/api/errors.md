@@ -76,6 +76,8 @@ These exceptions and warnings report problems running pipelines, processing rows
 
 ::: orcapod.errors.RowFailuresWarning
 
+::: orcapod.errors.ObserverEventsLostWarning
+
 ::: orcapod.errors.RestrictedAggregationWarning
 
 ::: orcapod.errors.SemiJoinIgnoredColumnWarning

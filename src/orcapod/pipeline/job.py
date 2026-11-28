@@ -32,6 +32,7 @@ from orcapod.pipeline.node_run import (
     clear_run_rows,
     plan_run,
 )
+from orcapod.pipeline.observer_losses import RunLosses
 from orcapod.pipeline.restrictions import (
     refuse_restricted_operator_caches,
     refuse_restriction_conflicts,
@@ -42,6 +43,7 @@ from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
     run_node_summaries,
+    warn_lost_observer_events,
     warn_row_failures,
 )
 from orcapod.protocols import core_protocols as cp
@@ -50,11 +52,14 @@ from orcapod.types import NodeConfig
 from orcapod.utils.database_errors import database_write_path, flush_best_effort
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
+    from types import FrameType
 
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.pipeline.execution_context import ExecutionContext
     from orcapod.pipeline.graph import Pipeline
+    from orcapod.pipeline.observer_losses import LostObserverEvents
     from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
@@ -104,13 +109,16 @@ class _PreparedRun:
 
 
 def _with_counter(
-    observer: "ExecutionObserverProtocol | None", counter: RunCountingObserver
+    observer: "ExecutionObserverProtocol | None",
+    counter: RunCountingObserver,
+    losses: RunLosses,
 ) -> "ExecutionObserverProtocol":
     """The observer a run passes to its orchestrator: the user's, plus the row counter.
 
     Args:
         observer: The observer the user passed to ``run``, if any.
         counter: The run's row counter.
+        losses: The run's observer write losses.
 
     Returns:
         ``counter`` alone, or a ``CompositeObserver`` calling ``observer`` then ``counter``.
@@ -119,7 +127,26 @@ def _with_counter(
         return counter
     from orcapod.pipeline.composite_observer import CompositeObserver
 
-    return CompositeObserver(observer, counter)  # pyright: ignore[reportReturnType]  # forwards every hook; its **kwargs signatures do not match the protocol structurally
+    return CompositeObserver._for_run(observer, counter, losses)  # pyright: ignore[reportPrivateUsage, reportReturnType]  # forwards every hook; its **kwargs signatures do not match the protocol structurally
+
+
+def _warn_run_completion(summary: RunSummary, caller: FrameType) -> None:
+    """Issue both completion warnings, giving any row-reporting error precedence."""
+    row_error: BaseException | None = None
+    if not summary.ok:
+        try:
+            warn_row_failures(summary, caller)
+        except BaseException as error:
+            row_error = error
+    if summary.lost_observer_events:
+        try:
+            warn_lost_observer_events(summary, caller)
+        except BaseException as error:
+            if row_error is None:
+                raise
+            raise row_error from error
+    if row_error is not None:
+        raise row_error
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -281,7 +308,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         The same object ``run`` and ``run_async`` returned: per function node, the rows
         computed, read from the database and failed, and each node's first error. Use
         ``job.last_run.print_traceback("<node label>")`` to see a failed row's full
-        traceback. A run that raised leaves it unchanged. A loaded job has none.
+        traceback. If execution fails before completion, this property keeps the
+        previous summary. If a completion warning is promoted to an error, the
+        new summary is already available here. A loaded job has none.
         """
         return self._last_run
 
@@ -1050,7 +1079,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Rows whose function raised (with the default ``error_policy="continue"``) are
         skipped, and the run goes on. At the end, if any row failed, a single
         ``RowFailuresWarning`` names each node with failed rows, how many failed, the
-        first error, and how to print its traceback. A run without failures is quiet.
+        first error, and how to print its traceback. If an observer could not record
+        events, a single ``ObserverEventsLostWarning`` reports the loss even when every
+        row succeeded. A warnings-as-errors filter can raise either warning after
+        the summary is kept in ``job.last_run``.
 
         Returns:
             The run's ``RunSummary``: per function node, the rows computed, read from
@@ -1085,12 +1117,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         counter = RunCountingObserver()
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
         is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
+        # Observer events that cannot be written do not stop the run; they are
+        # counted by the run's observers and reported at its end (ITL-1556).
+        losses = RunLosses()
+        run_observer = _with_counter(observer, counter, losses)
         with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             if is_sync:
                 # Held nodes give their output streams on the sync path (ITL-1347).
                 _ = effective_orchestrator.run(
                     plan.dag,
-                    observer=_with_counter(observer, counter),
+                    observer=run_observer,
                     run_id=prepared.run_id,
                     pipeline_uri=prepared.pipeline_uri,
                     materialize_results=materialize_results,
@@ -1101,7 +1137,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 # The async path sends the rows the plan took (until stage 5).
                 _ = effective_orchestrator.run(
                     plan.dag,
-                    observer=_with_counter(observer, counter),
+                    observer=run_observer,
                     run_id=prepared.run_id,
                     pipeline_uri=prepared.pipeline_uri,
                     materialize_results=materialize_results,
@@ -1115,9 +1151,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only=load_only,
             unchecked_sources=prepared.unchecked_sources,
             asynchronous=not is_sync,
+            lost_observer_events=losses.by_kind(),
         )
-        if not summary.ok:
-            warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+        if not summary.ok or summary.lost_observer_events:
+            caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warnings are shown
+            _warn_run_completion(summary, caller)
         return summary
 
     async def run_async(
@@ -1170,10 +1208,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = prepared.plan
         counter = RunCountingObserver()
+        losses = RunLosses()
+        run_observer = _with_counter(observer, counter, losses)
         with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             _ = await orchestrator.run_async(
                 plan.dag,
-                observer=_with_counter(observer, counter),
+                observer=run_observer,
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,
@@ -1187,9 +1227,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only=load_only,
             unchecked_sources=prepared.unchecked_sources,
             asynchronous=True,
+            lost_observer_events=losses.by_kind(),
         )
-        if not summary.ok:
-            warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+        if not summary.ok or summary.lost_observer_events:
+            caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # the coroutine's awaiting or resuming frame
+            _warn_run_completion(summary, caller)
         return summary
 
     def _prepare_run(
@@ -1490,6 +1532,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         load_only: bool = False,
         unchecked_sources: tuple[str, ...] = (),
         asynchronous: bool,
+        lost_observer_events: Mapping[str, LostObserverEvents],
     ) -> RunSummary:
         """Commit the run's last writes, mark the job as run and keep its summary.
 
@@ -1503,6 +1546,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only: Whether the run loaded stored results only.
             unchecked_sources: The sources the start-of-run check could not check.
             asynchronous: Whether the async orchestrator executed the run.
+            lost_observer_events: The observer events the run could not record, by
+                observer kind.
 
         Returns:
             The run's summary, also kept as ``last_run``.
@@ -1567,6 +1612,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             ran_nothing=not plan.to_run,
             restricted_sources=restrictions_in_force(prepared.exec_dag.nodes()),
             asynchronous=asynchronous,
+            lost_observer_events=lost_observer_events,
         )
         return self._last_run
 
