@@ -21,7 +21,7 @@ from orcapod.core.sources.stream_builder import (
 )
 from orcapod.errors import InputValidationError
 from orcapod.utils import arrow_utils, polars_data_utils
-from orcapod.utils.schema_utils import _normalize_column_list
+from orcapod.utils.schema_utils import _normalize_column_list, reserved_system_names
 
 if TYPE_CHECKING:
     from polars._typing import FrameInitTypes
@@ -35,7 +35,41 @@ class _FrameRow(NamedTuple):
     value: Any
     names: tuple[str, ...]
     row_type: type
-    extras: tuple[str, ...] = ()
+    non_column_names: tuple[str, ...] = ()
+
+    @property
+    def exposed_names(self) -> tuple[str, ...]:
+        """Return declared and other field names exposed by the row."""
+        return (*self.names, *self.non_column_names)
+
+
+def _describe_model_row(value: BaseModel, index: int) -> _FrameRow:
+    """Read the model's field names without running its serialization code."""
+    model = type(value)
+    declared = model.model_fields
+    computed = model.model_computed_fields
+    if not isinstance(computed, Mapping):
+        # Older Pydantic releases exposed this on the instance.
+        computed = value.model_computed_fields
+    exposed = (
+        set(computed)
+        | {info.alias for info in computed.values() if info.alias is not None}
+        | set(value.model_extra or ())
+        | set(value.__pydantic_extra__ or ())
+        | value.model_fields_set
+        | vars(value).keys()
+    )
+    if model.model_config.get("serialize_by_alias"):
+        exposed.update(
+            field.serialization_alias
+            for field in declared.values()
+            if field.serialization_alias is not None
+        )
+    if not all(isinstance(name, str) for name in exposed):
+        raise InputValidationError(f"Source row {index} needs string field names.")
+    return _FrameRow(
+        value, tuple(declared), model, tuple(sorted(exposed - declared.keys()))
+    )
 
 
 def _describe_frame_row(value: Any, index: int) -> _FrameRow | None:
@@ -48,10 +82,7 @@ def _describe_frame_row(value: Any, index: int) -> _FrameRow | None:
             raise InputValidationError(f"Source row {index} needs string field names.")
         return _FrameRow(value if isinstance(value, dict) else dict(value), names, dict)
     if isinstance(value, BaseModel):
-        extras = tuple(value.model_extra or ())
-        return _FrameRow(
-            value, (*type(value).model_fields, *extras), type(value), extras
-        )
+        return _describe_model_row(value, index)
     if is_dataclass(value) and not isinstance(value, type):
         return _FrameRow(
             value, tuple(field.name for field in fields(value)), type(value)
@@ -71,14 +102,25 @@ def _checked_frame_rows(
     for index, row in enumerate(rows):
         if row is not None:
             try:
-                require_source_column_names(row.names, system_tag_columns)
+                require_source_column_names(row.exposed_names, system_tag_columns)
             except InputValidationError as exc:
                 raise InputValidationError(f"Source row {index}. {exc}") from exc
-            if row.extras:
+            if row.non_column_names:
                 raise InputValidationError(
-                    f"Source row {index} has extra model fields {list(row.extras)!r}. "
-                    "Declare these fields on the model or use a mapping."
+                    f"Source row {index} exposes extra or computed model fields "
+                    f"{list(row.non_column_names)!r} outside its declared columns. "
+                    "Use a mapping or a model without computed or extra fields."
                 )
+            if isinstance(row.value, BaseModel):
+                model = type(row.value)
+                if (
+                    model.model_dump is not BaseModel.model_dump
+                    or model.__pydantic_decorators__.model_serializers
+                ):
+                    raise InputValidationError(
+                        f"Source row {index} has serialized field names that cannot be "
+                        "verified from its declared model fields. Use a mapping."
+                    )
             names = set(row.names)
             if first is None:
                 first, expected = row, names
@@ -97,6 +139,23 @@ def _checked_frame_rows(
                     f"{first.names!r}) or use mappings throughout."
                 )
         yield row
+
+
+def _require_materialized_row_names(
+    rows: Sequence[_FrameRow | None], system_tag_columns: Collection[str]
+) -> None:
+    """Report all reserved names and the first row exposing one."""
+    names = {name for row in rows if row is not None for name in row.exposed_names}
+    try:
+        require_source_column_names(names, system_tag_columns)
+    except InputValidationError as exc:
+        reserved = reserved_system_names(names) - set(system_tag_columns)
+        first = next(
+            index
+            for index, row in enumerate(rows)
+            if row is not None and not reserved.isdisjoint(row.exposed_names)
+        )
+        raise InputValidationError(f"Source row {first}. {exc}") from exc
 
 
 def _frame_from_checked_rows(
@@ -163,10 +222,7 @@ def source_dataframe(
         if all(isinstance(column, pl.Series) for column in data):
             return pl.DataFrame(data)
         rows = [_describe_frame_row(row, index) for index, row in enumerate(data)]
-        require_source_column_names(
-            {name for row in rows if row is not None for name in row.names},
-            system_tag_columns,
-        )
+        _require_materialized_row_names(rows, system_tag_columns)
         return _frame_from_checked_rows(
             _checked_frame_rows(rows, system_tag_columns), materialized=True
         )
@@ -189,8 +245,9 @@ class DataFrameSource(RootSource):
     """A source backed by a Polars DataFrame (or any Polars-compatible data).
 
     Python rows must be mappings with the same keys, or dataclass or Pydantic
-    rows of one class with the same declared fields. Declare Pydantic extras as
-    fields or put them in mappings. A ``None`` row keeps its position as a null row.
+    rows of one class with the same declared fields. Put extra or computed
+    Pydantic fields in mappings, and use mappings for models with custom
+    serialization. A ``None`` row keeps its position as a null row.
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).

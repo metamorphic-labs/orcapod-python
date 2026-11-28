@@ -16,7 +16,13 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SerializerFunctionWrapHandler,
+    computed_field,
+    model_serializer,
+)
 
 from orcapod import PipelineJob
 from orcapod.contexts.stored import with_data_context
@@ -238,6 +244,21 @@ def test_csv_refuses_reserved_declared_columns_before_parsing_values(
         CSVSource(str(path), tag_columns=TAGS, tag_only_columns=True, schema=schema)
 
 
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "inferred"])
+def test_csv_refuses_reserved_header_before_parsing_bad_rows(
+    tmp_path: Path, declared: bool
+) -> None:
+    path = tmp_path / "rows.csv"
+    path.write_text(
+        '\ufeff\r\nk,x,"_foo","_source_x"\r\n1,invalid,token,source,extra\r\n'
+    )
+    schema = pa.schema([("k", pa.int64()), ("x", pa.int64())]) if declared else None
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        CSVSource(str(path), tag_columns=["k"], schema=schema)
+
+
 def _late_reserved_rows(reverse: bool) -> list[dict[str, int]]:
     rows = [{"g": 0, "k": i, "x": i + 1, "y": i + 2} for i in range(1002)]
     names = ("_foo", "_source_x")
@@ -334,6 +355,45 @@ class _FrameModel(BaseModel):
     x: int
 
 
+class _PlainFrameModel(BaseModel):
+    k: int
+    x: int
+
+
+class _ReservedComputedFrameModel(_PlainFrameModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def _foo(self) -> int:
+        return 12345
+
+
+class _ComputedFrameModel(_PlainFrameModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total(self) -> int:
+        raise AssertionError(
+            "checking the row layout must not evaluate computed fields"
+        )
+
+
+class _SerializedFrameModel(BaseModel):
+    k: int
+    x: _PlainFrameModel
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        fields = handler(self)
+        if self.k > 100:
+            fields["_foo"] = 12345
+        return fields
+
+
+def _model_with_explicit_attribute() -> _PlainFrameModel:
+    row = _PlainFrameModel(k=2, x=4)
+    object.__setattr__(row, "_raw", 12345)
+    return row
+
+
 FRAME_ROW_CASES = [
     pytest.param(
         [None]
@@ -358,6 +418,42 @@ FRAME_ROW_CASES = [
         + [_FrameModel.model_validate({"k": 101, "x": 102, "_foo": 12345})],
         "'_foo'.*drop them first",
         id="pydantic-extra",
+    ),
+    pytest.param(
+        [_ReservedComputedFrameModel(k=1, x=2)],
+        r"row 0.*'_foo'.*drop them first",
+        id="pydantic-reserved-computed",
+    ),
+    pytest.param(
+        [
+            _PlainFrameModel(k=1, x=2),
+            _PlainFrameModel(k=2, x=4).model_copy(update={"_foo": 3}),
+        ],
+        r"row 1.*'_foo'.*drop them first",
+        id="pydantic-reserved-undeclared",
+    ),
+    pytest.param(
+        [_PlainFrameModel(k=1, x=2), _model_with_explicit_attribute()],
+        r"row 1.*'_raw'.*drop them first",
+        id="pydantic-explicit-instance-attribute",
+    ),
+    pytest.param(
+        [_ComputedFrameModel(k=1, x=2)],
+        r"row 0.*'total'.*mapping",
+        id="pydantic-ordinary-computed",
+    ),
+    pytest.param(
+        [_PlainFrameModel(k=1, x=2).model_copy(update={"total": 3})],
+        r"row 0.*'total'.*mapping",
+        id="pydantic-ordinary-undeclared",
+    ),
+    pytest.param(
+        [
+            _SerializedFrameModel(k=i, x=_PlainFrameModel(k=i, x=i + 2))
+            for i in range(102)
+        ],
+        r"row 0.*serialized field names.*mapping",
+        id="pydantic-dynamic-serialization",
     ),
     pytest.param(
         [_FrameRow(i, i + 2) for i in range(101)] + [_RenamedFrameRow(101, 12345)],

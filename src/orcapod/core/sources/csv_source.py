@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import functools
+import io
 import math
 import os
 import re
@@ -28,6 +30,25 @@ from orcapod.utils.schema_utils import _normalize_column_list
 _INFINITY = re.compile(r"\s*[+-]?inf(inity)?\s*", re.IGNORECASE)
 """The texts pyarrow's CSV reader reads as an infinity: ``inf`` or ``infinity``, any
 case, with an optional sign and surrounding spaces."""
+
+
+def _require_csv_header_names(
+    stream: pa.NativeFile, system_tag_columns: Collection[str]
+) -> None:
+    """Check the first nonempty CSV record before Arrow parses any values."""
+    with io.TextIOWrapper(
+        stream,  # pyright: ignore[reportArgumentType]  # NativeFile implements the buffer methods TextIOWrapper uses.
+        encoding="utf-8-sig",
+        errors="surrogateescape",
+        newline="",
+    ) as text:
+        try:
+            names = next((row for row in csv.reader(text) if row), None)
+        except csv.Error:
+            # Let Arrow handle headers outside the text reader's limits.
+            return
+    if names is not None:
+        require_source_column_names(names, system_tag_columns)
 
 
 def _storage_type(declared: pa.DataType) -> pa.DataType:
@@ -159,6 +180,10 @@ def _read_declared(
     import pyarrow.compute as pc
     import pyarrow.csv as pa_csv
 
+    # Check the same snapshot the typed parser will receive.
+    with pa.input_stream(path) as stream:
+        data = stream.read()
+    _require_csv_header_names(pa.BufferReader(data), system_tag_columns)
     reader_types: dict[str, pa.DataType] = {}
     for field in schema:
         try:
@@ -168,8 +193,6 @@ def _read_declared(
             raise
     text_like = [f.name for f in schema if _is_text_like(f.type)]
     # One snapshot of the file, and one set of read and parse options, for every parse.
-    with pa.input_stream(path) as stream:
-        data = stream.read()
     read_options = pa_csv.ReadOptions()
     parse_options = pa_csv.ParseOptions()
     # pyarrow's default null markers, which the reader applies to other columns.
@@ -349,12 +372,15 @@ class CSVSource(RootSource):
         import pyarrow.csv as pa_csv
 
         if self._schema is None:
+            _require_csv_header_names(
+                pa.input_stream(self._access_path), self._system_tag_columns
+            )
             table: pa.Table = pa_csv.read_csv(self._access_path)
             require_supported_nullable_types(table.schema)
             require_source_column_names(table.column_names, self._system_tag_columns)
             return table.cast(arrow_utils.infer_schema_nullable(table))
-        require_supported_nullable_types(self._schema)
         require_source_column_names(self._schema.names, self._system_tag_columns)
+        require_supported_nullable_types(self._schema)
         try:
             return _read_declared(
                 self._access_path, self._schema, self._system_tag_columns

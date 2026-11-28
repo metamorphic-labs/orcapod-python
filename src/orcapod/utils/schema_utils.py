@@ -1036,6 +1036,13 @@ def schema_hash_rejected_columns_error(
     )
 
 
+def reserved_system_names(names: Iterable[str]) -> set[str]:
+    """Return the names in Orcapod's reserved column namespace."""
+    from orcapod.system_constants import constants
+
+    return {name for name in names if name.startswith(constants.DATAGRAM_PREFIX)}
+
+
 def require_names_not_system(names: Collection[str]) -> None:
     """Raise if any user column name begins with the reserved underscore.
 
@@ -1049,7 +1056,7 @@ def require_names_not_system(names: Collection[str]) -> None:
     from orcapod.system_constants import constants
 
     prefix = constants.DATAGRAM_PREFIX
-    reserved = sorted({name for name in names if name.startswith(prefix)})
+    reserved = sorted(reserved_system_names(names))
     if reserved:
         columns = ", ".join(repr(name) for name in reserved)
         raise InputValidationError(
