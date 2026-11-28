@@ -6,7 +6,7 @@ import contextlib
 import enum
 import logging
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -37,6 +37,7 @@ from orcapod.pipeline.restrictions import (
     refuse_restricted_operator_caches,
     refuse_restriction_conflicts,
     restrictions_in_force,
+    streams_beneath,
     warn_restricted_aggregation,
 )
 from orcapod.pipeline.run_summary import (
@@ -226,8 +227,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         if exc_type is None and self._auto_compile:
             self.compile()
 
-    def prepare_invocation(self, invocation: PodInvocation) -> Callable[[], None]:
-        """Prepare a step only while every compiled slot has its original binding."""
+    def _validate_capture_sources(self, streams: Iterable[cp.StreamProtocol]) -> None:
+        """Require original bindings and refuse bindable slots outside this job."""
         # ITL-1559: refuse additive capture until the relationship between captured
         # objects and slots is defined. Check at recording so a bind inside an
         # open capture context cannot bypass the rule.
@@ -247,22 +248,27 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 f"{names}. Bind them back to their original objects or build a new "
                 "job (ITL-1559)."
             )
-        if any(
-            isinstance(stream, SourceJobNode) for stream in invocation.input_streams
-        ):
-            # Each job owns its slots. Keep the binding at capture, even if the
-            # supplying slot changes before this job first compiles.
-            invocation = type(invocation)(
-                pod=invocation.pod,
-                input_streams=tuple(
-                    SourceJobNode.from_stream(stream)
-                    if isinstance(stream, SourceJobNode)
-                    else stream
-                    for stream in invocation.input_streams
-                ),
-                label=invocation.label,
-            )
-        return super().prepare_invocation(invocation)
+        # ITL-1559 stopgap: SourceJobNode has a mutable bound_source even when
+        # unbound. SourceNode only declares a name and schemas.
+        own_slots = {
+            id(node)
+            for node in self._persistent_node_map.values()
+            if isinstance(node, SourceJobNode)
+        }
+        visited: set[int] = set()
+        pending = list(streams)
+        while pending:
+            stream = pending.pop()
+            if id(stream) in visited:
+                continue
+            visited.add(id(stream))
+            if isinstance(stream, SourceJobNode) and id(stream) not in own_slots:
+                raise InconsistentSourceError(
+                    f"Capturing source slot {stream.name!r} from outside this job "
+                    "is not supported yet (ITL-1559). Pass the source itself, or "
+                    "use node.as_source() to read another job's stored results."
+                )
+            pending.extend(streams_beneath(stream))
 
     def _source_uses(self, extra: PodInvocation | None = None) -> Iterator[SourceUse]:
         """Validate actual graph leaves after a binding replaces a captured input."""

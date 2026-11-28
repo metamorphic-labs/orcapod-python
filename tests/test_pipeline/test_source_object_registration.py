@@ -839,11 +839,12 @@ def test_capture_uses_the_binding_of_the_first_compiled_slot(
 
     source = _shifted_source("a", 0)
     original = source.select_data_columns(["x", "y"])
-    recorded = (
-        SourceJobNode.from_stream(original, name="slot") if wrapped_slot else original
-    )
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
-        total.pod(recorded, label="before")
+        if wrapped_slot:
+            foreign = SourceJobNode.from_stream(original, name="slot")
+            with pytest.raises(InconsistentSourceError, match="not supported yet"):
+                total.pod(foreign, label="borrowed")
+        total.pod(original, label="before")
     (name,) = job.sources
     assert job.sources[name] is original
 
@@ -864,50 +865,6 @@ def test_capture_uses_the_binding_of_the_first_compiled_slot(
         difference.pod(original, label="after")
     job.run()
     assert sorted(job.after.as_table()["out"].to_pylist()) == [-1, -1]
-
-
-@pytest.mark.parametrize("foreign_origin", ["standalone", "job_bind", "job_setter"])
-@pytest.mark.parametrize("compile_mode", ["first", "implicit", "explicit"])
-@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
-def test_foreign_slot_binding_is_captured_by_value(
-    foreign_origin: str, compile_mode: str, orchestrator: Orchestrator
-) -> None:
-    from orcapod.core.nodes.source_node import SourceJobNode
-
-    original = _shifted_source("a", 0)
-    replacement = _shifted_source("b", 10)
-    upstream_job = None
-    if foreign_origin == "standalone":
-        foreign_slot = SourceJobNode.from_stream(original, name="a")
-    else:
-        with PipelineJob(database=InMemoryArrowDatabase()) as upstream_job:
-            total.pod(original, label="upstream")
-        foreign_slot = upstream_job.nodes["a"]
-        assert isinstance(foreign_slot, SourceJobNode)
-
-    with PipelineJob(
-        database=InMemoryArrowDatabase(), auto_compile=compile_mode != "first"
-    ) as job:
-        total.pod(foreign_slot, label="before")
-
-    if foreign_origin == "job_bind":
-        assert upstream_job is not None
-        upstream_job.bind(sources={"a": replacement})
-    else:
-        foreign_slot.bound_source = replacement
-    assert foreign_slot.bound_source is replacement
-
-    if compile_mode == "implicit":
-        with job:
-            difference.pod(original, label="after")
-    else:
-        job.compile()
-
-    job.run(orchestrator=orchestrator())
-    assert job.sources["a"] is original
-    assert sorted(job.before.as_table()["out"].to_pylist()) == [3, 7]
-    if compile_mode == "implicit":
-        assert sorted(job.after.as_table()["out"].to_pylist()) == [-1, -1]
 
 
 @pytest.mark.parametrize(
@@ -945,3 +902,169 @@ def test_nested_capture_refusal_leaves_every_job_unchanged(
 
     for job in jobs:
         assert "refused" not in job.nodes
+
+
+@pytest.mark.parametrize("foreign_origin", ["standalone", "other_job"])
+@pytest.mark.parametrize(
+    "form", ["direct", "hashed", "select", "function", "join", "invocations"]
+)
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_capture_refuses_foreign_source_slots(
+    foreign_origin: str, form: str, orchestrator: Orchestrator
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SelectDataColumns, SemiJoin
+    from orcapod.pipeline.base import InvocationGraph
+    from orcapod.pipeline.pod_invocation import FunctionInvocation
+
+    source = _shifted_source("a", 0)
+    if foreign_origin == "standalone":
+        slot = SourceJobNode.from_stream(source, name="a")
+    else:
+        with PipelineJob(database=InMemoryArrowDatabase()) as upstream:
+            total.pod(source, label="upstream")
+        slot = upstream.nodes["a"]
+        assert isinstance(slot, SourceJobNode)
+
+    original = _shifted_source("kept", 0)
+    with PipelineJob(database=InMemoryArrowDatabase()) as receiver:
+        total.pod(original, label="kept_result")
+
+    @function_pod(output_keys="scaled")
+    def scale(out: int) -> int:
+        return out * 10
+
+    prebuilt = {
+        "select": lambda: SelectDataColumns(["x", "y"])(slot),
+        "function": lambda: total.pod(slot),
+        "join": lambda: SemiJoin()(slot, _shifted_source("other", 0)),
+    }
+    if form == "invocations":
+        graph = InvocationGraph(
+            invocations=(FunctionInvocation(total.pod, (slot,), "borrowed"),),
+            source_streams={slot.content_hash().to_string(): slot},
+        )
+        with pytest.raises(InconsistentSourceError, match="not supported yet") as error:
+            PipelineJob.from_invocations(graph)
+    elif form in prebuilt:
+        stream = prebuilt[form]()
+        with (
+            receiver,
+            pytest.raises(InconsistentSourceError, match="not supported yet") as error,
+        ):
+            if form == "function":
+                scale.pod(stream, label="borrowed")
+            else:
+                total.pod(stream, label="borrowed")
+    else:
+        with (
+            receiver,
+            pytest.raises(InconsistentSourceError, match="not supported yet") as error,
+        ):
+            mid = total.pod(slot, label="borrowed")
+            if form == "hashed":
+                _ = mid.content_hash()
+            slot.bound_source = _shifted_source("changed", 10)
+            scale.pod(mid, label="downstream")
+
+    assert "'a'" in str(error.value)
+    assert "Pass the source itself" in str(error.value)
+    assert "as_source()" in str(error.value)
+    assert "ITL-1559" in str(error.value)
+    assert slot.bound_source is source
+    assert set(receiver.nodes) == {"kept", "kept_result"}
+    receiver.run(orchestrator=orchestrator())
+    assert sorted(receiver.kept_result.as_table()["out"].to_pylist()) == [3, 7]
+
+
+@pytest.mark.parametrize("owner_first", [True, False])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_foreign_slot_refusal_leaves_every_active_job_unchanged(
+    owner_first: bool, orchestrator: Orchestrator
+) -> None:
+    source = _shifted_source("a", 0)
+    with PipelineJob(database=InMemoryArrowDatabase()) as owner:
+        total.pod(source, label="before")
+    with PipelineJob(database=InMemoryArrowDatabase()) as receiver:
+        total.pod(source, label="before")
+    contexts = (owner, receiver) if owner_first else (receiver, owner)
+    with contexts[0], contexts[1]:
+        with pytest.raises(InconsistentSourceError, match="not supported yet"):
+            product.pod(owner.nodes["a"], label="borrowed")
+    for job in contexts:
+        assert set(job.nodes) == {"a", "before"}
+        job.run(orchestrator=orchestrator())
+        assert sorted(job.before.as_table()["out"].to_pylist()) == [3, 7]
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_capture_accepts_own_slots_and_another_jobs_stored_results(
+    orchestrator: Orchestrator,
+) -> None:
+    source = _shifted_source("a", 0)
+    with PipelineJob(database=InMemoryArrowDatabase()) as upstream:
+        total.pod(source, label="before")
+    with upstream:
+        product.pod(upstream.nodes["a"], label="own_slot")
+    upstream.run(orchestrator=orchestrator())
+    assert sorted(upstream.own_slot.as_table()["out"].to_pylist()) == [2, 12]
+
+    @function_pod(output_keys="scaled")
+    def scale(out: int) -> int:
+        return out * 10
+
+    with PipelineJob(database=InMemoryArrowDatabase()) as receiver:
+        with pytest.raises(InconsistentSourceError, match="not supported yet"):
+            scale.pod(upstream.before, label="borrowed")
+        scale.pod(upstream.before.as_source(), label="stored")
+    assert "borrowed" not in receiver.nodes
+    receiver.run(orchestrator=orchestrator())
+    assert sorted(receiver.stored.as_table()["scaled"].to_pylist()) == [30, 70]
+
+
+@pytest.mark.parametrize("origin", ["standalone", "pipeline", "job_blueprint"])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_schema_declaration_gives_each_job_its_own_binding(
+    origin: str, orchestrator: Orchestrator
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
+
+    original = _shifted_source("a", 0)
+    if origin == "pipeline":
+        with Pipeline("blueprint") as blueprint:
+            total.pod(original, label="result")
+        declaration = blueprint.nodes["a"]
+    elif origin == "job_blueprint":
+        with PipelineJob(database=InMemoryArrowDatabase()) as upstream:
+            total.pod(original, label="result")
+        declaration = upstream.as_pipeline().nodes["a"]
+        assert isinstance(upstream.nodes["a"], SourceJobNode)
+        assert upstream.nodes["a"].bound_source is original
+    else:
+        declaration = SourceNode.from_stream(original, name="a")
+    assert isinstance(declaration, SourceNode)
+    assert not hasattr(declaration, "bound_source")
+
+    with PipelineJob(database=InMemoryArrowDatabase()) as first:
+        total.pod(declaration, label="result")
+    first_slot = first.nodes["a"]
+    assert isinstance(first_slot, SourceJobNode)
+    assert first_slot is not declaration
+    assert first_slot.bound_source is None
+    first.bind(sources={"a": original})
+
+    with PipelineJob(database=InMemoryArrowDatabase()) as second:
+        total.pod(declaration, label="result")
+        product.pod(declaration, label="reused")
+    second_slot = second.nodes["a"]
+    assert isinstance(second_slot, SourceJobNode)
+    assert second_slot is not first_slot
+    assert second_slot.bound_source is None
+    second_slot.bound_source = _shifted_source("b", 10)
+
+    first.run(orchestrator=orchestrator())
+    second.run(orchestrator=orchestrator())
+    assert first_slot.bound_source is original
+    assert sorted(first.result.as_table()["out"].to_pylist()) == [3, 7]
+    assert sorted(second.result.as_table()["out"].to_pylist()) == [13, 17]
+    assert sorted(second.reused.as_table()["out"].to_pylist()) == [22, 52]

@@ -1567,6 +1567,11 @@ data. The rules:
   original bindings are restored. InconsistentSourceError names the changed
   slots. Restore the original bindings or build a new job. A job can compile
   and run with its replacement bindings. ITL-1559 tracks capture after rebinding.
+  As a stopgap pending ITL-1559, a job refuses another job's or a standalone
+  SourceJobNode, including through prebuilt streams. Its bound_source can change
+  even if currently unbound. Pass the source itself, or use node.as_source()
+  for another job's stored results. The job's own slots are allowed with their
+  original bindings. A schema-only SourceNode declares a new unbound slot.
   Call where() once and reuse the resulting object. A source object conflict
   raises InconsistentSourceError before the separate restriction check, which
   can see restrictions beneath wrappers.

@@ -16,7 +16,10 @@ if TYPE_CHECKING:
 @runtime_checkable
 class TrackerProtocol(Protocol):
     """
-    Records kernel invocations and stream creation for computational graph tracking.
+    Internal contract for recording invocations and stream creation.
+
+    Every tracker implements ``prepare_invocation()`` so the manager can validate
+    a capture across all active trackers before any tracker records it.
 
     Trackers are responsible for maintaining the computational graph by recording
     relationships between kernels, streams, and invocations. They enable:

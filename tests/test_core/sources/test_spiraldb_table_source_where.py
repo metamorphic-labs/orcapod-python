@@ -2244,8 +2244,8 @@ class TestOneRestrictionPerSource:
         }
 
 
-class TestRestrictionsCheckedLive:
-    """Restriction checks use the binding captured by the receiving job."""
+class TestForeignRestrictedSlots:
+    """A job refuses foreign slots even when their sources are restricted."""
 
     @staticmethod
     def _slot(source: Any) -> Any:
@@ -2254,7 +2254,7 @@ class TestRestrictionsCheckedLive:
         return SourceJobNode.from_stream(source)
 
     @pytest.mark.parametrize("step", ["select", "drop"])
-    def test_a_foreign_slot_rebound_between_invocations_keeps_its_captured_source(
+    def test_a_foreign_slot_is_refused_before_its_restriction_changes(
         self, project, tmp_path, step
     ):
         m1 = _events().where(subject_id="m1")
@@ -2265,39 +2265,38 @@ class TestRestrictionsCheckedLive:
         }[step]
         job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
-            MapData({"channel": "lane"})(slot)
+            with pytest.raises(InconsistentSourceError, match="not supported yet"):
+                MapData({"channel": "lane"})(slot)
             slot.bound_source = _events().where(subject_id="m2")
             later(m1)
         assert job.sources["events"] is m1
         assert job.run().conditions == {"events": Condition.of(subject_id="m1")}
 
-    def test_a_foreign_slot_rebound_before_compile_keeps_its_captured_source(
+    def test_a_foreign_slot_does_not_replace_a_captured_restricted_source(
         self, project, tmp_path
     ):
         m1 = _events().where(subject_id="m1")
         slot = self._slot(m1)
         job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
-            MapData({"channel": "lane"})(slot)
             m1.select_data_columns(["amplitude"])
+            with pytest.raises(InconsistentSourceError, match="not supported yet"):
+                MapData({"channel": "lane"})(slot)
             slot.bound_source = _events().where(subject_id="m2")
         assert job.sources["events"] is m1
         assert job.run().conditions == {"events": Condition.of(subject_id="m1")}
 
-    def test_an_equal_restriction_on_a_rebound_foreign_slot_conflicts_with_the_capture(
+    def test_a_foreign_slot_with_an_equal_restriction_is_refused(
         self, project, tmp_path
     ):
         m1 = _events().where(subject_id="m1")
         slot = self._slot(m1)
         job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
-            MapData({"channel": "lane"})(slot)
             replacement = _events().where(subject_id="m1")
             slot.bound_source = replacement
-            with pytest.raises(
-                InconsistentSourceError, match="distinct source objects"
-            ):
-                replacement.select_data_columns(["amplitude"])
+            with pytest.raises(InconsistentSourceError, match="not supported yet"):
+                MapData({"channel": "lane"})(slot)
             m1.select_data_columns(["amplitude"])
         assert job.sources["events"] is m1
         assert job.run().conditions == {"events": Condition.of(subject_id="m1")}
@@ -2439,14 +2438,19 @@ class TestBindingTwoSlotsOverOneSource:
         return source.select_data_columns(["amplitude", "flag"])
 
     def _job(self, tmp_path: Path) -> PipelineJob:
-        from orcapod.core.nodes.source_node import SourceJobNode
+        from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
 
         m1 = _events().where(subject_id="m1")
-        pick = SourceJobNode.from_stream(self._pick(m1), name="pick")
+        selected = self._pick(m1)
+        borrowed = SourceJobNode.from_stream(selected, name="pick")
+        pick = SourceNode.from_stream(selected, name="pick")
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
             m1.map_data({"amplitude": "a"}, label="rename")
+            with pytest.raises(InconsistentSourceError, match="not supported yet"):
+                MapData({"amplitude": "b"})(borrowed)
             MapData({"amplitude": "b"})(pick)
+        job.bind(sources={"pick": selected})
         return job
 
     @staticmethod

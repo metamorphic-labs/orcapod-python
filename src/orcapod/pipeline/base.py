@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Hashable, Iterator
+from collections.abc import Callable, Hashable, Iterable, Iterator
 from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from orcapod.core.nodes.function_node import FunctionNodeBase
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from orcapod.types.provenance import Highlight
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
     from orcapod.pipeline.source_consistency import SourceUse
+    from orcapod.protocols.core_protocols import StreamProtocol
 else:
     nx = LazyModule("networkx")
 
@@ -321,6 +323,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
     def _record_invocation(self, invocation: PodInvocation) -> None:
         self.prepare_invocation(invocation)()
 
+    def _validate_capture_sources(self, streams: Iterable[StreamProtocol]) -> None:
+        """Check the streams of a new capture before recording it."""
+
     def prepare_invocation(self, invocation: PodInvocation) -> Callable[[], None]:
         """Validate *invocation* and prepare to update the topology graph.
 
@@ -354,8 +359,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         """
         from orcapod.pipeline.restrictions import require_one_restriction
 
-        key = invocation.content_hash().to_string()
         inputs = tuple(invocation.input_streams)
+        self._validate_capture_sources(inputs)
+        key = invocation.content_hash().to_string()
         input_keys = tuple(upstream.content_hash().to_string() for upstream in inputs)
         # Checked before anything is recorded, so a refused invocation leaves the
         # graph as it was. A restriction does not change a source's identity, so the
@@ -825,6 +831,14 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             A compiled instance of ``cls``.
         """
         instance = cls(name=name)
+        instance._validate_capture_sources(
+            chain(
+                graph.source_streams.values(),
+                chain.from_iterable(
+                    invocation.input_streams for invocation in graph.invocations
+                ),
+            )
+        )
         require_consistent_sources(
             use
             for invocation in graph.invocations

@@ -103,6 +103,14 @@ Three more things a job node offers:
   the node has run in this process, to use as the input of another pipeline.
 - **`upstreams`** and **`label`** let you walk the pipeline backwards.
 
+As a stopgap pending ITL-1559, a job cannot absorb steps from another job by
+capturing compiled nodes or other streams that depend on the other job's
+bindable source slots (`SourceJobNode`). The same restriction applies to
+standalone `SourceJobNode` objects, even when unbound. Pass the source itself to
+record a new chain, or use `node.as_source()` to read the stored results of an
+earlier job. A job can use its own slots while their original bindings are in
+place. A schema-only `SourceNode` declares an independent slot for each job.
+
 ## The database
 
 Any Orcapod database can hold a job's results. Two are used most:
