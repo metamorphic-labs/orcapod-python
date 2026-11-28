@@ -432,15 +432,22 @@ class ConnectorArrowDatabase:
         """Read the committed or queued schema without fetching rows.
 
         Raises:
-            OrcapodDatabaseReadError: If the connector cannot inspect the schema.
+            ValueError: If a SQL store is given a path that names no table (an
+                empty component, or one holding ``/`` or ``\0``), as
+                ``table_exists`` and ``get_all_records`` raise for it.
+            OrcapodDatabaseReadError: If the connector cannot inspect the schema
+                of a table that exists.
         """
         full_path = self._path_prefix + record_path
         table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
+        # Outside the ``try``: an invalid path is no table, so its refusal must
+        # not be reported as a stored table that could not be read.
+        record_key = self._get_record_key(record_path)
         try:
             table = self._find_committed_table(table_name, full_path)
             if table is None:
-                pending = self._pending_batches.get(self._get_record_key(record_path))
+                pending = self._pending_batches.get(record_key)
                 return None if pending is None else pending.schema
             schema, name = table
             return pa.schema(

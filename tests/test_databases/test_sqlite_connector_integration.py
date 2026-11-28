@@ -63,6 +63,33 @@ def _check_sql_listing_normalizes_subclass_prefix(
     assert db.list_table_paths((OddString("same"),)) == [("same", "child")]
 
 
+@pytest.mark.parametrize("path", [("a/b",), ("",), ("a", "b\0c")])
+def test_sql_schema_read_refuses_an_invalid_path_as_the_other_reads_do(
+    db: ConnectorArrowDatabase, path: tuple[str, ...]
+) -> None:
+    """An invalid path names no table, so no read may say that a table exists.
+
+    Every read of a SQL store refuses such a path with the same ``ValueError``;
+    ``get_table_schema`` used to report it as a stored table it could not read.
+    """
+    db.add_record(("a", "b"), b"id", pa.table({"value": [10]}), flush=True)
+
+    with pytest.raises(ValueError, match="Path component") as schema_error:
+        db.get_table_schema(path)
+    with pytest.raises(ValueError, match="Path component") as exists_error:
+        db.table_exists(path)
+    with pytest.raises(ValueError, match="Path component") as records_error:
+        db.get_all_records(path)
+
+    assert not isinstance(schema_error.value, OrcapodDatabaseError)
+    assert "exists" not in str(schema_error.value)
+    assert str(schema_error.value) == str(exists_error.value)
+    assert str(schema_error.value) == str(records_error.value)
+    stored = db.get_table_schema(("a", "b"))
+    assert stored is not None and stored.field("value").type == pa.int64()
+    assert db.get_table_schema(("missing",)) is None
+
+
 @pytest.mark.parametrize("scoped", [False, True])
 def test_sql_path_rejects_hidden_separator(
     db: ConnectorArrowDatabase, scoped: bool
