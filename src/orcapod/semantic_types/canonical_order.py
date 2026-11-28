@@ -20,6 +20,11 @@ The order is defined on storage values (what the converter produces):
 
 Keys or elements that cannot be ordered against each other, and two keys or elements
 with the same storage value, raise ``CanonicalOrderError``.
+
+A dict key is compared as it is stored (ITL-924): a Python ``float`` key of a
+``dict[np.float32, V]`` is narrowed to ``float32`` first
+(``float_narrowing.stored_key_converter``), so ``1e-50`` and ``2e-50``, both stored as
+``0.0``, are two keys with the same storage value and raise, naming both.
 """
 
 from __future__ import annotations
@@ -28,12 +33,13 @@ import math
 import numbers
 import types
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from decimal import Decimal
 from itertools import pairwise
 from typing import Any, TypeVar, cast, get_args, get_origin
 
 from orcapod.errors import CanonicalOrderError
+from orcapod.semantic_types.float_narrowing import stored_key_converter
 
 _T = TypeVar("_T")
 
@@ -67,27 +73,49 @@ def _is_nan(value: object) -> bool:
     return False
 
 
-def _sorted_by_rank(items: list[tuple[_Rank, _T]]) -> list[_T]:
+def _sorted_by_rank(
+    items: list[tuple[_Rank, _T]], given_keys: Iterable[object] | None = None
+) -> list[_T]:
     """Sort ``(rank, payload)`` pairs by rank and return the payloads.
+
+    Args:
+        items: The pairs to sort.
+        given_keys: For the entries of a dict, the keys as they were given, one per
+            item in the order of ``items``. They are read only to describe two keys
+            with one stored value.
 
     Raises:
         CanonicalOrderError: If two ranks cannot be compared or are equal.
     """
     try:
-        items = sorted(items, key=lambda item: item[0])
+        order = sorted(range(len(items)), key=lambda index: items[index][0])
     except TypeError as exc:
         raise CanonicalOrderError(f"values cannot be ordered: {exc}") from exc
-    for (previous, _), (current, payload) in pairwise(items):
-        if previous == current:
-            raise CanonicalOrderError(f"duplicate key or set element: {payload!r}")
-    return [payload for _, payload in items]
+    for first, second in pairwise(order):
+        if items[first][0] == items[second][0]:
+            if given_keys is None:
+                raise CanonicalOrderError(
+                    f"duplicate key or set element: {items[second][1]!r}"
+                )
+            keys = list(given_keys)
+            stored = items[first][0][-1]
+            raise CanonicalOrderError(
+                f"duplicate key: the keys {keys[first]!r} and {keys[second]!r} are "
+                f"both stored as {stored!r}, so one entry would be lost"
+            )
+    return [items[index][1] for index in order]
 
 
-def sort_dict_entries(entries: list[dict[str, _T]]) -> list[dict[str, _T]]:
+def sort_dict_entries(
+    entries: list[dict[str, _T]], given_keys: Iterable[object] | None = None
+) -> list[dict[str, _T]]:
     """Return converted entries ``{"key": ..., "value": ...}`` in canonical key order.
 
     Args:
-        entries: The entries of one dict value, as the converter produces them.
+        entries: The entries of one dict value, as the converter produces them, with
+            each key as it is stored.
+        given_keys: The keys as they were given, one per entry in the order of
+            ``entries``; named when two of them have one stored value.
 
     Returns:
         A new list holding the same entries, sorted by key.
@@ -96,7 +124,9 @@ def sort_dict_entries(entries: list[dict[str, _T]]) -> list[dict[str, _T]]:
         CanonicalOrderError: For a NaN key, keys that cannot be ordered against each
             other, or two keys with the same storage value.
     """
-    return _sorted_by_rank([(_key_rank(entry["key"]), entry) for entry in entries])
+    return _sorted_by_rank(
+        [(_key_rank(entry["key"]), entry) for entry in entries], given_keys
+    )
 
 
 def sort_set_elements(elements: list[_T]) -> list[_T]:
@@ -151,7 +181,7 @@ def canonical_python_value(
         return canonical_python_value(value, non_none[0], key_converter)
     if origin is dict and len(args) == 2 and isinstance(value, dict):
         original = cast(dict[object, object], value)
-        to_storage = key_converter(args[0])
+        to_storage = stored_key_converter(args[0], key_converter(args[0]))
         items = [
             (
                 _key_rank(to_storage(k)),
@@ -159,7 +189,7 @@ def canonical_python_value(
             )
             for k, v in original.items()
         ]
-        ordered = _sorted_by_rank(items)
+        ordered = _sorted_by_rank(items, original)
         unchanged = all(
             new_k is old_k and new_v is old_v
             for (new_k, new_v), (old_k, old_v) in zip(ordered, original.items())

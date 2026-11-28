@@ -33,6 +33,11 @@ from orcapod.errors import (
     SubMicrosecondDatetimeError,
     UnsupportedValueError,
 )
+from orcapod.semantic_types.float_narrowing import (
+    narrower_float_width,
+    noting_narrowed_floats,
+    stored_key_converter,
+)
 from orcapod.semantic_types.canonical_order import (
     sort_dict_entries,
     sort_set_elements,
@@ -1900,6 +1905,12 @@ class UniversalTypeConverter:
             # Preserve the Python object in memory; encode its declared base here.
             return lambda value: int(value) if isinstance(value, bool) else value
 
+        narrow_width = narrower_float_width(python_type)
+        if narrow_width is not None:
+            # A Python float given for a narrower float type is stored as Arrow
+            # narrows it; the converter only reports it, once per process (ITL-924).
+            return noting_narrowed_floats(typing.cast(type, python_type), narrow_width)
+
         if python_type in {int, float, str, bool, bytes} or origin is None:
             # Basic types - no conversion needed
             return lambda value: value
@@ -1921,7 +1932,11 @@ class UniversalTypeConverter:
             return convert_list
 
         elif origin is dict:
-            key_converter = self.get_python_to_arrow_converter(args[0])
+            # Each key as it is stored, so keys that become one stored key are seen
+            # as duplicates (ITL-924).
+            key_converter = stored_key_converter(
+                args[0], self.get_python_to_arrow_converter(args[0])
+            )
             value_converter = self.get_python_to_arrow_converter(args[1])
 
             # A dict is order independent: entries are stored in canonical key order
@@ -1933,7 +1948,8 @@ class UniversalTypeConverter:
                     [
                         {"key": key_converter(k), "value": value_converter(v)}
                         for k, v in value.items()
-                    ]
+                    ],
+                    given_keys=value,
                 )
 
             return convert_dict

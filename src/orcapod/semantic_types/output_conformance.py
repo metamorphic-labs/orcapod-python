@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from orcapod.errors import type_text
 from orcapod.logical_types import user_class_identity
+from orcapod.semantic_types.float_narrowing import narrows_float
 from orcapod.logical_types.user_class_logical_type import UserClassLogicalType
 
 if typing.TYPE_CHECKING:
@@ -306,8 +307,7 @@ class _Checker:
             if actual_kind != "f":
                 return Nonconformance("", declared, value)
             declared_width = numpy_type[1] if numpy_type else 8
-            actual_width = scalar[1] if scalar else 8
-            if actual_width > declared_width:
+            if narrows_float(value, declared_width):
                 return self.near(NearMiss.FLOAT_NARROWING, value, declared)
         if type(value) is declared or (numpy_type is None and scalar is None):
             return None
