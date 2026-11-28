@@ -80,7 +80,7 @@ These messages are harmless.
 
 - `ProvisionalHashWarning: Filter is provisional: its identity is not frozen ...`, once per
   Python session for each provisional step you use: `filter`, `group_by`, `batch`,
-  `MergeJoin`, `polars_filter` and `as_source()` in this tutorial. The step works; what may still
+  `MergeJoin` and `as_source()` in this tutorial. The step works; what may still
   change is the identity Orcapod gives it. If a later release changes it, the results of
   that step and of every step after it are computed again instead of reused; nothing stored is lost
   or wrong. See [Provisional operators](../concepts/operators.md#provisional-operators).
