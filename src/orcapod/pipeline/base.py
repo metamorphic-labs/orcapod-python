@@ -10,6 +10,14 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from orcapod.core.nodes.function_node import FunctionNodeBase
+from orcapod.core.nodes.source_node import (
+    SourceJobNode,
+    SourceNodeBase,
+    SourceSlotDeclaration,
+    source_slot_name,
+)
+from orcapod.core.sources.base import RootSource
+from orcapod.errors import InconsistentSourceError, SourceSlotNameCollisionError
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.pipeline.pod_invocation import (
@@ -44,38 +52,22 @@ NodeT = TypeVar("NodeT", bound=Hashable)
 def _refuse_sources_sharing_a_slot_name(
     slot_name: str, streams: list[cp.StreamProtocol]
 ) -> None:
-    """Refuse two different sources that would take one slot name (ITL-1425).
+    """Report a shared name with the datasets each input uses, when available."""
+    from orcapod.pipeline.restrictions import source_name
 
-    A slot is named by its source's name, without the kind part, so two different
-    sources whose names are equal (a SQLite table ``data.db:main.records`` and a CSV
-    file at that path; Arrow and data frame sources over one table with default ids)
-    would share one ``job.sources`` and ``bind`` key, and one would replace the other.
-    Only sources are refused here: a slot of another stream is named by its label and
-    content hash.
-
-    Sources with one source id and schema whose key columns differ never get here:
-    ``require_consistent_sources`` refuses them first (ITL-1506).
-
-    Raises:
-        SourceSlotNameCollisionError: Naming every full source id and the remedy.
-    """
-    from orcapod.core.sources.base import RootSource
-
-    sources = [s for s in streams if isinstance(s, RootSource)]
-    if len(sources) < 2:
-        return
-    from orcapod.errors import SourceSlotNameCollisionError
-
-    ids = sorted({s.source_id for s in sources})
-    described = (
-        ", ".join(repr(i) for i in ids)
-        if len(ids) > 1
-        else f"{ids[0]!r} ({len(sources)} sources with other key columns or rows)"
-    )
+    sources = []
+    for stream in streams:
+        if isinstance(stream, SourceSlotDeclaration):
+            stream = stream.initial_source
+        elif isinstance(stream, SourceJobNode) and stream.bound_source is not None:
+            stream = stream.bound_source
+        if isinstance(stream, RootSource):
+            sources.append(source_name(stream))
+    described = ", ".join(repr(source) for source in sorted(sources))
     raise SourceSlotNameCollisionError(
-        f"{len(sources)} different sources would take the slot name {slot_name!r}: "
-        f"{described}. A slot is named by the source's name without its kind part; "
-        "give each source its own name with source_id=... when it is built."
+        f"Multiple inputs would take the slot name {slot_name!r}"
+        f"{': ' + described if described else ''}. "
+        "Assign a label or use as_slot('...') to give each slot its own name."
     )
 
 
@@ -139,6 +131,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         self._invocation_input_keys: dict[str, tuple[str, ...]] = {}
         # Maps content-hash-string → raw stream for each unregistered upstream.
         self._source_streams: dict[str, Any] = {}
+        self._captured_slot_names: dict[str, str] = {}
         # Topology graph — vertices and edges are content-hash strings.
         # Additive: persists and grows across multiple with-blocks.
         self._hash_graph: "nx.DiGraph" = nx.DiGraph()
@@ -373,7 +366,23 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         require_consistent_sources(uses)
         require_one_restriction(stream for _, stream in uses)
 
+        slot_names: dict[str, str] = {}
+        for upstream, upstream_key in zip(inputs, input_keys, strict=True):
+            if upstream_key in self._invocation_lut:
+                continue
+            name = source_slot_name(upstream)
+            previous = self._captured_slot_names.get(upstream_key)
+            if previous is None:
+                previous = slot_names.get(upstream_key)
+            if previous is not None and previous != name:
+                raise InconsistentSourceError(
+                    f"One source identity would fill slots {previous!r} and {name!r}. "
+                    "Use a single slot for this source (ITL-1559)."
+                )
+            slot_names[upstream_key] = name
+
         def record() -> None:
+            self._captured_slot_names.update(slot_names)
             self._remember_invocation(key, invocation, input_keys)
             self._hash_graph.add_node(key)
             for upstream, upstream_hash in zip(inputs, input_keys, strict=True):
@@ -405,7 +414,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
     def _source_node_from_recording(self, key: str) -> Any:
         """Create the source node for a recorded leaf."""
-        return self.source_node_class.from_stream(self._source_streams[key])
+        return self.source_node_class.from_stream(
+            self._source_streams[key], name=self._captured_slot_names.get(key)
+        )
 
     # ------------------------------------------------------------------
     # Diagram (ITL-1197)
@@ -555,50 +566,15 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             sorted(sources, key=lambda item: (item[1].label, item[0]))
         )
 
-        # 2. Validate source-node name uniqueness.
-        # Source node names are identity-forming (used as bind() keys and
-        # included in content_hash()).  Two distinct source nodes with the
-        # same name are refused: with different schemas by InconsistentSourceError,
-        # and when two or more are sources (RootSource), whatever their schemas, by
-        # SourceSlotNameCollisionError (ITL-1425: a slot is named by the source's
-        # name without its kind part, so another kind, version, key or id would
-        # otherwise share the slot). Only streams that are not sources, with equal
-        # schemas and colliding label:hash names, are left as they are.
+        # 2. No two inputs may claim the same binding key.
         name_to_hashes: dict[str, list[str]] = {}
-        for h, node in node_map.items():
-            name_to_hashes.setdefault(node._name, []).append(h)
-        for node_name, hashes in name_to_hashes.items():
-            if len(hashes) <= 1:
-                continue
-            nodes = [node_map[h] for h in hashes]
-            first = nodes[0]
-            schemas_differ = any(
-                n._tag_schema != first._tag_schema
-                or n._data_schema != first._data_schema
-                for n in nodes[1:]
-            )
-            if schemas_differ:
-                from orcapod.errors import InconsistentSourceError
-
-                from orcapod.core.sources.base import RootSource
-
-                ids = sorted(
-                    {
-                        s.source_id
-                        for s in (self._source_streams[h] for h in hashes)
-                        if isinstance(s, RootSource)
-                    }
+        for key, node in node_map.items():
+            name_to_hashes.setdefault(node.name, []).append(key)
+        for name, keys in name_to_hashes.items():
+            if len(keys) > 1:
+                _refuse_sources_sharing_a_slot_name(
+                    name, [self._source_streams[key] for key in keys]
                 )
-                named = f" ({', '.join(repr(i) for i in ids)})" if ids else ""
-                raise InconsistentSourceError(
-                    f"Pipeline '{'.'.join(self._name)}' has {len(hashes)} source "
-                    f"nodes all named {node_name!r}{named} but with different "
-                    f"schemas. Assign distinct source_id values to the conflicting "
-                    f"sources so each slot has a unique, stable identity."
-                )
-            _refuse_sources_sharing_a_slot_name(
-                node_name, [self._source_streams[h] for h in hashes]
-            )
 
         # 3. Topological pass with independent invocations ordered by hash.
         for key in _nx.lexicographical_topological_sort(self._hash_graph):
@@ -635,6 +611,17 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         reserved_names = set(name_candidates)
         for label, nodes in name_candidates.items():
             if len(nodes) > 1:
+                if label in name_to_hashes:
+                    steps = [
+                        node for node in nodes if not isinstance(node, SourceNodeBase)
+                    ]
+                    if any(node._label is not None for node in steps):
+                        raise SourceSlotNameCollisionError(
+                            f"An explicit step label conflicts with source slot {label!r}. "
+                            "Give the step a different label, or assign a label or use "
+                            "as_slot('...') to give the slot another name."
+                        )
+                    nodes = steps
                 explicitly_named = [node for node in nodes if node._label is not None]
                 if len(explicitly_named) == 1:
                     # A computed label can coincide with an otherwise unique explicit one.
@@ -650,6 +637,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                     node._label = key
                     i += 1
 
+        for _, slot in sources:
+            slot.freeze_slot_name()
         node_map = self._ordered_node_map(node_map, self._hash_graph)
         self._persistent_node_map = node_map
         self._nodes.clear()
@@ -854,6 +843,11 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             instance._hash_graph.add_node(key)
             for input_key in input_keys:
                 instance._hash_graph.add_edge(input_key, key)
+        instance._captured_slot_names = {
+            key: source_slot_name(stream)
+            for key, stream in graph.source_streams.items()
+            if key not in instance._invocation_lut
+        }
         # Also add source hashes as isolated nodes (no incoming edges)
         for h in graph.source_streams:
             if h not in instance._hash_graph:

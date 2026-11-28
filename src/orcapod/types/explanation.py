@@ -68,6 +68,7 @@ class SourceReading:
         condition: The condition the source applies itself (``where``), empty for none.
         limit: The source's row limit, ``None`` for none.
         steps: The steps above the source that drop rows of it, nearest the source first.
+        slot_name: The graph slot the source fills, if any.
     """
 
     name: str
@@ -77,6 +78,7 @@ class SourceReading:
     condition: Condition
     limit: int | None
     steps: tuple[Step, ...]
+    slot_name: str | None = None
 
     def lines(self) -> list[str]:
         """Return the reading as text lines (``Explanation.text``)."""
@@ -100,8 +102,14 @@ class SourceReading:
             applied = ", ".join(parts)
         else:
             applied = "nothing (the whole table is read)"
+        title = f"source {self.name!r} ({self.kind})"
+        if self.slot_name is not None:
+            title = (
+                f"slot {plain_repr(self.slot_name)} "
+                f"({self.kind}, source id: {plain_repr(self.name)})"
+            )
         return [
-            f"source {self.name!r} ({self.kind})",
+            title,
             f"  applied by the source: {applied}",
             f"  applied after reading: {after}",
         ]

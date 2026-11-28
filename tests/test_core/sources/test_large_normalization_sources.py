@@ -26,7 +26,7 @@ from orcapod.core.sources import (
 )
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import InputValidationError, SourceSpecMismatchError
+from orcapod.errors import InputValidationError
 from orcapod.operators import SelectTagColumns
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
@@ -87,9 +87,8 @@ def test_job_nodes_have_no_non_large_type(
 
 @pytest.mark.parametrize("n_rows", [2, 0])
 def test_raw_stream_is_refused_as_a_job_input(n_rows: int, tmp_path: Path) -> None:
-    """A raw ``ArrowTableStream`` has no system tags, so a job refuses it as an input
-    (ITL-1126) and says to wrap its table as a source; binding one is ITL-1127."""
-    with pytest.raises(SourceSpecMismatchError, match="wrap its table as a source"):
+    """A raw stream needs an explicit source before a job can capture it."""
+    with pytest.raises(ValueError, match=r"ArrowTableSource .*ITL-1559"):
         _job_node_tables(build_source(RAW_STREAM, n_rows, tmp_path), "sync")
 
 

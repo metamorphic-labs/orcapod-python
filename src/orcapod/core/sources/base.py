@@ -28,6 +28,7 @@ from orcapod.utils.provisional import note_provisional_use, provisional_class_na
 from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
+    from orcapod.core.nodes.source_node import SourceNode
     import pyarrow as pa
 
     from orcapod.core.sources.cached_source import CachedSource
@@ -261,6 +262,19 @@ class RootSource(StreamBase):
         if self._source_name is None:
             raise ValueError("the source has no name yet")
         return self._source_name
+
+    def as_slot(self, name: str | None = None) -> "SourceNode":
+        """Declare a named input for a pipeline step.
+
+        Args:
+            name: Slot name. Defaults to this source's label.
+
+        Returns:
+            A declaration from which a job creates its own slot and binding.
+        """
+        from orcapod.core.nodes.source_node import SourceSlotDeclaration
+
+        return SourceSlotDeclaration(self, name)
 
     def _source_id_config(self) -> dict[str, Any]:
         """The saved form of the source id: name and version apart (ITL-1425).

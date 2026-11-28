@@ -79,7 +79,9 @@ def _one_line(text: str) -> str:
     return "".join(ascii(c)[1:-1] if c in _LINE_BREAKS else c for c in text)
 
 
-def labelled_source(stream: Any) -> LabelledSource | None:
+def labelled_source(
+    stream: Any, *, slot_name: str | None = None
+) -> LabelledSource | None:
     """Return the source as a display names it, or ``None`` when it has no label.
 
     ``None`` for a stream that is no source, a source with no assigned label and a
@@ -89,30 +91,38 @@ def labelled_source(stream: Any) -> LabelledSource | None:
 
     Args:
         stream: The source, or any stream bound to a slot.
+        slot_name: The captured label to show when the source fills a slot.
     """
     try:
-        return _labelled_source(stream)
+        return _labelled_source(stream, slot_name)
     except Exception:  # noqa: BLE001  # a display never changes an outcome
         return None
 
 
-def _labelled_source(stream: Any) -> LabelledSource | None:
+def _labelled_source(stream: Any, slot_name: str | None) -> LabelledSource | None:
     from orcapod.core.sources.base import RootSource
     from orcapod.core.sources.cached_source import CachedSource
     from orcapod.core.sources.source_ids import build_source_id
     from orcapod.core.sources.source_proxy import SourceProxy
 
-    if not _is_a(stream, RootSource) or _is_a(stream, SourceProxy):
+    if not _is_a(stream, RootSource):
         return None
-    label = _one_line(_stored_text(stream, "_label"))
+    label = _one_line(slot_name or _stored_text(stream, "_label"))
     if not label:
         return None
     source: Any = stream
     while type(source) is CachedSource:
         source = _stored(source).get("_source")
     # A cache accepts any source-like object; only a root source holds a name to show.
-    if not _is_a(source, RootSource) or _is_a(source, SourceProxy):
+    if not _is_a(source, RootSource):
         return None
+    if _is_a(source, SourceProxy):
+        source_id = _stored_text(source, "_saved_source_id") if slot_name else ""
+        return (
+            LabelledSource(label, source_id, ("", "", "", "", source_id))
+            if source_id
+            else None
+        )
     name = _stored_text(source, "_source_name")
     if not name:
         return None
@@ -178,22 +188,22 @@ def display_names(
 
 
 def node_display_names(nodes: Iterable[Any]) -> dict[str, tuple[str, str]]:
-    """Return the text and full source id of each source node shown by its source's label.
+    """Return the slot label and known source id for each bound source node.
 
     Args:
         nodes: The nodes of one pipeline or job.
 
     Returns:
-        ``(text, source id)`` by node label, for the nodes whose bound source has an
-        assigned label; a node given a label of its own, an unbound slot and every other
-        node is not listed (it is shown by its own label).
+        Display text and dataset id keyed by the slot's label.
     """
     all_nodes = list(nodes)
     found: dict[str, LabelledSource] = {}
     for node in all_nodes:
-        if node.node_type != "source" or node.has_assigned_label:
+        if node.node_type != "source":
             continue
-        source = labelled_source(getattr(node, "bound_source", None))
+        source = labelled_source(
+            getattr(node, "bound_source", None), slot_name=node.label
+        )
         if source is not None:
             found[node.label] = source
     texts = display_names(found, {node.label for node in all_nodes})

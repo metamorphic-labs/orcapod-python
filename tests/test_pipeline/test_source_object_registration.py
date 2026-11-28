@@ -58,11 +58,16 @@ def _source(
             + "".join(",".join(str(row[col]) for col in columns) + "\n" for row in rows)
         )
         return CSVSource(
-            str(path), source_id=name, tag_columns=tags, tag_only_columns=True
+            str(path),
+            source_id=name,
+            label=name,
+            tag_columns=tags,
+            tag_only_columns=True,
         )
     return DictSource(
         [{col: row[col] for col in columns} for row in rows],
         source_id=name,
+        label=name,
         tag_columns=tags,
         tag_only_columns=True,
     )
@@ -73,6 +78,7 @@ def _shifted_source(name: str, offset: int) -> DictSource:
     return DictSource(
         [{**row, "x": int(row["x"]) + offset} for row in ROWS],
         source_id=name,
+        label=name,
         tag_columns=["t1", "t2"],
         tag_only_columns=True,
     )
@@ -219,50 +225,15 @@ def test_load_refuses_one_source_id_with_different_key_columns(
 
 
 @pytest.mark.parametrize("slots", [("a", "b"), ("c", "b", "a")])
-@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
-def test_load_reuses_one_object_for_identical_saved_configs(
-    tmp_path: Path, slots: tuple[str, ...], orchestrator: Orchestrator
+def test_bind_refuses_one_source_in_several_slots(
+    tmp_path: Path, slots: tuple[str, ...]
 ) -> None:
     job = _job(tmp_path, slots)
-    db = InMemoryArrowDatabase()
+    original = job.sources
     source = _source(tmp_path, "csv", "shared")
-    job.bind(database=db, sources=dict.fromkeys(slots, source))
-    job.run(orchestrator=orchestrator())
-    path = tmp_path / "job.json"
-    job.save(path)
-    saved = json.loads(path.read_text())
-    configs = saved["bindings"]["sources"]
-    assert all(configs[name] == configs[slots[0]] for name in slots)
-
-    loaded = PipelineJob.load(path, database=db)
-    shared = loaded.sources[slots[0]]
-    for name in slots:
-        assert loaded.sources[name] is shared
-    copied = tmp_path / "copied.json"
-    loaded.save(copied)
-    assert copied.read_bytes() == path.read_bytes()
-
-    def rows(graph: PipelineJob, name: str) -> list[dict[str, Any]]:
-        return graph.nodes[name].as_table(columns={"sort_by_tags": True}).to_pylist()
-
-    stored = {
-        table_path: db.get_all_records(table_path)
-        for table_path in db.list_table_paths()
-    }
-    loaded.run(orchestrator=orchestrator(), load_only=True)
-    for name in slots:
-        assert rows(loaded, name) == ROWS
-        assert rows(loaded, f"result_{name}") == rows(job, f"result_{name}")
-    assert {
-        table_path: db.get_all_records(table_path)
-        for table_path in db.list_table_paths()
-    } == stored
-
-    replacement = _source(tmp_path, "csv", "replacement")
-    loaded.bind(sources={slots[0]: replacement})
-    assert loaded.sources[slots[0]] is replacement
-    for name in slots[1:]:
-        assert loaded.sources[name] is shared
+    with pytest.raises(InconsistentSourceError, match="ITL-1559"):
+        job.bind(sources=dict.fromkeys(slots, source))
+    assert all(job.sources[name] is original[name] for name in slots)
 
 
 @pytest.mark.parametrize("reverse_keys", [False, True])
@@ -284,26 +255,32 @@ def test_load_shares_repeated_configs_written_by_main(
         path = tmp_path / "reordered.json"
         path.write_text(json.dumps(saved))
 
-    job = PipelineJob.load(path)
+    job = PipelineJob.load(path, database=InMemoryArrowDatabase())
     assert job.sources["a"] is job.sources["b"]
     assert job.nodes["a"].as_table().to_pylist() == ROWS
     assert job.nodes["b"].as_table().to_pylist() == ROWS
+    copied = tmp_path / "copied.json"
+    job.save(copied)
+    copy = PipelineJob.load(copied, database=InMemoryArrowDatabase())
+    assert copy.sources["a"] is copy.sources["b"]
+    for orchestrator in ORCHESTRATORS:
+        with pytest.raises(InconsistentSourceError, match="ITL-1559"):
+            copy.run(orchestrator=orchestrator(), load_only=True)
+    replacement = _source(tmp_path, "csv", "replacement")
+    copy.bind(sources={"a": replacement})
+    assert copy.sources["a"] is replacement
+    assert copy.sources["b"] is copy.nodes["b"].bound_source
 
 
-def test_itl_1554_loading_shared_slots_feeding_the_same_pod(tmp_path: Path) -> None:
-    """Record the existing read-only DAG failure for this shared-source topology."""
-    db = InMemoryArrowDatabase()
-    with PipelineJob(database=db) as job:
+def test_slots_feeding_the_same_pod_refuse_equal_live_identity(tmp_path: Path) -> None:
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
         for slot in ("a", "b"):
             total.pod(_source(tmp_path, "dict", slot), label=f"total_{slot}")
     source = _source(tmp_path, "csv", "shared")
-    job.bind(sources={"a": source, "b": source})
-    job.run()
-    path = tmp_path / "job.json"
-    job.save(path)
-
-    with pytest.raises(NotImplementedError, match="StreamBase.identity_structure"):
-        PipelineJob.load(path, database=db)
+    with pytest.raises(InconsistentSourceError, match="ITL-1559"):
+        job.bind(sources={"a": source, "b": source})
+    assert job.sources["a"].source_id == "dict_v1:a"
+    assert job.sources["b"].source_id == "dict_v1:b"
 
 
 @pytest.mark.parametrize("kind", ["equal", "different", "csv"])
@@ -837,8 +814,7 @@ def test_capture_uses_the_binding_of_the_first_compiled_slot(
 ) -> None:
     from orcapod.core.nodes.source_node import SourceJobNode
 
-    source = _shifted_source("a", 0)
-    original = source.select_data_columns(["x", "y"])
+    original = _shifted_source("a", 0)
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
         if wrapped_slot:
             foreign = SourceJobNode.from_stream(original, name="slot")
@@ -848,7 +824,7 @@ def test_capture_uses_the_binding_of_the_first_compiled_slot(
     (name,) = job.sources
     assert job.sources[name] is original
 
-    replacement = source.select_data_columns(["x", "y"])
+    replacement = _shifted_source("a", 0)
     assert (
         replacement is not original
         and replacement.content_hash() == original.content_hash()

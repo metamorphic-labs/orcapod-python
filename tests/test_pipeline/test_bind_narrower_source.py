@@ -791,20 +791,16 @@ def test_a_refused_joined_stream_keeps_the_previous_binding() -> None:
 
 
 def test_a_pipeline_built_over_a_raw_stream_is_refused() -> None:
-    """A raw stream as a pipeline's input is refused, telling the user what to do.
-
-    Developer, November 14, 2026: refuse a pipeline built directly over a stream
-    without system tags until a raw stream is captured into a source (ITL-1127).
-    """
+    """A raw stream as a pipeline's input is refused with a source remedy."""
     raw = _raw_stream(x_nullable=True)
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
-    with pytest.raises(SourceSpecMismatchError) as raised:
+    with pytest.raises(ValueError) as raised:
         with job:
             _ = MapData({"x": "y"})(raw, label="renamed")
     message = str(raised.value)
-    assert "exactly one source-id and one record-id" in message
-    assert "ArrowTableSource(stream.as_table(), tag_columns=[...])" in message
-    assert "ITL-1127" in message
+    assert "node.as_source()" in message
+    assert "ArrowTableSource" in message
+    assert "ITL-1559" in message
 
 
 def test_a_raw_streams_table_wrapped_as_the_error_advises_runs() -> None:

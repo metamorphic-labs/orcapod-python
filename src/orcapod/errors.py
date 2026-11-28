@@ -761,13 +761,7 @@ class CachedSourceIdMismatchError(ValueError):
 
 
 class SourceSlotNameCollisionError(ValueError):
-    """Two different sources would take one slot name in a job (ITL-1425).
-
-    A job slot is named by its source's name, without the kind part, so two
-    different sources (another kind, another version or another id) whose names are
-    equal would share one slot and one would replace the other. The job refuses
-    them; give one of them its own name (``source_id=`` when it is built).
-    """
+    """Two graph nodes would take the same source slot label (ITL-1565)."""
 
 
 class RestrictedAggregationWarning(UserWarning):

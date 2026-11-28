@@ -1988,6 +1988,7 @@ def _subjects() -> Any:
         tag_columns=["subject"],
         tag_only_columns=True,
         source_id="subjects",
+        label="subjects",
     )
 
 
@@ -1999,6 +2000,7 @@ def _scans() -> Any:
         tag_columns=["subject"],
         tag_only_columns=True,
         source_id="scans",
+        label="scans",
     )
 
 
@@ -2764,6 +2766,7 @@ def _rejoin_origin() -> Any:
         tag_columns=["cohort", "subject"],
         tag_only_columns=True,
         source_id="rejoin_origin",
+        label="rejoin_origin",
     )
 
 
@@ -3059,6 +3062,7 @@ def _nullable_readings() -> Any:
         tag_columns=["k", "site"],
         tag_only_columns=True,
         source_id="golden_nullable",
+        label="golden_nullable",
     )
 
 

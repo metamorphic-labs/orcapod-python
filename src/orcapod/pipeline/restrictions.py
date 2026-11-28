@@ -115,9 +115,11 @@ def streams_beneath(
     Sources declare their live inputs themselves. Other streams read their
     graph upstreams.
     """
-    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode, SourceSlotDeclaration
     from orcapod.core.sources.base import RootSource
 
+    if isinstance(current, SourceSlotDeclaration):
+        return (current.initial_source,)
     if isinstance(current, SourceJobNode):
         bound = current.bound_source
         for slot, source in rebinding or ():

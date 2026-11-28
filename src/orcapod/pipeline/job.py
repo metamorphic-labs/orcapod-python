@@ -294,7 +294,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             slot = self._persistent_node_map.get(key)
             if isinstance(slot, SourceJobNode):
                 return self.source_node_class.from_stream(slot)
-        return self.source_node_class.from_stream(self._source_streams[key])
+        return self.source_node_class.from_stream(
+            self._source_streams[key], name=self._captured_slot_names.get(key)
+        )
 
     def compile(self) -> None:
         """Compile recorded invocations into a frozen DAG of job nodes.
@@ -619,6 +621,26 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """Apply a setter change through the same transaction as bind()."""
         self._apply_source_bindings(self._prepare_source_bindings([(slot, source)]))
 
+    def _require_distinct_slot_bindings(self, rebinding: Rebinding = ()) -> None:
+        """Refuse live identities that would collapse two execution vertices."""
+        replacements = {id(slot): source for slot, source in rebinding}
+        names_by_hash: dict[str, str] = {}
+        for node in self._persistent_node_map.values():
+            if not isinstance(node, SourceJobNode):
+                continue
+            source = replacements.get(id(node), node.bound_source)
+            if source is None:
+                continue
+            previous = names_by_hash.setdefault(
+                source.content_hash().to_string(), node.name
+            )
+            if previous != node.name:
+                raise InconsistentSourceError(
+                    f"Slots {previous!r} and {node.name!r} would read one source "
+                    "identity. Bind each slot to a distinct source or use one slot "
+                    "for this source (ITL-1559)."
+                )
+
     def _prepare_source_bindings(
         self, rebinding: Rebinding
     ) -> list[tuple[SourceJobNode, cp.StreamProtocol | None, _DeclaredForm | None]]:
@@ -627,6 +649,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         require_consistent_sources(
             ((f"node {node.label!r}", node) for node in nodes), rebinding
         )
+        if rebinding:
+            self._require_distinct_slot_bindings(rebinding)
         prepared = [
             (
                 slot,
@@ -862,7 +886,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         for node_hash, job_node in persistent.items():
             if isinstance(job_node, SourceJobNode):
-                node_map[node_hash] = job_node.as_node()
+                slot = job_node.as_node()
+                slot.freeze_slot_name()
+                node_map[node_hash] = slot
 
             elif isinstance(job_node, FunctionJobNode):
                 upstream_bp_hash = job_id_to_bp_hash[id(job_node._input_stream)]
@@ -1401,6 +1427,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             (f"node {node.label!r}", node)
             for node in self._persistent_node_map.values()
         )
+        self._require_distinct_slot_bindings()
         hash_dag: OrcaDAG[str] = OrcaDAG()
         for u, v in self._graph_edges:
             hash_dag.add_edge(u, v)
@@ -2138,6 +2165,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 sjn = SourceJobNode._from_loaded_slot(  # pyright: ignore[reportPrivateUsage]  # the loader is the one caller
                     bp_node, bound_source=sources.get(bp_node.name)
                 )
+                sjn.freeze_slot_name()
                 sjn._set_binding_owner(job)  # pyright: ignore[reportPrivateUsage]  # loading assigns the job's active slots
                 job._persistent_node_map[node_hash] = sjn
 

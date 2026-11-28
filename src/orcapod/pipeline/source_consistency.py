@@ -41,7 +41,7 @@ def root_source_uses(
     with the source whose hash it preserves. Capture safety and restrictions
     instead follow live reads through sources.
     """
-    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode, SourceSlotDeclaration
     from orcapod.core.sources.base import RootSource
 
     replacements = {id(slot): source for slot, source in rebinding}
@@ -55,6 +55,10 @@ def root_source_uses(
         visited.add(id(stream))
         if isinstance(stream, RootSource):
             yield location, stream
+        elif isinstance(stream, SourceSlotDeclaration):
+            pending.append(
+                (f"{location} via slot {stream.name!r}", stream.initial_source)
+            )
         elif isinstance(stream, SourceJobNode):
             bound = replacements.get(id(stream), stream.bound_source)
             if bound is not None:
