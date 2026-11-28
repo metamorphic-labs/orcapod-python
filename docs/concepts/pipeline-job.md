@@ -267,11 +267,10 @@ is attached to them, before anything runs:
 An operator cache or cached source on a SQL connector is also refused when it is written, before
 anything is stored, if one of its own columns has a type or name the connector does not store. On
 PostgreSQL that is every operator cache with caching on: its system-tag column names
-(`_tag_source_id::` and a 64-character hash) are longer than 63 bytes.
-A table's name is its Orcapod path joined by `__`, and every node table and cached source path
-holds a 64-character hash, so on PostgreSQL only tables you write through `ConnectorArrowDatabase`
-yourself under short paths fit; reading an existing table with `PostgreSQLTableSource` is
-unaffected. Use
+(`_tag_source_id::` and a 64-character hash) are longer than 63 bytes. Connector store table names
+use a readable path hint and a digest of the full path, so long paths fit the SQLite and PostgreSQL
+table-name limits. These generated names do not change the separate column-name restrictions.
+Reading an existing table with `PostgreSQLTableSource` is unaffected. Use
 `InMemoryArrowDatabase` or `DeltaTableDatabase` for such jobs. Storing these columns on
 connector databases is planned for a later release.
 

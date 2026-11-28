@@ -338,10 +338,15 @@ class SQLiteConnector:
             paths: list[tuple[str, str, str]] = []
             for row in rows:
                 table_name = cast(str, row[0])
-                require_catalog_layout(table_name, cast(object, row[2]))
                 if row[3]:
+                    require_catalog_layout(table_name, cast(object, row[2]))
                     paths.append(("main", table_name, cast(str, row[1])))
             return paths
+
+    def get_current_store_schema(self) -> str:
+        """Return SQLite's persistent schema selected for connector stores."""
+        self._require_open()
+        return "main"
 
     @contextmanager
     def store_table_transaction(
@@ -437,9 +442,10 @@ class SQLiteConnector:
         """
         with self._lock:
             conn = self._require_open()
-            self._validate_table_name(table_name)
             namespace = "" if schema is None else sql_table_identifier(schema) + "."
-            cursor = conn.execute(f'PRAGMA {namespace}table_info("{table_name}")')
+            cursor = conn.execute(
+                f"PRAGMA {namespace}table_info({sql_table_identifier(table_name)})"
+            )
             return [
                 ColumnInfo(
                     name=row["name"],

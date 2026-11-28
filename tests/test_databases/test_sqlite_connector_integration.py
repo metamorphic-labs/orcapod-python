@@ -61,6 +61,79 @@ class TestConnectorArrowDatabaseWithSQLite:
         records = db.get_all_records(first)
         assert records is not None and records.to_pylist() == [{"value": 1}]
 
+    def test_str_subclass_path_reopens_as_ordinary_string(
+        self, db: ConnectorArrowDatabase
+    ) -> None:
+        class OddString(str):
+            def __eq__(self, other: object) -> bool:
+                return self is other
+
+            __hash__ = str.__hash__
+
+        path = (OddString("same"),)
+        db.add_record(("same",), b"id", pa.table({"value": [1]}), flush=True)
+
+        rows = db.get_all_records(path)
+        assert rows is not None and rows.to_pylist() == [{"value": 1}]
+
+    def test_iter_batches_reads_quoted_table_name_metadata(self) -> None:
+        with SQLiteConnector() as connector:
+            conn = connector._require_open()
+            _ = conn.execute(
+                'CREATE TABLE main."order""items" (value INTEGER NOT NULL)'
+            )
+            _ = conn.execute('INSERT INTO main."order""items" VALUES (7)')
+
+            batches = list(
+                connector.iter_batches('SELECT value FROM main."order""items"')
+            )
+
+        assert len(batches) == 1
+        assert batches[0].schema.field("value").type == pa.int64()
+        assert batches[0].column(0).to_pylist() == [7]
+
+    def test_pending_collision_check_uses_indexed_table_names(
+        self, db: ConnectorArrowDatabase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from orcapod.databases import connector_arrow_database
+
+        assert db._sql_store is not None  # pyright: ignore[reportPrivateUsage]
+        original = connector_arrow_database.store_table_name
+        calls = 0
+
+        def counted(
+            path: tuple[str, ...], *, hint_length: int, digest_length: int
+        ) -> str:
+            nonlocal calls
+            calls += 1
+            return original(path, hint_length=hint_length, digest_length=digest_length)
+
+        monkeypatch.setattr(connector_arrow_database, "store_table_name", counted)
+        for index in range(30):
+            db.add_record(
+                (f"path-{index}",),
+                str(index).encode(),
+                pa.table({"v": [index]}),
+            )
+
+        assert calls < 250
+
+    def test_failed_dependency_removes_pending_owner_index_entry(
+        self, db: ConnectorArrowDatabase
+    ) -> None:
+        parent_path = ("parent",)
+        child_path = ("child",)
+        attempt = db._pending_commits.attempt(  # pyright: ignore[reportPrivateUsage]
+            db._get_record_key(parent_path)  # pyright: ignore[reportPrivateUsage]
+        )
+        with db.guard_record(child_path, b"child", attempt):
+            db.add_record(child_path, b"child", pa.table({"value": [1]}))
+        assert db.list_table_paths() == [child_path]
+
+        db.fail_pending_result(parent_path)
+
+        assert db.list_table_paths() == []
+
     def test_pending_path_is_refused_if_another_writer_claims_name(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -97,6 +170,22 @@ class TestConnectorArrowDatabaseWithSQLite:
             assert tuple(
                 conn.execute(f'SELECT value FROM main."{name}"').fetchone()
             ) == (1,)
+
+    def test_missing_record_table_ignores_unsupported_catalog_version(self) -> None:
+        path = ("orphan",)
+        with SQLiteConnector() as connector:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+            conn = connector._require_open()
+            name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+            _ = conn.execute("PRAGMA ignore_check_constraints=ON")
+            _ = conn.execute(
+                f'UPDATE main."{STORE_PATH_CATALOG}" SET layout_version = 2'
+            )
+            _ = conn.execute(f'DROP TABLE main."{name}"')
+
+            assert db.get_all_records(path) is None
+            assert db.list_table_paths() == []
 
     @pytest.mark.parametrize("write", [False, True])
     def test_store_uses_main_when_a_temp_table_shadows_its_name(
@@ -337,6 +426,17 @@ def _check_pending_collision(
 def _check_catalog_operation(
     db: ConnectorArrowDatabase, path: tuple[str, ...], table: pa.Table, operation: str
 ) -> None:
+    """Run one named catalog operation shared by the SQLite and PostgreSQL tests.
+
+    Args:
+        db: The connector-backed database under test.
+        path: The path passed to the selected operation.
+        table: The record table used by queue operations.
+        operation: One of ``list``, ``read``, ``pending_point``, ``queue``, or ``flush``.
+
+    Raises:
+        ValueError: If ``operation`` is not one of the supported values.
+    """
     if operation == "list":
         db.list_table_paths()
     elif operation == "read":
@@ -345,5 +445,18 @@ def _check_catalog_operation(
         db.get_record_by_id(path, b"id")
     elif operation == "queue":
         db.add_record(path, b"id", table)
-    else:
+    elif operation == "flush":
         db.flush_batch(path)
+    else:
+        raise ValueError(f"Unknown catalog operation: {operation!r}")
+
+
+def test_catalog_operation_helper_rejects_unknown_operation() -> None:
+    with SQLiteConnector(":memory:") as connector:
+        with pytest.raises(ValueError, match="Unknown catalog operation"):
+            _check_catalog_operation(
+                ConnectorArrowDatabase(connector),
+                ("path",),
+                pa.table({"value": [1]}),
+                "flsuh",
+            )

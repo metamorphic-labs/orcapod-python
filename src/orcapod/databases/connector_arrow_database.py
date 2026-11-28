@@ -134,6 +134,9 @@ class ConnectorArrowDatabase:
         _shared_pending_batches: dict[str, pa.Table] | None = None,
         _shared_pending_record_ids: dict[str, set[bytes]] | None = None,
         _shared_pending_skip_existing: dict[str, bool] | None = None,
+        _shared_pending_table_owners: dict[tuple[str, str], tuple[str, tuple[str, ...]]]
+        | None = None,
+        _shared_pending_owner_keys: dict[str, tuple[str, str]] | None = None,
         _root: ConnectorArrowDatabase | None = None,
         _scoped_path: tuple[str, ...] = (),
     ) -> None:
@@ -155,7 +158,7 @@ class ConnectorArrowDatabase:
         )
         # The schema each stored table was read with, for the append check
         # (``_refuse_changed_columns``).
-        self._stored_schemas: dict[str, pa.Schema] = {}
+        self._stored_schemas: dict[tuple[str | None, str], pa.Schema] = {}
         # Per-batch flag: True when the batch was added with skip_duplicates=True,
         # so flush() can pass skip_existing=True to the connector and let it use
         # native INSERT-OR-IGNORE semantics rather than Python-side prefiltering.
@@ -163,6 +166,16 @@ class ConnectorArrowDatabase:
             _shared_pending_skip_existing
             if _shared_pending_skip_existing is not None
             else {}
+        )
+        self._pending_table_owners: dict[
+            tuple[str, str], tuple[str, tuple[str, ...]]
+        ] = (
+            _shared_pending_table_owners
+            if _shared_pending_table_owners is not None
+            else {}
+        )
+        self._pending_owner_keys = (
+            _shared_pending_owner_keys if _shared_pending_owner_keys is not None else {}
         )
 
         self._pending_commits = (
@@ -177,19 +190,41 @@ class ConnectorArrowDatabase:
         )
 
     def _discard_pending_duplicate_policy(self, key: str) -> None:
-        """Forget the duplicate policy when an entire queued batch is discarded."""
+        """Forget indexes when an entire queued batch is discarded."""
         self._pending_skip_existing.pop(key, None)
+        owner_key = self._pending_owner_keys.pop(key, None)
+        if owner_key is not None:
+            self._pending_table_owners.pop(owner_key, None)
 
     # ── Path helpers ──────────────────────────────────────────────────────────
 
     def _get_record_key(self, record_path: tuple[str, ...]) -> str:
-        return "/".join(self._path_prefix + record_path)
+        path_key = "/".join(self._plain_path(self._path_prefix + record_path))
+        if self._sql_store is None:
+            return path_key
+        return f"{self._sql_store.get_current_store_schema()}\0{path_key}"
+
+    @staticmethod
+    def _plain_path(path: tuple[str, ...]) -> tuple[str, ...]:
+        """Copy accepted string components to ordinary strings."""
+        return tuple("".join((part,)) for part in path)
+
+    def _record_path_from_key(self, record_key: str) -> tuple[str, ...]:
+        """Decode the path portion of a shared pending key."""
+        path_key = (
+            record_key.split("\0", 1)[1] if self._sql_store is not None else record_key
+        )
+        return tuple(path_key.split("/"))
+
+    def _schema_from_record_key(self, record_key: str) -> str | None:
+        """Return the store schema encoded in a pending key, if it has one."""
+        return record_key.split("\0", 1)[0] if self._sql_store is not None else None
 
     def _path_to_table_name(self, record_path: tuple[str, ...]) -> str:
         """Map a full record path to a name the connector can store."""
         if self._sql_store is not None and record_path:
             return store_table_name(
-                record_path,
+                self._plain_path(record_path),
                 hint_length=_SQL_HINT_LENGTH,
                 digest_length=_SQL_DIGEST_LENGTH,
             )
@@ -282,7 +317,9 @@ class ConnectorArrowDatabase:
             table_name, exact=True
         ):
             require_store_table_owner(
-                table_name, full_path, stored_path(table_name, path_json)
+                table_name,
+                self._plain_path(full_path),
+                stored_path(table_name, path_json),
             )
             return schema, name
         return None
@@ -331,10 +368,11 @@ class ConnectorArrowDatabase:
                         f"Table {name!r} does not match its stored path {path!r}"
                     )
                 owners[name] = path
-            for key in self._pending_batches:
-                path = tuple(key.split("/"))
+            current_schema = self._sql_store.get_current_store_schema()
+            for (schema, name), (_, path) in self._pending_table_owners.items():
+                if schema != current_schema:
+                    continue
                 if path[: len(full_prefix)] == full_prefix:
-                    name = self._path_to_table_name(path)
                     require_store_table_owner(name, path, owners.setdefault(name, path))
             return sorted(
                 path[len(self._path_prefix) :]
@@ -344,7 +382,7 @@ class ConnectorArrowDatabase:
 
         names = set(self._connector.get_table_names())
         names.update(
-            self._path_to_table_name(tuple(key.split("/")))
+            self._path_to_table_name(self._record_path_from_key(key))
             for key in self._pending_batches
         )
         stem = self._path_to_table_name(full_prefix) if full_prefix else ""
@@ -546,13 +584,17 @@ class ConnectorArrowDatabase:
         self._connector.validate_records(records)
 
         record_key = self._get_record_key(record_path)
+        pending_owner_key: tuple[str, str] | None = None
         if self._sql_store is not None:
             _ = self._find_committed_table(table_name, full_path)
-            if record_key not in self._pending_batches:
-                for key in self._pending_batches:
-                    queued_path = tuple(key.split("/"))
-                    if self._path_to_table_name(queued_path) == table_name:
-                        require_store_table_owner(table_name, full_path, queued_path)
+            schema = self._schema_from_record_key(record_key)
+            assert schema is not None
+            pending_owner_key = (schema, table_name)
+            queued = self._pending_table_owners.get(pending_owner_key)
+            if queued is not None and queued[0] != record_key:
+                require_store_table_owner(
+                    table_name, self._plain_path(full_path), queued[1]
+                )
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, so the connector always receives the stored order
         # (ITL-1367).
@@ -596,6 +638,12 @@ class ConnectorArrowDatabase:
         # Buffer in pending batch
         existing_pending = self._pending_batches.get(record_key)
         if existing_pending is None:
+            if pending_owner_key is not None:
+                self._pending_table_owners[pending_owner_key] = (
+                    record_key,
+                    self._plain_path(full_path),
+                )
+                self._pending_owner_keys[record_key] = pending_owner_key
             self._pending_batches[record_key] = records
         else:
             self._pending_batches[record_key] = pa.concat_tables(
@@ -659,14 +707,16 @@ class ConnectorArrowDatabase:
             held.append(pending.schema)
         full_path = self._path_prefix + record_path
         table_name = self._path_to_table_name(full_path)
-        stored = self._stored_schemas.get(table_name)
+        schema = self._schema_from_record_key(self._get_record_key(record_path))
+        stored_key = (schema, table_name)
+        stored = self._stored_schemas.get(stored_key)
         if stored is None:
             table = self._find_committed_table(table_name, full_path)
             if table is not None:
                 schema, name = table
                 stored = self._read_stored_schema(name, schema)
                 if stored is not None:
-                    self._stored_schemas[table_name] = stored
+                    self._stored_schemas[stored_key] = stored
         if stored is not None:
             held.append(stored)
         return held
@@ -738,8 +788,7 @@ class ConnectorArrowDatabase:
     def at(self, *path_components: str) -> "ConnectorArrowDatabase":
         """Return a new ConnectorArrowDatabase scoped to the given sub-path.
 
-        The returned instance shares the connector and all three pending dicts
-        (_pending_batches, _pending_record_ids, _pending_skip_existing) by reference.
+        The returned instance shares the connector and all pending state by reference.
         Calling flush() on any view drains the entire shared pending queue.
 
         Raises:
@@ -766,6 +815,8 @@ class ConnectorArrowDatabase:
             _shared_pending_batches=self._pending_batches,
             _shared_pending_record_ids=self._pending_record_ids,
             _shared_pending_skip_existing=self._pending_skip_existing,
+            _shared_pending_table_owners=self._pending_table_owners,
+            _shared_pending_owner_keys=self._pending_owner_keys,
             _root=new_root,
             _scoped_path=new_scoped_path,
         )
@@ -826,15 +877,24 @@ class ConnectorArrowDatabase:
 
     def _flush_by_key(self, record_key: str) -> None:
         """Commit the ready records at a key shared by all views."""
+        if self._sql_store is not None:
+            queued_schema = self._schema_from_record_key(record_key)
+            active_schema = self._sql_store.get_current_store_schema()
+            if queued_schema != active_schema:
+                raise OrcapodDatabaseError(
+                    f"Pending store batch belongs to schema "
+                    f"{queued_schema!r}, not active schema {active_schema!r}; "
+                    "switch back to the original schema and retry the flush"
+                )
         ready = self._pending_commits.take_ready(record_key)
         if ready is None:
             return
         pending, ids = ready
-        record_path = tuple(record_key.split("/"))
-        table_name = self._path_to_table_name(record_path)
         skip_existing = self._pending_skip_existing.get(record_key, False)
         if record_key not in self._pending_batches:
-            self._pending_skip_existing.pop(record_key, None)
+            self._discard_pending_duplicate_policy(record_key)
+        record_path = self._record_path_from_key(record_key)
+        table_name = self._path_to_table_name(record_path)
 
         try:
             self._require_table_name(table_name)

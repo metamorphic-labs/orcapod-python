@@ -793,6 +793,139 @@ def test_unsupported_catalog_layout_is_refused(
 
 
 @pytest.mark.postgres
+def test_missing_record_table_ignores_unsupported_catalog_version(
+    connector: PostgreSQLConnector,
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("orphan",)
+    db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+    name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+    catalog = sql.Identifier(STORE_PATH_CATALOG)
+    with psycopg.connect(connector._dsn) as conn:
+        _ = conn.execute(
+            sql.SQL("ALTER TABLE {} DROP CONSTRAINT {}").format(
+                catalog, sql.Identifier(f"{STORE_PATH_CATALOG}_layout_version_check")
+            )
+        )
+        _ = conn.execute(sql.SQL("UPDATE {} SET layout_version = 2").format(catalog))
+        _ = conn.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(name)))
+
+    assert db.get_all_records(path) is None
+    assert db.list_table_paths() == []
+
+
+@pytest.mark.postgres
+def test_str_subclass_path_reopens_as_ordinary_string(
+    connector: PostgreSQLConnector,
+) -> None:
+    class OddString(str):
+        def __eq__(self, other: object) -> bool:
+            return self is other
+
+        __hash__ = str.__hash__
+
+    db = ConnectorArrowDatabase(connector)
+    db.add_record(("same",), b"id", pa.table({"value": [1]}), flush=True)
+
+    rows = db.get_all_records((OddString("same"),))
+    assert rows is not None and rows.to_pylist() == [{"value": 1}]
+
+
+@pytest.mark.postgres
+def test_metadata_lookup_folds_unquoted_schema_identifier(
+    connector: PostgreSQLConnector,
+) -> None:
+    _, _, _, schema = connector.current_location()
+    _ = connector._require_open().execute(
+        "CREATE TABLE records (value BIGINT NOT NULL)"
+    )
+    _ = connector._require_open().execute("INSERT INTO records VALUES (7)")
+    connector._require_open().commit()
+
+    batches = list(
+        connector.iter_batches(f"SELECT value FROM {schema.upper()}.records")
+    )
+
+    assert len(batches) == 1
+    assert batches[0].schema.field("value").type == pa.int64()
+    assert batches[0].schema.field("value").nullable is False
+    assert batches[0].column(0).to_pylist() == [7]
+
+    _ = connector._require_open().execute(
+        'CREATE TABLE "MixedCase" (value BIGINT NOT NULL)'
+    )
+    _ = connector._require_open().execute('INSERT INTO "MixedCase" VALUES (8)')
+    connector._require_open().commit()
+    quoted = list(connector.iter_batches(f'SELECT value FROM "{schema}"."MixedCase"'))
+    assert quoted[0].schema.field("value").type == pa.int64()
+    assert quoted[0].column(0).to_pylist() == [8]
+
+
+@pytest.mark.postgres
+def test_standalone_catalog_lookup_releases_its_transaction(
+    connector: PostgreSQLConnector,
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    db.add_record(("lock-test",), b"id", pa.table({"value": [1]}), flush=True)
+
+    paths = connector.get_store_table_paths("o1_", exact=False)
+
+    assert paths
+    assert connector._require_open().info.transaction_status.name == "IDLE"
+
+
+@pytest.mark.postgres
+def test_catalog_lookup_does_not_commit_a_callers_transaction(
+    connector: PostgreSQLConnector,
+) -> None:
+    conn = connector._require_open()
+    _ = conn.execute("CREATE TABLE caller_work (value INTEGER)")
+
+    _ = connector.get_store_table_paths("o1_")
+
+    assert conn.info.transaction_status.name == "INTRANS"
+    conn.rollback()
+    with psycopg.connect(connector._dsn) as check:
+        assert check.execute("SELECT to_regclass('caller_work')").fetchone() == (None,)
+
+
+@pytest.mark.postgres
+def test_pending_rows_remain_bound_to_their_postgresql_schema(
+    connector: PostgreSQLConnector,
+) -> None:
+    base_dsn = _base_dsn()
+    schema_b = f"pending_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(base_dsn, autocommit=True) as admin:
+        _ = admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_b)))
+    try:
+        db = ConnectorArrowDatabase(connector)
+        path = ("same",)
+        (schema_a,) = (
+            connector._require_open().execute("SELECT current_schema()").fetchone()
+        )
+        db.add_record(path, b"a", pa.table({"value": [1]}))
+
+        _ = connector._require_open().execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_b))
+        )
+        assert db.get_record_by_id(path, b"a") is None
+        with pytest.raises(OrcapodDatabaseError, match="pending.*schema"):
+            db.flush()
+
+        _ = connector._require_open().execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_a))
+        )
+        db.flush()
+        rows = db.get_all_records(path)
+        assert rows is not None and rows.to_pylist() == [{"value": 1}]
+    finally:
+        with psycopg.connect(base_dsn, autocommit=True) as admin:
+            _ = admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema_b))
+            )
+
+
+@pytest.mark.postgres
 def test_store_writes_to_the_verified_schema_when_a_temp_table_shadows_its_name(
     connector: PostgreSQLConnector,
 ) -> None:

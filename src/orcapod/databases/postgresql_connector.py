@@ -316,7 +316,7 @@ def _resolve_column_type_lookup(
         if len(from_matches) != 1:
             return {}
         match = from_matches[0]
-    table_name = unquote_sql_identifier(match["table"])
+    table_name = _normalize_pg_identifier(match["table"])
 
     # Inspect the text after the table name up to the next major SQL clause.
     # A comma before the clause boundary means comma-joined tables ("FROM a, b").
@@ -337,10 +337,19 @@ def _resolve_column_type_lookup(
         connector.get_column_info(table_name)
         if namespace is None
         else connector.get_column_info(
-            table_name, schema=unquote_sql_identifier(namespace)
+            table_name, schema=_normalize_pg_identifier(namespace)
         )
     )
     return {ci.name: ci for ci in columns}
+
+
+def _normalize_pg_identifier(identifier: str) -> str:
+    """Resolve a parsed PostgreSQL identifier as the server would."""
+    if identifier.startswith('"'):
+        return unquote_sql_identifier(identifier)
+    return identifier.translate(
+        str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    )
 
 
 def _field_has_metadata(field: pa.Field) -> bool:
@@ -462,12 +471,8 @@ class PostgreSQLConnector:
         """Return registered record tables matching a physical name or prefix."""
         from psycopg import sql as pg_sql
 
-        with (
-            self._lock,
-            cast(
-                "psycopg.Connection[tuple[object, ...]]", self._require_open()
-            ).cursor() as cur,
-        ):
+        conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
+        with self._lock, conn.transaction(), conn.cursor() as cur:
             _ = cur.execute(
                 """
                 SELECT ns.nspname, ns.oid,
@@ -511,10 +516,29 @@ class PostgreSQLConnector:
             for table_name, path_json, version, exists in cast(
                 "list[tuple[str, str, int, bool]]", cur.fetchall()
             ):
-                require_catalog_layout(table_name, version)
                 if exists:
+                    require_catalog_layout(table_name, version)
                     paths.append((schema, table_name, path_json))
             return paths
+
+    def get_current_store_schema(self) -> str:
+        """Return the persistent schema selected for connector stores."""
+        conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
+        with self._lock, conn.transaction(), conn.cursor() as cur:
+            _ = cur.execute(
+                """
+                SELECT ns.nspname,
+                       ns.oid = pg_my_temp_schema() OR pg_is_other_temp_schema(ns.oid)
+                FROM pg_catalog.pg_namespace AS ns
+                WHERE ns.nspname = current_schema()
+                """
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise OrcapodDatabaseError("PostgreSQL has no current schema")
+            schema = cast(str, row[0])
+            _require_persistent_store_schema(schema, row[1])
+            return schema
 
     @contextmanager
     def store_table_transaction(

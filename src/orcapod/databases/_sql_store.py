@@ -34,6 +34,10 @@ STORE_PATH_CATALOG_FIELDS = """(
 class SQLStoreConnector(Protocol):
     """SQL operations a connector store needs to track record table ownership."""
 
+    def get_current_store_schema(self) -> str:
+        """Return the persistent schema selected for this store operation."""
+        ...
+
     def get_store_table_paths(
         self, name: str, *, exact: bool = False
     ) -> list[tuple[str, str, str]]:
