@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from collections.abc import Iterator
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
 import pyarrow as pa
 from typing_extensions import override
@@ -50,7 +50,7 @@ from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagPr
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import schema_utils
+from orcapod.utils import arrow_utils, schema_utils
 
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
@@ -77,23 +77,26 @@ def _recorded_at_field() -> "pa.Field[pa.DataType]":
     )
 
 
-def _record_ids(records: pa.Table) -> list[tuple[str, ...]]:
-    """Each row's record id: its record-id system-tag values, columns in name order."""
-    record_prefix = (
-        f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
-    )
-    source_prefix = (
-        f"{constants.SYSTEM_TAG_SOURCE_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
-    )
-    fields = set(records.column_names)
-    names = sorted(
+def _record_id_column(records: pa.Table) -> str | None:
+    """Return the source's generated record-id field, if it carries one.
+
+    The source builder appends the generated pair after the input columns,
+    including any custom system tags. The cache preserves that field order.
+    A plain derived source carries no generated pair.
+    """
+    system_tags = [
         name
-        for name in fields
-        if name.startswith(record_prefix)
-        and source_prefix + name.removeprefix(record_prefix) in fields
-    )
-    columns = [records.column(name).to_pylist() for name in names]
-    return [tuple(values) for values in zip(*columns, strict=True)] if columns else []
+        for name in records.column_names
+        if name.startswith(constants.SYSTEM_TAG_PREFIX)
+    ]
+    if len(system_tags) < 2:
+        return None
+    source_id, record_id = system_tags[-2:]
+    prefix = f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+    if not record_id.startswith(prefix):
+        return None
+    expected_pair = arrow_utils.system_tag_column_names(record_id.removeprefix(prefix))
+    return record_id if (source_id, record_id) == expected_pair else None
 
 
 class CachedSource(RootSource):
@@ -496,19 +499,26 @@ class CachedSource(RootSource):
         cached row: a tag, data, system-tag or source-info value differs. The rule is
         the same whether the record id is made from key columns or is the row's
         position. A live row whose record hash the cache holds is the same row again,
-        and one under a new record id is a new row: both are accepted.
+        and one under a new record id is a new row: both are accepted. Sources
+        without a generated record id still deduplicate by record hash.
 
         Raises:
             CachedSourceChangedRowError: Naming the source id, the first changed
                 record ids and how many rows changed. Nothing was written.
         """
+        live_id_column = _record_id_column(live_with_hash)
+        if live_id_column is None:
+            return
         records = self._read_cache_table()
         if records is None:
             return
+        cached_id_column = _record_id_column(records)
+        if cached_id_column is None:
+            return
         records = keep_rows_of_data_context(records, self.data_context_key)
-        cached: dict[tuple[str, ...], set[bytes | None]] = {}
+        cached: dict[str, set[bytes | None]] = {}
         for record_id, record_hash in zip(
-            _record_ids(records),
+            cast("list[str]", records.column(cached_id_column).to_pylist()),
             records.column(self.HASH_COLUMN_NAME).to_pylist(),
             strict=True,
         ):
@@ -517,7 +527,9 @@ class CachedSource(RootSource):
             {
                 record_id
                 for record_id, record_hash in zip(
-                    _record_ids(live_with_hash),
+                    cast(
+                        "list[str]", live_with_hash.column(live_id_column).to_pylist()
+                    ),
                     live_with_hash.column(self.HASH_COLUMN_NAME).to_pylist(),
                     strict=True,
                 )
@@ -526,9 +538,7 @@ class CachedSource(RootSource):
         )
         if not changed:
             return
-        named = ", ".join(
-            " / ".join(record_id) for record_id in changed[:_CHANGED_ROWS_NAMED]
-        )
+        named = ", ".join(changed[:_CHANGED_ROWS_NAMED])
         more = len(changed) - _CHANGED_ROWS_NAMED
         raise CachedSourceChangedRowError(
             f"CachedSource over {self.source_id!r}: the source delivered "

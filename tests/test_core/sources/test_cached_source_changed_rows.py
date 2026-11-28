@@ -28,7 +28,7 @@ from orcapod.errors import (
     UnstorableColumnError,
 )
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
-from orcapod.sources import ArrowTableSource, CachedSource, CSVSource
+from orcapod.sources import ArrowTableSource, CachedSource, CSVSource, DerivedSource
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 
 ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
@@ -274,6 +274,27 @@ def test_the_same_rows_delivered_again_write_nothing(
     assert _presented(second) == sorted(ROWS)
 
 
+def test_plain_derived_source_redelivery_writes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "readings.csv"
+    _write(path, ROWS)
+    job = _job(_csv(path), InMemoryArrowDatabase())
+    _ = job.run()
+    cache = InMemoryArrowDatabase()
+
+    first = CachedSource(DerivedSource(job.nodes["summary"]), cache)
+    presented = first.as_table(all_info=True)
+    assert presented.num_rows == len(ROWS)
+    assert all(
+        not name.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
+        for name in presented.column_names
+    )
+    before = _cache_rows(first, cache)
+
+    second = CachedSource(DerivedSource(job.nodes["summary"]), cache)
+    assert second.as_table(all_info=True).equals(presented)
+    assert _cache_rows(second, cache) == before
+
+
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 @pytest.mark.parametrize("arrangement", list(ARRANGEMENTS))
 def test_a_row_under_a_new_key_is_added(
@@ -475,8 +496,21 @@ def test_an_in_memory_source_is_held_to_the_same_rule() -> None:
     assert '{"session":2,"subject":"s1"}' in str(refused.value)
 
 
-@pytest.mark.parametrize("name", ["record_id_extra", "record_id", "record_id::custom"])
-def test_a_custom_record_id_like_tag_cannot_mask_a_changed_row(name: str) -> None:
+@pytest.mark.parametrize(
+    ("name", "source_tag"),
+    [
+        ("record_id_extra", None),
+        ("record_id", None),
+        ("record_id::custom", None),
+        pytest.param("record_id::custom", "source_id::custom", id="matched-pair"),
+        pytest.param(
+            "record_id::" + "a1" * 32, "source_id::" + "a1" * 32, id="hex-pair"
+        ),
+    ],
+)
+def test_a_custom_record_id_like_tag_cannot_mask_a_changed_row(
+    name: str, source_tag: str | None
+) -> None:
     cache = InMemoryArrowDatabase()
 
     def cached(value: float, tag: str) -> CachedSource:
@@ -489,16 +523,21 @@ def test_a_custom_record_id_like_tag_cannot_mask_a_changed_row(name: str) -> Non
                 pa.field(name, pa.large_string(), nullable=False),
             ]
         )
-        table = pa.Table.from_pylist(
-            [{"subject": "s1", "session": 1, "value": value, "count": 10, name: tag}],
-            schema=schema,
-        )
+        row = {"subject": "s1", "session": 1, "value": value, "count": 10, name: tag}
+        system_tags = [name]
+        if source_tag is not None:
+            schema = schema.append(
+                pa.field(source_tag, pa.large_string(), nullable=False)
+            )
+            row[source_tag] = "arrow_table_v1:readings"
+            system_tags.append(source_tag)
+        table = pa.Table.from_pylist([row], schema=schema)
         return ArrowTableSource(
             table,
             tag_columns=["subject", "session"],
             tag_only_columns=True,
             record_id_columns=["subject", "session"],
-            system_tag_columns=[name],
+            system_tag_columns=system_tags,
             source_id="readings",
         ).cached(cache)
 
