@@ -158,26 +158,14 @@ def _s3fs_options(storage_options: Mapping[str, str]) -> dict[str, Any]:
     return options
 
 
-def _is_delta_partition_directory(name: str) -> bool:
-    """Recognize Delta's Hive-style ``column=value`` directory names."""
-    return name.find("=") > 0
-
-
-def _list_local_directory(directory: str) -> tuple[list[str], list[str]]:
-    """Return the names of the subdirectories and Parquet files.
+def _list_local_directory(directory: str) -> list[str]:
+    """Return the names of the subdirectories of a local directory.
 
     A symbolic link to a directory is not a subdirectory here: following one that
     points at an ancestor would send the table walk in circles.
     """
-    children: list[str] = []
-    parquet_files: list[str] = []
     with os.scandir(directory) as entries:
-        for entry in entries:
-            if entry.is_dir(follow_symlinks=False):
-                children.append(entry.name)
-            elif entry.name.endswith(".parquet") and entry.is_file():
-                parquet_files.append(entry.name)
-    return children, parquet_files
+        return [entry.name for entry in entries if entry.is_dir(follow_symlinks=False)]
 
 
 def _join_local_path(directory: str, name: str) -> str:
@@ -1829,9 +1817,9 @@ class DeltaTableDatabase:
                 on_empty=self._discard_pending_index,
             )
         )
-        # Record keys whose table was found absent (ITL-1173), so lookups can defer
-        # opening it again until there is evidence of data. Family-wide like the
-        # loaded tables, and forgotten on any flush of the family or the key: a table
+        # Record keys whose table was found absent (ITL-1173), so lookups do not try
+        # to open it again on every row. Family-wide like the loaded tables, and
+        # forgotten on any flush of the family and on a flush of the key: a table
         # another process creates is seen after this database's next flush, as rows
         # it appends to a loaded table are. ``table_exists`` always checks again.
         self._absent_tables: set[str] = (
@@ -1924,52 +1912,46 @@ class DeltaTableDatabase:
                 )
 
     def _get_delta_table(
-        self, record_path: tuple[str, ...], *, check_current: bool = False
+        self, record_path: tuple[str, ...]
     ) -> deltalake.DeltaTable | None:
         """
         Get an existing Delta table, either from cache or by loading it.
 
         Args:
             record_path: Tuple of path components
-            check_current: Open the current log even when a row snapshot is cached.
 
         Returns:
             deltalake.DeltaTable instance or None if table doesn't exist
         """
         record_key = self._get_record_key(record_path)
-        if check_current:
-            self._absent_tables.discard(record_key)
-        else:
-            if dt := self._delta_table_cache.get(record_key):
-                return dt
-
         table_uri = self._get_table_uri(record_path)
+
+        # Check cache first
+        if dt := self._delta_table_cache.get(record_key):
+            return dt
+        if record_key in self._absent_tables:
+            return None
+
         try:
-            if record_key in self._absent_tables:
-                # Keep healthy external commits invisible until the next flush,
-                # but refuse newly visible data whose log never became readable.
-                if self._has_delta_data_files(table_uri):
-                    self._load_delta_table(table_uri, data_present=True)
-                return None
             delta_table = self._load_delta_table(table_uri)
-        except Exception as load_error:
-            raise self._read_failed(record_path) from load_error
+        except Exception as e:
+            # The table exists but could not be loaded: never report it as absent.
+            self._delta_table_cache.pop(record_key, None)
+            raise self._read_failed(record_path) from e
+
         if delta_table is None:
             # Table doesn't exist: remembered until the next flush (ITL-1173).
             self._absent_tables.add(record_key)
         else:
-            self._delta_table_cache.setdefault(record_key, delta_table)
+            self._delta_table_cache[record_key] = delta_table
             logger.debug(f"Loaded existing Delta table for {record_key}")
         return delta_table
 
-    def _load_delta_table(
-        self, table_uri: str, *, data_present: bool | None = None
-    ) -> deltalake.DeltaTable | None:
+    def _load_delta_table(self, table_uri: str) -> deltalake.DeltaTable | None:
         """Open the current Delta log, checking a missing log for existing data.
 
         Args:
             table_uri: The table's storage location.
-            data_present: Evidence from an existing filesystem walk, if available.
 
         Returns:
             The loaded table, or ``None`` when neither a log nor data files exist.
@@ -1983,9 +1965,7 @@ class DeltaTableDatabase:
         try:
             return deltalake.DeltaTable(table_uri, storage_options=options)
         except TableNotFoundError as missing_log:
-            if data_present is None:
-                data_present = self._has_delta_data_files(table_uri)
-            if not data_present:
+            if not self._has_delta_data_files(table_uri):
                 return None
             for delay in _MISSING_LOG_RETRY_DELAYS:
                 sleep(delay)
@@ -2003,28 +1983,22 @@ class DeltaTableDatabase:
             pending = [table_uri]
             while pending:
                 directory = pending.pop()
-                try:
-                    children, parquet_files = _list_local_directory(directory)
-                except FileNotFoundError:
-                    continue
-                if (
-                    directory != table_uri
-                    and _DELTA_LOG_DIRECTORY in children
-                    and any(
-                        os.path.isfile(
-                            os.path.join(directory, _DELTA_LOG_DIRECTORY, name)
-                        )
-                        for name in _DELTA_LOG_MARKERS
-                    )
+                if directory != table_uri and any(
+                    os.path.isfile(os.path.join(directory, _DELTA_LOG_DIRECTORY, name))
+                    for name in _DELTA_LOG_MARKERS
                 ):
                     continue
-                if parquet_files:
-                    return True
-                pending.extend(
-                    _join_local_path(directory, name)
-                    for name in children
-                    if name != _DELTA_LOG_DIRECTORY
-                )
+                try:
+                    with os.scandir(directory) as entries:
+                        for entry in entries:
+                            if entry.name == _DELTA_LOG_DIRECTORY:
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(entry.path)
+                            elif entry.name.endswith(".parquet") and entry.is_file():
+                                return True
+                except FileNotFoundError:
+                    continue
             return False
 
         from deltalake.fs import DeltaStorageHandler
@@ -2073,8 +2047,8 @@ class DeltaTableDatabase:
         Walks the directories below ``prefix``: a directory that holds a
         ``_delta_log`` directory is a table. The walk goes on below a table, because
         tables can be nested (Orcapod v0.3 stores a table one level below where
-        v0.2 stored it), and never enters ``_delta_log``. Parquet files that no
-        readable Delta log accounts for trigger a bounded log-open retry.
+        v0.2 stored it), and never enters ``_delta_log``. No table is opened. Only
+        flushed tables are listed, as with ``table_exists``.
 
         A local database is listed exactly. A cloud database is listed through ``fsspec``
         with one list request per directory: ``s3://`` and ``s3a://`` through
@@ -2092,26 +2066,17 @@ class DeltaTableDatabase:
         Raises:
             TableListingNotSupportedError: If the database is on cloud storage and
                 could not be listed; the reason is chained.
-            OrcapodDatabaseReadError: If a local directory could not be listed or
-                data files have no readable transaction log.
+            OrcapodDatabaseReadError: If a local directory could not be listed.
         """
-        return self._discover_tables(prefix)
-
-    def _discover_tables(
-        self, prefix: tuple[str, ...], *, sources_only: bool = False
-    ) -> list[tuple[str, ...]]:
-        """Walk data directories once and check any evidence of an unpublished log."""
         full_prefix = self._path_prefix + prefix
-        root = self._root if self._root is not None else self
         if self._is_cloud:
-            list_directory, is_file = self._cloud_directory_lister()
+            list_directory = self._cloud_directory_lister()
             start = self._root_uri.split("://", 1)[1].rstrip("/")
             start = "/".join((start,) + full_prefix)
             join = _join_cloud_path
             component = str
         else:
             list_directory = _list_local_directory
-            is_file = os.path.isfile
             start = str(
                 self._local_root.joinpath(
                     *(self._sanitize_path_component(part) for part in full_prefix)
@@ -2120,13 +2085,13 @@ class DeltaTableDatabase:
             join = _join_local_path
             component = _stored_component
 
-        found: dict[tuple[str, ...], str] = {}
-        data: dict[tuple[str, ...], list[str]] = {}
-        to_visit = [(start, full_prefix)]
+        found: list[tuple[str, ...]] = []
+        # Directories still to visit, each with its path below ``prefix``.
+        to_visit: list[tuple[str, tuple[str, ...]]] = [(start, ())]
         while to_visit:
-            directory, path = to_visit.pop()
+            directory, below = to_visit.pop()
             try:
-                children, parquet_files = list_directory(directory)
+                children = list_directory(directory)
             except FileNotFoundError:
                 continue
             except Exception as exc:
@@ -2135,127 +2100,20 @@ class DeltaTableDatabase:
                         f"Could not list the tables of the Delta database at "
                         f"{self._root_uri!r}: {type(exc).__name__}: {exc}"
                     ) from exc
-                if sources_only and isinstance(exc, OSError):
-                    logger.warning("Could not list directory %s: %s", directory, exc)
-                    continue
-                raise OrcapodDatabaseReadError(directory, path) from exc
-            if _DELTA_LOG_DIRECTORY in children:
-                found[path] = directory
-            if parquet_files:
-                data[path] = parquet_files
+                raise OrcapodDatabaseReadError(directory, full_prefix + below) from exc
             for name in children:
-                if name != _DELTA_LOG_DIRECTORY:
-                    to_visit.append((join(directory, name), path + (component(name),)))
+                if name == _DELTA_LOG_DIRECTORY:
+                    found.append(prefix + below)
+                else:
+                    to_visit.append((join(directory, name), below + (component(name),)))
+        return sorted(found)
 
-        opened: dict[tuple[str, ...], deltalake.DeltaTable | None] = {}
-        active_files: dict[tuple[str, ...], set[str]] = {}
-
-        def load(
-            path: tuple[str, ...],
-            *,
-            data_present: bool,
-            data_path: tuple[str, ...] | None = None,
-        ) -> deltalake.DeltaTable | None:
-            """Open a discovery candidate once and attribute failures to that path."""
-            if path not in opened or (opened[path] is None and data_present):
-                try:
-                    opened[path] = root._load_delta_table(
-                        root._get_table_uri(path), data_present=data_present
-                    )
-                except Exception as exc:
-                    if (
-                        isinstance(exc, FileNotFoundError)
-                        and data_path is not None
-                        and data_path != path
-                    ):
-                        location = root._get_table_uri(data_path)
-                        cause = FileNotFoundError(f"{exc} at {location!r}")
-                        cause.__cause__ = exc
-                        raise root._read_failed(path) from cause
-                    raise root._read_failed(path) from exc
-            return opened[path]
-
-        for path, parquet_files in sorted(data.items()):
-            if path in found:
-                log = join(found[path], _DELTA_LOG_DIRECTORY)
-                if not any(is_file(join(log, name)) for name in _DELTA_LOG_MARKERS):
-                    load(path, data_present=True)
-                continue
-
-            owner = None
-            table = None
-            for depth in range(len(path) - 1, -1, -1):
-                ancestor = path[:depth]
-                if ancestor in found:
-                    owner = ancestor
-                    table = load(owner, data_present=True, data_path=path)
-                    break
-                if depth < len(full_prefix):
-                    if (
-                        not self._is_cloud
-                        and not (
-                            Path(root._get_table_uri(ancestor)) / _DELTA_LOG_DIRECTORY
-                        ).is_dir()
-                    ):
-                        continue
-                    table = load(ancestor, data_present=False)
-                    if table is not None:
-                        owner = ancestor
-                        break
-
-            if owner is not None and table is not None:
-                relative = path[len(owner) :]
-                partition_columns = table.metadata().partition_columns
-                if partition_columns == [
-                    part.split("=", 1)[0] for part in relative
-                ] and all(_is_delta_partition_directory(part) for part in relative):
-                    continue
-                if owner not in active_files:
-                    active_files[owner] = set(table.file_uris())
-                uri = root._get_table_uri(path)
-                if all(
-                    join(uri, name) in active_files[owner] for name in parquet_files
-                ):
-                    continue
-
-            # A Hive-shaped suffix could be partitions of a lost table. Keep the
-            # actual data directory in the error, and respect the caller's scope.
-            candidate = path
-            boundary = max(len(full_prefix), len(owner) + 1 if owner is not None else 0)
-            while len(candidate) > boundary and _is_delta_partition_directory(
-                candidate[-1]
-            ):
-                candidate = candidate[:-1]
-            if load(candidate, data_present=True, data_path=path) is not None:
-                found[candidate] = root._get_table_uri(candidate)
-
-        paths = sorted(found)
-        if sources_only:
-            # The legacy source listing returns the first table on each branch.
-            # Still walk below those tables to report independently damaged children.
-            sources: set[tuple[str, ...]] = set()
-            for path in paths:
-                depth = len(path) - len(full_prefix)
-                if (
-                    0 < depth <= self.max_hierarchy_depth
-                    and not any(
-                        path[:index] in sources
-                        for index in range(len(full_prefix) + 1, len(path))
-                    )
-                    and load(path, data_present=False) is not None
-                ):
-                    sources.add(path)
-            paths = sorted(sources)
-        return [path[len(self._path_prefix) :] for path in paths]
-
-    def _cloud_directory_lister(
-        self,
-    ) -> tuple[Callable[[str], tuple[list[str], list[str]]], Callable[[str], bool]]:
-        """Return functions to list cloud directory entries and check a file marker.
+    def _cloud_directory_lister(self) -> "Callable[[str], list[str]]":
+        """Return a function listing the subdirectories of a cloud directory.
 
         Returns:
-            A directory lister returning subdirectory and Parquet file names, and
-            a file existence probe using the same filesystem.
+            A function from a directory (bucket and key, no scheme) to the names of
+            its subdirectories.
 
         Raises:
             TableListingNotSupportedError: If no ``fsspec`` file system is available
@@ -2294,32 +2152,21 @@ class DeltaTableDatabase:
                 f"({type(exc).__name__}: {exc})."
             ) from exc
 
-        def list_directory(directory: str) -> tuple[list[str], list[str]]:
-            """Return cloud subdirectory and Parquet file names."""
+        def list_directory(directory: str) -> list[str]:
+            """Return the names of the subdirectories of a cloud directory."""
             entries = file_system.ls(directory, detail=True)
-            children = [
+            return [
                 str(entry["name"]).rstrip("/").rsplit("/", 1)[-1]
                 for entry in entries
                 if entry["type"] == "directory"
             ]
-            parquet_files = [
-                str(entry["name"]).rsplit("/", 1)[-1]
-                for entry in entries
-                if entry["type"] == "file" and str(entry["name"]).endswith(".parquet")
-            ]
-            return children, parquet_files
 
-        def is_file(path: str) -> bool:
-            """Check a log marker without walking the log directory."""
-            return file_system.isfile(path)
-
-        return list_directory, is_file
+        return list_directory
 
     def table_exists(self, record_path: tuple[str, ...]) -> bool:
         """Return ``True`` if a Delta table exists at ``record_path``.
 
-        Check the current log without loading records or replacing a cached
-        row snapshot.
+        This is a cheap existence check that does NOT load any records.
 
         Args:
             record_path: Path components identifying the table, relative to
@@ -2327,12 +2174,10 @@ class DeltaTableDatabase:
 
         Returns:
             ``True`` if a table exists at the given path, ``False`` otherwise.
-
-        Raises:
-            OrcapodDatabaseReadError: If the current log cannot be opened for a
-                table with data files.
         """
-        return self._get_delta_table(record_path, check_current=True) is not None
+        # Checks again even when the table was found absent before (ITL-1173).
+        self._absent_tables.discard(self._get_record_key(record_path))
+        return self._get_delta_table(record_path) is not None
 
     def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
         """Read the latest Delta schema from the log or the table's first batch."""
@@ -4530,11 +4375,42 @@ class DeltaTableDatabase:
 
         Raises:
             NotImplementedError: For cloud base paths (filesystem walk not supported).
-            OrcapodDatabaseReadError: If a table has data files but no readable log.
         """
         if self._is_cloud:
             raise NotImplementedError(
                 "list_sources() is not supported for cloud storage paths"
             )
 
-        return self._discover_tables((), sources_only=True)
+        sources: list[tuple[str, ...]] = []
+
+        def _scan(current_path: Path, path_components: tuple[str, ...]) -> None:
+            if len(path_components) >= self.max_hierarchy_depth:
+                return
+            try:
+                items = list(current_path.iterdir())
+            except OSError as e:
+                logger.warning(
+                    "Could not list directory %s during list_sources scan: %s",
+                    current_path,
+                    e,
+                )
+                return
+            for item in items:
+                if not item.is_dir():
+                    continue
+                components = path_components + (item.name,)
+                try:
+                    deltalake.DeltaTable(
+                        str(item), storage_options=self._storage_options or None
+                    )
+                    sources.append(components)
+                except deltalake.exceptions.TableNotFoundError:
+                    _scan(item, components)
+
+        # Build the effective scoped root directory
+        scoped_root = self._local_root
+        for component in self._path_prefix:
+            scoped_root = scoped_root / self._sanitize_path_component(component)
+
+        _scan(scoped_root, ())
+        return sources

@@ -2,8 +2,8 @@
 
 Until a table exists, a job's per-row lookups would each try to open it again. The family
 of a database (every handle from ``at()``) keeps the record keys it found absent and
-answers lookups without opening the table while no data files are visible. The
-cached miss lasts until any flush of the family (a commit) or a flush of that table.
+answers lookups without opening the table until any flush of the family (a commit) or
+a flush of that table.
 ``table_exists`` always checks again. A healthy table another process creates is
 therefore seen after this database's next flush, as rows another process appends to
 an already-loaded table are. A flush to a table believed absent loads it first and
@@ -12,6 +12,7 @@ keeps its existing rows.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 from typing import cast
@@ -133,10 +134,29 @@ def test_table_exists_checks_again(tmp_path: Path) -> None:
     assert _values(ours.get_all_records(PATH)) == [10]
 
 
-def test_cached_miss_refuses_new_orphaned_data(
+def test_cached_miss_ignores_external_creation_without_storage_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, table_opens: list[str]
+) -> None:
+    """A cached miss stays in memory even after another handle creates the table."""
+    ours = DeltaTableDatabase(tmp_path)
+    assert ours.get_all_records(PATH) is None
+    DeltaTableDatabase(tmp_path).add_records(PATH, _rows(["x"], [10]), flush=True)
+    table_opens.clear()
+
+    def unexpected_listing(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("A cached miss should not scan for files")
+
+    with monkeypatch.context() as probes:
+        probes.setattr(os, "scandir", unexpected_listing)
+        for _ in range(3):
+            assert ours.get_record_by_id(PATH, b"x") is None
+    assert not table_opens
+
+
+def test_flush_after_a_cached_miss_refuses_new_orphaned_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A prior miss still sees evidence of a damaged table from another writer."""
+    """A write that would create a table must recheck storage after a cached miss."""
     monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
     ours = DeltaTableDatabase(tmp_path)
     assert ours.get_all_records(PATH) is None
@@ -144,7 +164,7 @@ def test_cached_miss_refuses_new_orphaned_data(
     shutil.rmtree(tmp_path.joinpath(*PATH, "_delta_log"))
 
     with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        ours.get_all_records(PATH)
+        ours.add_records(PATH, _rows(["y"], [20]), flush=True)
     assert info.value.record_path == PATH
 
 

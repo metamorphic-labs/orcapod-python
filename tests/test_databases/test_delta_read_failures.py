@@ -17,9 +17,11 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime
 import json
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +32,7 @@ import pyarrow as pa
 import pytest
 from deltalake.exceptions import DeltaProtocolError
 
+from orcapod import function_pod
 from orcapod.databases import DeltaTableDatabase
 from orcapod.databases import delta_lake_databases
 from orcapod.errors import (
@@ -37,6 +40,7 @@ from orcapod.errors import (
     OrcapodDatabaseReadError,
     TypeIdentityError,
 )
+from orcapod.pipeline import PipelineJob
 from orcapod.sources import DictSource
 
 PATH = ("results", "t")
@@ -160,22 +164,22 @@ def damaged_path(request: pytest.FixtureRequest) -> tuple[str, ...]:
     params=[None, ["tag1", "tag2"], ["tag2", "tag1"]],
     ids=["flat", "partitioned", "reordered-partitions"],
 )
-def damaged_stores(
+def damaged_store(
     base: Path,
     damaged_path: tuple[str, ...],
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[DeltaTableDatabase, DeltaTableDatabase]:
-    """Return fresh and warm handles after dropping the log from a populated table."""
+) -> DeltaTableDatabase:
+    """Return a fresh handle after dropping the log from a populated table."""
     monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
     directory = base.joinpath(*damaged_path)
     data = pa.table(
         {
-            DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"],
-            "tag1": ["a"],
-            "tag2": ["b"],
-            "x": [1],
-            "y": [2],
+            DeltaTableDatabase.RECORD_ID_COLUMN: [b"a", b"b"],
+            "tag1": ["a", "c"],
+            "tag2": ["b", "d"],
+            "x": [1, 3],
+            "y": [2, 4],
         }
     )
     partitions = request.param
@@ -188,23 +192,28 @@ def damaged_stores(
     assert warm.get_all_records(damaged_path) is not None
     assert any(directory.rglob("*.parquet"))
     shutil.rmtree(directory / "_delta_log")
-    return DeltaTableDatabase(base_path=base), warm
+    return DeltaTableDatabase(base_path=base)
 
 
 MISSING_LOG_READS: dict[
     str, Callable[[DeltaTableDatabase, tuple[str, ...]], object]
 ] = {
     "get_all_records": lambda db, path: db.get_all_records(path),
-    "get_records_by_ids": lambda db, path: db.get_records_by_ids(path, [b"a", b"b"]),
+    "get_records_by_ids_forward": lambda db, path: db.get_records_by_ids(
+        path, [b"a", b"b"]
+    ),
+    "get_records_by_ids_reverse": lambda db, path: db.get_records_by_ids(
+        path, [b"b", b"a"]
+    ),
     "get_record_by_id": lambda db, path: db.get_record_by_id(path, b"a"),
-    "get_records_with_column_value": lambda db, path: db.get_records_with_column_value(
-        path, {"y": 2, "x": 1}
+    "get_records_with_column_value_reverse": lambda db, path: (
+        db.get_records_with_column_value(path, {"y": 2, "x": 1})
+    ),
+    "get_records_with_column_value_forward": lambda db, path: (
+        db.get_records_with_column_value(path, {"x": 1, "y": 2})
     ),
     "get_table_schema": lambda db, path: db.get_table_schema(path),
     "table_exists": lambda db, path: db.table_exists(path),
-    "list_sources": lambda db, _path: db.list_sources(),
-    "list_table_paths": lambda db, _path: db.list_table_paths(),
-    "list_table_paths_with_prefix": lambda db, path: db.list_table_paths(path),
 }
 
 
@@ -213,43 +222,44 @@ MISSING_LOG_READS: dict[
 )
 def test_missing_log_is_a_read_error(
     damaged_path: tuple[str, ...],
-    damaged_stores: tuple[DeltaTableDatabase, DeltaTableDatabase],
+    damaged_store: DeltaTableDatabase,
     read: Callable[[DeltaTableDatabase, tuple[str, ...]], object],
 ) -> None:
-    """Row reads and metadata discovery name the table with orphaned data."""
-    fresh, _ = damaged_stores
+    """Reads and table metadata queries name the table with orphaned data."""
     with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        read(fresh, damaged_path)
+        _ = read(damaged_store, damaged_path)
     assert info.value.record_path == damaged_path
 
 
-def test_table_exists_refuses_a_missing_log_on_a_warm_handle(
-    damaged_path: tuple[str, ...],
-    damaged_stores: tuple[DeltaTableDatabase, DeltaTableDatabase],
+def test_table_exists_uses_the_loaded_snapshot(
+    stored: DeltaTableDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An existence check sees the missing log while row reads keep their snapshot."""
-    _, warm = damaged_stores
-    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        warm.table_exists(damaged_path)
-    assert info.value.record_path == damaged_path
-    assert warm.get_all_records(damaged_path) is not None
+    """A warm existence check performs no new log opens or data-directory walks."""
+    assert stored.get_all_records(PATH) is not None
+
+    def unexpected_io(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("A warm existence check should use the loaded snapshot")
+
+    with monkeypatch.context() as probes:
+        probes.setattr(deltalake.DeltaTable, "__init__", unexpected_io)
+        probes.setattr(os, "scandir", unexpected_io)
+        assert stored.table_exists(PATH)
 
 
 def test_flush_refuses_a_missing_log(
     base: Path,
     damaged_path: tuple[str, ...],
-    damaged_stores: tuple[DeltaTableDatabase, DeltaTableDatabase],
+    damaged_store: DeltaTableDatabase,
 ) -> None:
     """Flushing to a folder with orphaned data writes no files or log."""
-    fresh, _ = damaged_stores
     directory = base.joinpath(*damaged_path)
     before = snapshot(directory)
-    fresh.add_records(
+    damaged_store.add_records(
         damaged_path, rows([b"c"], pa.array([3], pa.int64())), record_id_column="rid"
     )
 
     with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        fresh.flush()
+        damaged_store.flush()
 
     assert info.value.record_path == damaged_path
     assert snapshot(directory) == before
@@ -267,15 +277,8 @@ def test_partition_paths_do_not_count_as_separate_tables(base: Path, name: str) 
     assert db.list_table_paths((*path, "tag1=a")) == []
 
 
-@pytest.mark.parametrize("write", [False, True], ids=["read", "flush"])
-def test_missing_log_with_non_hive_data_path(
-    base: Path, monkeypatch: pytest.MonkeyPatch, write: bool
-) -> None:
-    """A valid AddFile path can contain arbitrary directory components."""
-    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
-    directory = table_dir(base)
-    data = pa.table({DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"], "x": [1]})
-    deltalake.write_deltalake(directory, data)
+def move_delta_data_file(directory: Path) -> Path:
+    """Move a Delta file into an arbitrary directory while retaining its AddFile."""
     log = next((directory / "_delta_log").glob("*.json"))
     original = next(directory.glob("*.parquet"))
     moved = directory / "files" / "bucket" / original.name
@@ -286,6 +289,20 @@ def test_missing_log_with_non_hive_data_path(
         if "add" in action:
             action["add"]["path"] = moved.relative_to(directory).as_posix()
     log.write_text("".join(json.dumps(action) + "\n" for action in actions))
+
+    return moved
+
+
+@pytest.mark.parametrize("write", [False, True], ids=["read", "flush"])
+def test_missing_log_with_non_hive_data_path(
+    base: Path, monkeypatch: pytest.MonkeyPatch, write: bool
+) -> None:
+    """A valid AddFile path can contain arbitrary directory components."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    directory = table_dir(base)
+    data = pa.table({DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"], "x": [1]})
+    deltalake.write_deltalake(directory, data)
+    _ = move_delta_data_file(directory)
 
     db = DeltaTableDatabase(base_path=base)
     original_rows = db.get_all_records(PATH)
@@ -304,41 +321,71 @@ def test_missing_log_with_non_hive_data_path(
 
 
 @pytest.mark.parametrize("listing", ["list_table_paths", "list_sources"])
-def test_discovers_damaged_hive_named_child_of_healthy_table(
+def test_discovery_keeps_a_table_with_retained_non_hive_data(
+    base: Path, listing: str
+) -> None:
+    """A retired data file in a subdirectory does not hide a healthy table."""
+    directory = table_dir(base)
+    deltalake.write_deltalake(directory, pa.table({"x": [1]}))
+    retired = move_delta_data_file(directory)
+    deltalake.write_deltalake(directory, pa.table({"x": [2]}), mode="overwrite")
+    assert retired.is_file()
+
+    db = DeltaTableDatabase(base)
+    assert getattr(db, listing)() == [PATH]
+
+
+def test_list_sources_keeps_directory_symlink_aliases(base: Path) -> None:
+    """Source listing follows a directory alias as it does a regular table path."""
+    target = base / "table"
+    deltalake.write_deltalake(target, pa.table({"x": [1]}))
+    try:
+        (base / "alias").symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Directory symlinks unavailable: {exc}")
+
+    db = DeltaTableDatabase(base)
+    assert sorted(db.list_sources()) == [("alias",), ("table",)]
+    assert db.list_table_paths() == [("table",)]
+
+
+@pytest.mark.parametrize("listing", ["list_table_paths", "list_sources"])
+def test_healthy_partitioned_discovery_keeps_legacy_io(
     base: Path, monkeypatch: pytest.MonkeyPatch, listing: str
 ) -> None:
-    """The healthy parent's log does not own the separate Hive-named child."""
-    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
-    child = (*PATH, "tag=child")
-    data = pa.table({"tag1": ["a"], "x": [1]})
-    deltalake.write_deltalake(table_dir(base), data, partition_by=["tag1"])
-    deltalake.write_deltalake(base.joinpath(*child), data)
-    shutil.rmtree(base.joinpath(*child, "_delta_log"))
-    db = DeltaTableDatabase(base_path=base)
+    """Path listing opens no log, and source listing stops at the first table."""
+    deltalake.write_deltalake(
+        table_dir(base),
+        pa.table({"tag1": ["a", "b"], "tag2": ["c", "d"], "x": [1, 2]}),
+        partition_by=["tag1", "tag2"],
+    )
+    db = DeltaTableDatabase(base)
+    opens: list[Path] = []
+    directories: list[Path] = []
+    original_open = deltalake.DeltaTable.__init__
+    original_scandir = os.scandir
 
-    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        getattr(db, listing)()
-    assert info.value.record_path == child
+    def track_open(
+        table: deltalake.DeltaTable,
+        uri: str,
+        *,
+        storage_options: dict[str, str] | None = None,
+    ) -> None:
+        opens.append(Path(uri))
+        original_open(table, uri, storage_options=storage_options)
 
+    def track_scandir(directory: str):
+        directories.append(Path(directory))
+        return original_scandir(directory)
 
-def test_discovery_names_ambiguous_hive_child(
-    base: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Without a log, both possible table locations appear in the error."""
-    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
-    child = ("group", "tag=child")
-    deltalake.write_deltalake(base.joinpath(*child), pa.table({"x": [1]}))
-    shutil.rmtree(base.joinpath(*child, "_delta_log"))
-    db = DeltaTableDatabase(base_path=base)
-
-    for listing in (db.list_table_paths, db.list_sources):
-        with pytest.raises(OrcapodDatabaseReadError, match="tag=child") as info:
-            listing()
-        assert info.value.record_path == child[:-1]
-
-    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as scoped_info:
-        db.list_table_paths(child)
-    assert scoped_info.value.record_path == child
+    monkeypatch.setattr(deltalake.DeltaTable, "__init__", track_open)
+    monkeypatch.setattr(os, "scandir", track_scandir)
+    assert getattr(db, listing)() == [PATH]
+    if listing == "list_table_paths":
+        assert not opens
+    else:
+        assert opens == [base / PATH[0], table_dir(base)]
+        assert all(not path.is_relative_to(table_dir(base)) for path in directories)
 
 
 def test_scoped_partition_listing_only_walks_its_subtree(
@@ -359,22 +406,72 @@ def test_scoped_partition_listing_only_walks_its_subtree(
     assert db.list_table_paths() == []
 
 
-@pytest.mark.parametrize("listing", ["list_table_paths", "list_sources"])
-def test_discovery_refuses_empty_initial_log(
-    base: Path, monkeypatch: pytest.MonkeyPatch, listing: str
+def test_empty_initial_log_is_refused_on_read(
+    base: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A log directory alone cannot publish a table whose data are visible."""
+    """An empty log with existing data cannot be mistaken for an absent table."""
     monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
-    data = pa.table({"tag1": ["a"], "x": [1]})
-    deltalake.write_deltalake(table_dir(base), data, partition_by=["tag1"])
+    deltalake.write_deltalake(table_dir(base), pa.table({"x": [1]}))
     log = table_dir(base) / "_delta_log"
     shutil.rmtree(log)
     log.mkdir()
-    db = DeltaTableDatabase(base_path=base)
 
     with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        getattr(db, listing)()
+        DeltaTableDatabase(base).get_all_records(PATH)
     assert info.value.record_path == PATH
+
+
+@function_pod(output_keys=["sum", "difference"])
+def _combine(x: int, y: int) -> tuple[int, int]:
+    """Compute two columns for the persistent job result."""
+    return x + y, x - y
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reverse"])
+def test_job_refuses_a_missing_result_log(
+    base: Path, monkeypatch: pytest.MonkeyPatch, use_async: bool, reverse: bool
+) -> None:
+    """A rebuilt job refuses orphaned results without writing to the store."""
+    monkeypatch.setattr(
+        delta_lake_databases, "sleep", lambda _delay: None, raising=False
+    )
+    records = [
+        {"tag1": "a", "tag2": 1, "x": 2, "y": 7},
+        {"tag1": "b", "tag2": 2, "x": 4, "y": 8},
+    ]
+    tags = ["tag1", "tag2"]
+    if reverse:
+        records = [dict(reversed(list(record.items()))) for record in records]
+        tags.reverse()
+
+    def run() -> None:
+        source = DictSource(
+            records, tag_columns=tags, tag_only_columns=True, source_id="input"
+        )
+        job = PipelineJob(name="missing_log", database=DeltaTableDatabase(base))
+        with job:
+            _ = _combine.pod(source, label="combine")
+        if use_async:
+            _ = asyncio.run(job.run_async())
+        else:
+            _ = job.run()
+
+    run()
+    (result_log,) = [
+        log
+        for log in base.rglob("_delta_log")
+        if "_result" in log.relative_to(base).parts
+        and any(log.parent.glob("*.parquet"))
+    ]
+    shutil.rmtree(result_log)
+    before = snapshot(base)
+
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+        run()
+
+    assert Path(info.value.table) == result_log.parent
+    assert snapshot(base) == before
 
 
 def test_flush_can_load_a_log_published_during_the_retry(

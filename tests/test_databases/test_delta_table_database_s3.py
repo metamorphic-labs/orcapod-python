@@ -68,7 +68,9 @@ def test_s3_flush_and_read(s3_base_uri, s3_storage_options):
     "path", [("table",), ("group", "table")], ids=["top-level", "nested"]
 )
 @pytest.mark.parametrize(
-    "partitions", [None, ["tag1", "tag2"]], ids=["flat", "partitioned"]
+    "partitions",
+    [None, ["tag1", "tag2"], ["tag2", "tag1"]],
+    ids=["flat", "partitioned", "reordered-partitions"],
 )
 def test_s3_table_with_missing_log_is_refused(
     s3_base_uri: str,
@@ -89,11 +91,13 @@ def test_s3_table_with_missing_log_is_refused(
             "x": [1],
         }
     )
+    if partitions == ["tag2", "tag1"]:
+        data = data.select(
+            ["x", "tag2", DeltaTableDatabase.RECORD_ID_COLUMN, "tag1", "y"]
+        )
     deltalake.write_deltalake(
         uri, data, partition_by=partitions, storage_options=s3_storage_options
     )
-    warm = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
-    assert warm.get_all_records(path) is not None
 
     fs = s3fs.S3FileSystem(
         key=s3_storage_options["AWS_ACCESS_KEY_ID"],
@@ -110,9 +114,6 @@ def test_s3_table_with_missing_log_is_refused(
         lambda: fresh.get_all_records(path),
         lambda: fresh.get_table_schema(path),
         lambda: fresh.table_exists(path),
-        lambda: warm.table_exists(path),
-        lambda: fresh.list_table_paths(),
-        lambda: fresh.list_table_paths(path),
         lambda: fresh.add_record(path, b"b", pa.table({"v": [2]}), flush=True),
     ):
         with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
@@ -122,7 +123,7 @@ def test_s3_table_with_missing_log_is_refused(
     assert {name: fs.cat_file(name) for name in fs.find(uri)} == before
 
 
-def test_s3_non_hive_orphan_is_refused_by_fresh_and_cached_misses(
+def test_s3_non_hive_orphan_is_refused_on_first_read_and_flush(
     s3_base_uri: str,
     s3_storage_options: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
@@ -131,8 +132,10 @@ def test_s3_non_hive_orphan_is_refused_by_fresh_and_cached_misses(
     monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
     path = ("table",)
     uri = f"{s3_base_uri}/table"
-    cached = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
-    assert cached.get_all_records(path) is None
+    writer_with_cached_miss = DeltaTableDatabase(
+        s3_base_uri, storage_options=s3_storage_options
+    )
+    assert writer_with_cached_miss.get_all_records(path) is None
     writer = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
     writer.add_record(path, b"a", pa.table({"x": [1]}), flush=True)
 
@@ -160,8 +163,9 @@ def test_s3_non_hive_orphan_is_refused_by_fresh_and_cached_misses(
 
     for operation in (
         lambda: fresh.get_all_records(path),
-        lambda: cached.get_all_records(path),
-        lambda: fresh.add_record(path, b"b", pa.table({"x": [2]}), flush=True),
+        lambda: writer_with_cached_miss.add_record(
+            path, b"b", pa.table({"x": [2]}), flush=True
+        ),
     ):
         with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
             operation()
