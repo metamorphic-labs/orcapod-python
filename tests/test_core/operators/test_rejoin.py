@@ -773,16 +773,14 @@ def test_different_source_ids_match_nothing() -> None:
     origin = _origin()
     source_id = next(name for name in _system_tags(_source()) if "source_id" in name)
     values = origin.column(source_id).to_pylist()
-    a = _branch(
-        origin,
-        ["rate"],
-        **{source_id: pa.array(["a", "a", *values[2:]], pa.large_string())},
-    )
-    b = _branch(
-        origin,
-        ["depth"],
-        **{source_id: pa.array(["b", "b", *values[2:]], pa.large_string())},
-    )
+    left: dict[str, Any] = {
+        source_id: pa.array(["a", "a", *values[2:]], pa.large_string())
+    }
+    right: dict[str, Any] = {
+        source_id: pa.array(["b", "b", *values[2:]], pa.large_string())
+    }
+    a = _branch(origin, ["rate"], **left)
+    b = _branch(origin, ["depth"], **right)
     whole = _branch(origin, ["area"])
     for inputs in ((a, b), (b, a), (a, whole), (whole, a), (a, whole, b)):
         result, warned = _rejoined(*inputs)
