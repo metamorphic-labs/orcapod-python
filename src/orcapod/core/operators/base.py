@@ -4,7 +4,11 @@ import asyncio
 from abc import abstractmethod
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+from itertools import combinations
 from typing import TYPE_CHECKING, Any, get_args
+
+import pyarrow as pa
+
 
 from orcapod.core.operators.meta_columns import (
     without_input_meta,
@@ -25,8 +29,6 @@ from orcapod.types import ColumnConfig, ContentHash, DataType, Schema
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 
 
@@ -88,6 +90,7 @@ def require_shared_arrow_type(
     """
     shared = arrow_utils.shared_arrow_type(left_type, right_type)
     if shared is None:
+        _require_matching_nested_flags(operator, name, left_type, right_type)
         left_description = arrow_utils.describe_arrow_type(left_type)
         right_description = arrow_utils.describe_arrow_type(right_type)
         raise InputValidationError(
@@ -97,6 +100,65 @@ def require_shared_arrow_type(
             + "have the same Arrow type."
         )
     return shared
+
+
+def _require_matching_nested_flags(
+    operator: str, column: str, left_type: pa.DataType, right_type: pa.DataType
+) -> None:
+    """Name a join's conflicting nested fields and how to make the flags agree."""
+    paths = arrow_utils.nested_nullability_differences(left_type, right_type)
+    if paths:
+        fields = ", ".join(repr(f"{column}.{path}") for path in paths)
+        left_description = _describe_with_storage(left_type)
+        right_description = _describe_with_storage(right_type)
+        raise InputValidationError(
+            f"{operator} inputs disagree on the Arrow type of column {column!r}: "
+            f"{left_description} in one input and {right_description} in the other. "
+            f"The types differ in the nullability of nested field {fields}. Declare the same "
+            "nested flags on both inputs or drop the explicit non-null declaration."
+        )
+
+
+def _describe_with_storage(arrow_type: pa.DataType) -> str:
+    """Describe a type so that its nested flags can be read.
+
+    An extension type's text does not show its storage, where its nested flags
+    are, so the storage type is added.
+    """
+    description = arrow_utils.describe_arrow_type(arrow_type)
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return f"{description} stored as {arrow_type.storage_type}"
+    return description
+
+
+def explain_nested_join_conflict(
+    operator: str,
+    *streams: StreamProtocol,
+    include_data: bool = False,
+    column: str | None = None,
+) -> None:
+    """Diagnose nested flags when Python schema validation already failed.
+
+    Synthesized struct classes can differ even when their Python annotations
+    look alike. Only examine typed Arrow schemas on the error path.
+    When validation has identified the conflicting column, examine only it.
+    """
+    from orcapod.core.streams.base import typed_arrow_schemas
+
+    try:
+        schemas = [typed_arrow_schemas(stream) for stream in streams]
+    except (TypeError, ValueError, InputValidationError):
+        return  # Keep the original validation error if the Arrow schema is unavailable.
+    roles = 2 if include_data else 1
+    for a, b in combinations(schemas, 2):
+        for left, right in zip(a[:roles], b[:roles], strict=True):
+            shared = set(left.names) & set(right.names)
+            if column is not None:
+                shared &= {column}
+            for name in sorted(shared):
+                _require_matching_nested_flags(
+                    operator, name, left.field(name).type, right.field(name).type
+                )
 
 
 def require_matchable_key(operator: str, name: str, arrow_type: pa.DataType) -> None:

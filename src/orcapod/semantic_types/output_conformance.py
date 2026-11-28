@@ -209,6 +209,16 @@ class _Checker:
                 if mismatch:
                     return _at(mismatch, f"[{index}]")
             return None
+        if origin is set:
+            if not isinstance(value, set):
+                return Nonconformance(
+                    "", declared, value, "Return a set instead: set(value)"
+                )
+            for item in value:
+                mismatch = self.check(item, args[0])
+                if mismatch:
+                    return _at(mismatch, "[*]")
+            return None
         if origin is dict:
             if not isinstance(value, dict):
                 return Nonconformance(
