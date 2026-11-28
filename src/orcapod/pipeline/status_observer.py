@@ -60,6 +60,7 @@ from uuid_utils import uuid7
 
 from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.observer import NoOpLogger
+from orcapod.pipeline.observer_losses import STATUS_EVENTS, record_lost_event
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
 
@@ -301,12 +302,15 @@ class StatusObserver:
         row = pa.table(columns)
         try:
             self._db.add_record(DEFAULT_STATUS_PATH, status_id, row, flush=True)
-        except Exception:
+        except Exception as error:
+            # The run goes on: its results do not depend on this row. The loss is
+            # logged here and reported by the run (ITL-1556).
             logger.exception(
                 "StatusObserver: failed to write status event for node=%s state=%s",
                 node_label,
                 state,
             )
+            record_lost_event(self._current_run_id, STATUS_EVENTS, error)
 
 
 class _ContextualizedStatusObserver:
@@ -331,7 +335,12 @@ class _ContextualizedStatusObserver:
 
     def contextualize(self, *identity_path: str) -> "_ContextualizedStatusObserver":
         """Re-contextualize with a new identity path (scopes the DB)."""
-        return _ContextualizedStatusObserver(self._db.at(*identity_path))
+        ctx = _ContextualizedStatusObserver(self._db.at(*identity_path))
+        # The copy belongs to the same run: its events carry, and its losses are
+        # reported under, that run's id.
+        ctx._current_run_id = self._current_run_id
+        ctx._current_pipeline_uri = self._current_pipeline_uri
+        return ctx
 
     def on_run_start(
         self,
@@ -427,14 +436,15 @@ class _ContextualizedStatusObserver:
             )
 
         row = pa.table(columns)
-        # TODO: re-evaluate broad exception absorption — ideally narrow to DB-specific
-        # errors (e.g. IOError, ArrowInvalid) once the full set of failure modes is known.
         try:
             self._db.add_record(DEFAULT_STATUS_PATH, status_id, row, flush=True)
-        except Exception:
+        except Exception as error:
+            # The run goes on; the loss is logged here and reported by the run
+            # (ITL-1556).
             logger.exception(
                 "_ContextualizedStatusObserver: failed to write status event "
                 "for node=%s state=%s",
                 node_label,
                 state,
             )
+            record_lost_event(self._current_run_id, STATUS_EVENTS, error)

@@ -782,6 +782,20 @@ class RowFailuresWarning(UserWarning):
     """
 
 
+class ObserverEventsLostWarning(UserWarning):
+    """Issued once at the end of a job run whose observers lost events (ITL-1556).
+
+    A ``StatusObserver`` and a ``LoggingObserver`` record run events as rows in a
+    database. A write that fails does not stop the run, whose results do not depend on
+    those rows: the failure is logged with its traceback when it happens, and the run
+    goes on. At the end of the run (``job.run()``, ``job.run_async()``) this warning
+    says how many events of each observer kind were not recorded and gives each kind's
+    first error. The run's ``RunSummary`` (returned by the run, kept as
+    ``job.last_run``) holds the same counts in ``lost_observer_events``. The run's
+    result and summary are complete and kept before the warning is issued.
+    """
+
+
 class SourceCheckFailedWarning(UserWarning):
     """A source could not be checked for new data at the start of a run (ITL-1102).
 

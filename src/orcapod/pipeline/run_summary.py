@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from types import FrameType
 
+    from orcapod.pipeline.observer_losses import LostObserverEvents
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
     from orcapod.pipeline.restrictions import RestrictedSource
     from orcapod.types import Condition, SchemaLike
@@ -104,6 +105,13 @@ class RunSummary:
         ran_nothing: Whether the run ran no node: every node held a current run
             (ITL-1095). Decided by the run's plan, which counts every kind of node, so a
             run that ran only a side-effect or operator node is not "nothing to do".
+        lost_observer_events: The observer events the run could not record, by
+            observer kind (``"status"``, ``"logging"``), each with its count and its
+            first error's text (ITL-1556); empty when every event was recorded. A
+            failed write of a ``StatusObserver`` or ``LoggingObserver`` does not stop
+            the run and changes none of its results or other counts; an
+            ``ObserverEventsLostWarning`` reports the same at the end of the run. A
+            job node's own ``run()`` takes no observer, so its summary lists none.
     """
 
     def __init__(
@@ -117,6 +125,7 @@ class RunSummary:
         ran_nothing: bool = False,
         restricted_sources: Mapping[str, RestrictedSource] | None = None,
         asynchronous: bool = False,
+        lost_observer_events: Mapping[str, LostObserverEvents] | None = None,
     ) -> None:
         """Build the summary.
 
@@ -132,6 +141,8 @@ class RunSummary:
                 (``restrictions.restrictions_in_force``). Displayed by slot name
                 or direct source label.
             asynchronous: Whether the async orchestrator executed the run.
+            lost_observer_events: The observer events the run could not record, by
+                observer kind.
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
@@ -139,6 +150,9 @@ class RunSummary:
         self.target: str | None = target
         self.unchecked_sources: tuple[str, ...] = tuple(unchecked_sources)
         self.ran_nothing: bool = ran_nothing
+        self.lost_observer_events: Mapping[str, LostObserverEvents] = dict(
+            sorted((lost_observer_events or {}).items())
+        )
         self._attribution_note: str = (
             _ASYNC_ATTRIBUTION_NOTE
             if asynchronous and not load_only and not ran_nothing and nodes
@@ -250,11 +264,32 @@ class RunSummary:
             for slot, source_id in self.restricted_source_ids.items()
         )
 
+    def lost_observer_events_message(self) -> str:
+        """Each observer kind's lost events and first error, for the run's warning.
+
+        Returns:
+            One clause per kind, joined, or ``""`` when no event was lost.
+        """
+        return "; ".join(
+            f"{lost.count} {lost.kind} {'event' if lost.count == 1 else 'events'} "
+            f"(first error: {_first_line(lost.first_error)})"
+            for lost in self.lost_observer_events.values()
+        )
+
+    def _lost_events_line(self) -> str | None:
+        """The line counting the observer events that were not recorded, if any."""
+        if not self.lost_observer_events:
+            return None
+        return "observer events not recorded: " + self.lost_observer_events_message()
+
     def _source_lines_html(self) -> str:
-        """The unchecked and restricted source lines as HTML paragraphs, or ``""``."""
+        """The source and lost-event lines as HTML paragraphs, or ``""``."""
         restricted = self._restrictions_line()
-        return self._unchecked_html() + (
-            "" if restricted is None else f"<p>{html.escape(restricted)}</p>"
+        lost = self._lost_events_line()
+        return (
+            self._unchecked_html()
+            + ("" if restricted is None else f"<p>{html.escape(restricted)}</p>")
+            + ("" if lost is None else f"<p>{html.escape(lost)}</p>")
         )
 
     def _unchecked_html(self) -> str:
@@ -271,6 +306,9 @@ class RunSummary:
         restricted = self._restrictions_line()
         if restricted is not None:
             lines.append(f"  {restricted}")
+        lost = self._lost_events_line()
+        if lost is not None:
+            lines.append(f"  {lost}")
         if self._attribution_note:
             lines.append(f"  {self._attribution_note}")
         for node in self.nodes.values():
@@ -374,15 +412,18 @@ def _rows(n: int) -> str:
     return f"{n} row" if n == 1 else f"{n} rows"
 
 
+def _first_line(text: str) -> str:
+    """The first line of ``text``, marked with ``...`` when more lines follow."""
+    lines = text.splitlines()
+    first = lines[0] if lines else ""
+    return f"{first} ..." if len(lines) > 1 else first
+
+
 def _error_line(error: BaseException | None) -> str:
     """``Type: first line of the message``."""
     if error is None:
         return ""
-    message = str(error)
-    lines = message.splitlines()
-    first = lines[0] if lines else ""
-    if len(lines) > 1:
-        first += " ..."
+    first = _first_line(str(error))
     return f"{type(error).__name__}: {first}" if first else type(error).__name__
 
 
@@ -412,6 +453,33 @@ def warn_row_failures(summary: RunSummary, caller: FrameType) -> None:
     from orcapod.utils.warning_utils import warn_at_frame
 
     warn_at_frame(summary.failures_message(), RowFailuresWarning, caller)
+
+
+def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
+    """Issue the run's ``ObserverEventsLostWarning``, at the end of the run (ITL-1556).
+
+    At the end and not at the first loss: the count and each kind's first error are
+    complete then, the run's rows and summary are already kept (the warning turned into
+    an error loses nothing), and it is shown at the line that started the run, where
+    the first loss happens inside a node, possibly on a worker thread. Each failed
+    write is still logged by its observer when it happens.
+
+    Args:
+        summary: The run's summary, with lost observer events.
+        caller: The frame that called ``run``; the warning is shown at its line.
+    """
+    from orcapod.errors import ObserverEventsLostWarning
+    from orcapod.utils.warning_utils import warn_at_frame
+
+    warn_at_frame(
+        "Observer events were not recorded in this run: "
+        + f"{summary.lost_observer_events_message()}. The run's results are not "
+        + "affected, but its status and log records are incomplete. Each failed "
+        + "write was logged with its traceback; the counts are in the run "
+        + "summary's lost_observer_events.",
+        ObserverEventsLostWarning,
+        caller,
+    )
 
 
 class RunCountingObserver:

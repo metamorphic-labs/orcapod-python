@@ -53,6 +53,7 @@ from uuid_utils import uuid7
 
 from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.logging_capture import install_capture_streams
+from orcapod.pipeline.observer_losses import LOGGING_EVENTS, record_lost_event
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 
 if TYPE_CHECKING:
@@ -129,10 +130,13 @@ class DataLogger:
         row = pa.table(columns)
         try:
             self._db.add_record(self._log_path, log_id, row, flush=True)
-        except Exception:
+        except Exception as error:
+            # The run goes on: its results do not depend on this row. The loss is
+            # logged here and reported by the run (ITL-1556).
             logger.exception(
                 "LoggingObserver: failed to write log row",
             )
+            record_lost_event(self._run_id, LOGGING_EVENTS, error)
 
 
 class LoggingObserver:

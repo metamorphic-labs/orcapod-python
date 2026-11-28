@@ -6,6 +6,7 @@ from .execution_context import ExecutionContext
 from .graph import Pipeline
 from .job import PipelineJob
 from .logging_observer import LoggingObserver, DataLogger
+from .observer_losses import LostObserverEvents
 from .run_summary import NodeRunSummary, RunSummary
 from .serialization import (
     LoadStatus,
@@ -22,6 +23,7 @@ __all__ = [
     "GraphProtocol",
     "LoadStatus",
     "LoggingObserver",
+    "LostObserverEvents",
     "NodeRunSummary",
     "DataLogger",
     "OrcaDAG",
