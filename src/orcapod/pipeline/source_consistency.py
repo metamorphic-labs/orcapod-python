@@ -16,8 +16,8 @@ from orcapod.utils.schema_utils import arrow_schema_identity
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
+    from orcapod.pipeline.job import PipelineJob
     from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.restrictions import Rebinding
     from orcapod.protocols.core_protocols import StreamProtocol
@@ -26,79 +26,97 @@ if TYPE_CHECKING:
 SourceUse = tuple[str, "StreamProtocol"]
 
 
-def slot_dependency_error(
-    name: str | None, dependency: SourceJobNode
+def _binding_dependency_error(
+    name: str | None, dependency: StreamProtocol
 ) -> SourceSpecMismatchError:
-    """Name the slots involved in an unsupported binding and how to replace it."""
+    """Name the dependency that makes a slot binding unsupported."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+
     target = "a source slot" if name is None else f"source slot {name!r}"
+    if isinstance(dependency, SourceJobNode):
+        detail = f"source slot {dependency.name!r}"
+        remedy = "use a non-slot node's as_source() to read stored results"
+    else:
+        detail = f"node {dependency.label!r} of the same job"
+        remedy = "use another job's node.as_source() to read stored results"
     return SourceSpecMismatchError(
-        f"Binding {target} to a source that depends on source slot "
-        f"{dependency.name!r} is not supported yet (ITL-1559). "
-        + "Pass the underlying source, or use a non-slot node's as_source() to read stored results."
+        f"Binding {target} to a source that depends on {detail} "
+        f"is not supported yet (ITL-1559). Pass the underlying source, or {remedy}."
     )
 
 
-def _walk_live_inputs(
-    streams: Iterable[StreamProtocol], *, stop_at_slots: bool = False
-) -> Iterable[StreamProtocol]:
-    """Walk live inputs by identity, checking slot dependencies and active-path cycles.
+def require_no_owned_node_dependency(
+    stream: StreamProtocol, name: str | None, owner: PipelineJob
+) -> None:
+    """Refuse a dependency on a node of the binding's own job."""
+    from orcapod.core.nodes.staleness import RunHoldingNode
+    from orcapod.core.sources.derived_source import DerivedSource
 
-    A prospective binding stops at its first slot. A read or run follows each
-    slot's binding and refuses a second slot anywhere in that binding. Track
-    the binding walk separately so a path entering a slot from its own bound
-    stream reports both slots, even if it then revisits the starting stream.
+    dependency = (
+        stream.stored_result_origin if isinstance(stream, DerivedSource) else stream
+    )
+    if isinstance(dependency, RunHoldingNode) and dependency._belongs_to_job(owner):  # pyright: ignore[reportPrivateUsage]  # binding checks use node provenance
+        raise _binding_dependency_error(name, dependency)
+
+
+def _require_live_inputs(
+    streams: Iterable[StreamProtocol],
+    binding: tuple[str | None, PipelineJob | None] | None = None,
+) -> None:
+    """Validate live inputs by identity, with a separate walk inside each binding.
+
+    A binding refuses any bindable slot and any node of its owner, including a
+    stored-result origin. Stored results from other jobs remain leaves.
     """
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.pipeline.restrictions import streams_beneath
 
-    pending: list[tuple[StreamProtocol, SourceJobNode | None, bool]] = [
-        (stream, None, False) for stream in streams
-    ]
+    pending = [(stream, binding, False) for stream in streams]
     pending.reverse()
-    active: set[tuple[int, bool]] = set()
-    visited: set[tuple[int, bool]] = set()
+    active: set[tuple[int, bool, int]] = set()
+    visited: set[tuple[int, bool, int]] = set()
     while pending:
-        stream, binding, leaving = pending.pop()
-        key = (id(stream), binding is not None)
+        stream, current_binding, leaving = pending.pop()
+        owner = current_binding[1] if current_binding is not None else None
+        key = (id(stream), current_binding is not None, id(owner))
         if leaving:
             active.remove(key)
             visited.add(key)
             continue
-        if isinstance(stream, SourceJobNode) and binding is not None:
-            raise slot_dependency_error(binding.name, stream)
-        if key in active:
-            raise live_input_cycle_error(stream.label)
         if key in visited:
             continue
-        yield stream
-        if isinstance(stream, SourceJobNode) and stop_at_slots:
-            continue
+        if current_binding is not None:
+            name = current_binding[0]
+            if isinstance(stream, SourceJobNode):
+                raise _binding_dependency_error(name, stream)
+            if owner is not None:
+                require_no_owned_node_dependency(stream, name, owner)
+        if key in active:
+            raise live_input_cycle_error(stream.label)
         active.add(key)
-        pending.append((stream, binding, True))
-        next_binding = stream if isinstance(stream, SourceJobNode) else binding
+        pending.append((stream, current_binding, True))
+        next_binding = (
+            (stream.name, stream._get_binding_owner())  # pyright: ignore[reportPrivateUsage]  # validate the active slot in its owning job
+            if isinstance(stream, SourceJobNode)
+            else current_binding
+        )
         pending.extend(
             (upstream, next_binding, False)
             for upstream in reversed(streams_beneath(stream))
         )
 
 
-def slot_dependency(source: StreamProtocol | None) -> SourceJobNode | None:
-    """Find a bindable slot a source would read, if any."""
-    from orcapod.core.nodes.source_node import SourceJobNode
-
-    # TODO(ITL-1559): live slot references can create cycles or retain an old
-    # slot after recompilation. Stored-result sources end the live-input walk.
+def require_independent_source_binding(
+    source: StreamProtocol | None, name: str | None, owner: PipelineJob | None = None
+) -> None:
+    """Refuse a prospective binding before reading its schema, name or rows."""
     if source is not None:
-        for stream in _walk_live_inputs((source,), stop_at_slots=True):
-            if isinstance(stream, SourceJobNode):
-                return stream
-    return None
+        _require_live_inputs((source,), (name, owner))
 
 
 def require_live_source_bindings(streams: Iterable[StreamProtocol]) -> None:
     """Check live inputs before resolving schemas or hashes, reading rows or running."""
-    for _ in _walk_live_inputs(streams):
-        pass
+    _require_live_inputs(streams)
 
 
 def invocation_source_uses(invocations: Iterable[PodInvocation]) -> Iterable[SourceUse]:

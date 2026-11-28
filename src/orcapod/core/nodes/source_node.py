@@ -1628,12 +1628,10 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
         from orcapod.pipeline.source_consistency import (
-            slot_dependency,
-            slot_dependency_error,
+            require_independent_source_binding,
         )
 
-        if (dependency := slot_dependency(bound_source)) is not None:
-            raise slot_dependency_error(name, dependency)
+        require_independent_source_binding(bound_source, name)
         if tag_schema is None or data_schema is None:
             if bound_source is None:
                 raise ValueError(
@@ -1735,17 +1733,15 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         Raises:
             InconsistentSourceError: If the replacement introduces conflicting sources.
             SourceSpecMismatchError: If *value* does not fit the declared schema or
-                depends on a bindable source slot (ITL-1559).
+                depends on a bindable source slot or on this job's own node (ITL-1559).
         """
         from orcapod.pipeline.source_consistency import (
-            slot_dependency,
-            slot_dependency_error,
+            require_independent_source_binding,
         )
 
-        owner = self._binding_owner() if self._binding_owner is not None else None
+        owner = self._get_binding_owner()
         if owner is None:
-            if (dependency := slot_dependency(value)) is not None:
-                raise slot_dependency_error(self.name, dependency)
+            require_independent_source_binding(value, self.name)
             self._bind(value)
             self._update_modified_time()
         else:
@@ -1754,6 +1750,10 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
     def _set_binding_owner(self, owner: PipelineJob | None) -> None:
         """Route changes to a job while this is one of its active slots."""
         self._binding_owner = weakref.ref(owner) if owner is not None else None
+
+    def _get_binding_owner(self) -> PipelineJob | None:
+        """Return the job that owns this active slot, if any."""
+        return self._binding_owner() if self._binding_owner is not None else None
 
     def _bound_stream(self) -> StreamProtocol | None:
         """Resolve the live binding before reading it, even if its rows are cached."""
@@ -2263,13 +2263,11 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             case _:
                 # Case 3: concrete stream — bound SJN.
                 from orcapod.pipeline.source_consistency import (
-                    slot_dependency,
-                    slot_dependency_error,
+                    require_independent_source_binding,
                 )
 
                 # Schema and source-name inference can consult the live inputs.
-                if (dependency := slot_dependency(stream)) is not None:
-                    raise slot_dependency_error(name, dependency)
+                require_independent_source_binding(stream, name)
                 # Slot name priority:
                 #   1. explicit *name* parameter
                 #   2. stream.source_name for RootSource (its id without the kind part)

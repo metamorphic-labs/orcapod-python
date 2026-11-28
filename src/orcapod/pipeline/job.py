@@ -15,6 +15,8 @@ from orcapod.core.nodes import JobNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.core.nodes.staleness import RunHoldingNode
+from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
@@ -49,9 +51,9 @@ from orcapod.pipeline.run_summary import (
 from orcapod.pipeline.source_consistency import (
     invocation_source_uses,
     require_consistent_sources,
+    require_independent_source_binding,
     require_live_source_bindings,
-    slot_dependency,
-    slot_dependency_error,
+    require_no_owned_node_dependency,
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
@@ -267,6 +269,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if key in visited:
                 continue
             visited.add(key)
+            if isinstance(stream, DerivedSource):
+                require_no_owned_node_dependency(stream, stream.source_name, self)
             if isinstance(stream, SourceJobNode):
                 if id(stream) not in own_nodes:
                     raise InconsistentSourceError(
@@ -306,11 +310,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
     def _source_node_from_recording(self, key: str) -> SourceJobNode:
         """Preserve an explicit binding when recompiling its slot."""
+        stream = self._source_streams[key]
         if key in self._rebound_source_keys:
             slot = self._persistent_node_map.get(key)
             if isinstance(slot, SourceJobNode):
-                return self.source_node_class.from_stream(slot)
-        return self.source_node_class.from_stream(self._source_streams[key])
+                stream = slot
+        if isinstance(stream, SourceJobNode):
+            require_independent_source_binding(stream.bound_source, stream.name, self)
+        else:
+            name = stream.source_name if isinstance(stream, RootSource) else None
+            require_independent_source_binding(stream, name, self)
+        return self.source_node_class.from_stream(stream)
 
     def compile(self) -> None:
         """Compile recorded invocations into a frozen DAG of job nodes.
@@ -341,6 +351,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         previous_sources = self._sources
         self._sources = {}
         for key, node in self._persistent_node_map.items():
+            if isinstance(node, RunHoldingNode):
+                node._set_pipeline_job(self)  # pyright: ignore[reportPrivateUsage]  # compiled node provenance
             if isinstance(node, SourceJobNode):
                 if not self._loaded:
                     self._sources_as_captured.setdefault(key, node.bound_source)
@@ -558,7 +570,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 (ITL-1506). The job is left as it was.
             SourceSpecMismatchError: If any source's columns differ from its slot's
                 declared names, roles or types, or the source depends on a bindable
-                source slot (ITL-1559).
+                source slot or a node of this job (ITL-1559).
             ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
                 operator node that caches (``LOG`` or ``REPLAY``) would read a
                 restricted source, one this bind binds or one already bound
@@ -643,8 +655,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
     ) -> list[tuple[SourceJobNode, cp.StreamProtocol | None, _DeclaredForm | None]]:
         """Validate the prospective job and prepare each changed slot's row form."""
         for slot, source in rebinding:
-            if (dependency := slot_dependency(source)) is not None:
-                raise slot_dependency_error(slot.name, dependency)
+            require_independent_source_binding(source, slot.name, self)
         nodes = self._persistent_node_map.values()
         require_consistent_sources(
             ((f"node {node.label!r}", node) for node in nodes), rebinding
@@ -2017,8 +2028,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             else:
                 if source is None:
                     continue
-                if (dependency := slot_dependency(source)) is not None:
-                    raise slot_dependency_error(spec_name, dependency)
+                require_independent_source_binding(source, spec_name)
                 try:
                     # A rebuilt source whose column types changed is treated as
                     # one that could not be rebuilt (ITL-1112).
@@ -2294,6 +2304,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Callers needing blueprint nodes for rendering use job.pipeline.dag.
         job_dag: OrcaDAG = OrcaDAG()
         for node in job._persistent_node_map.values():
+            if isinstance(node, RunHoldingNode):
+                node._set_pipeline_job(job)  # pyright: ignore[reportPrivateUsage]  # restored node provenance
             job_dag.add_node(node)
         for u_hash, v_hash in job._graph_edges:
             u_node = job._persistent_node_map.get(u_hash)

@@ -383,12 +383,13 @@ tag_schema=Schema({...}), data_schema=Schema({...}))`) means one Arrow type per 
 zones, declare the slot with Arrow schemas (`tag_schema=pa.schema([...])`). Binding a source
 never changes a node's schema or where its results are stored.
 
-A binding must also be independent of every bindable source slot, including
-slots reached through operators or source wrappers. As a stopgap pending
-ITL-1559, Orcapod checks this when binding, when reading the slot directly and
-before each job or node run, including a load-only run. This also protects the
-schema and hash lookups needed to construct an `as_source()` result. Pass the
-underlying source, or use a non-slot node's `as_source()` to read stored results.
+A binding must be independent of every bindable source slot and every node
+of its own job, including dependencies reached through operators,
+`node.as_source()`, or other source wrappers. As a stopgap pending ITL-1559,
+Orcapod checks this when binding, when reading the slot directly, and before
+each job or node run, including a load-only run. This also protects the schema
+and hash lookups needed to construct an `as_source()` result. Pass the
+underlying source, or use another job's `node.as_source()` to read stored results.
 
 ```python
 from orcapod.errors import SourceSpecMismatchError

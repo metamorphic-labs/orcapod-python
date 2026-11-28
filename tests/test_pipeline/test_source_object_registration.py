@@ -1624,3 +1624,186 @@ def test_prebuilt_stream_over_own_slot_is_refused_before_rebinding(
     assert sorted(job.direct.as_table()["out"].to_pylist()) == [13, 17]
     assert sorted(job.inside.as_table()["out"].to_pylist()) == [13, 17]
     assert sorted(job.own_slot.as_table()["out"].to_pylist()) == [9, 9]
+
+
+@function_pod(output_keys=("x", "y"))
+def same_columns(x: int, y: int) -> tuple[int, int]:
+    """Return both input columns so stored results fit the original slot."""
+    return x, y
+
+
+def _stored_result_job(
+    kind: str, offset: int = 0, *, copy: bool = False
+) -> PipelineJob:
+    from orcapod.types import CacheMode
+
+    from orcapod.sources import DerivedSource
+
+    base = _shifted_source("a", offset)
+    source = (
+        DerivedSource(base, source_id="a", tags_as_data={"t1": "copy"})
+        if copy
+        else base
+    )
+    database = InMemoryArrowDatabase()
+    with PipelineJob("stored", database=database) as job:
+        if kind == "operator":
+            _ = source.select_data_columns(["x", "y"], label="result")
+        else:
+            _ = same_columns.pod(source, label="result")
+    if kind == "operator":
+        job.nodes["result"].attach_databases(
+            pipeline_database=database.at("stored"), cache_mode=CacheMode.LOG
+        )
+    _ = job.run()
+    return job
+
+
+@pytest.mark.parametrize("kind", ["operator", "function"])
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("route", ["batch", "setter", "recompiled"])
+def test_slot_binding_refuses_its_own_stored_results(
+    kind: str, wrapped: bool, route: str
+) -> None:
+    job = _stored_result_job(kind)
+    stored = job.nodes["result"].as_source()
+    source = stored.cached(InMemoryArrowDatabase()) if wrapped else stored
+    if route == "recompiled":
+        job.compile()
+    original = job.sources["a"]
+
+    with pytest.raises(
+        SourceSpecMismatchError, match=r"slot 'a'.*node 'result'.*ITL-1559"
+    ):
+        _rebind(job, {"a": source}, setter=route == "setter")
+
+    assert job.nodes["a"].bound_source is original
+    assert job.sources["a"] is original
+    assert job.nodes["a"].as_table()["x"].to_pylist() == [1, 3]
+
+
+def test_capture_refuses_its_own_stored_results() -> None:
+    job = _stored_result_job("operator")
+    stored = job.nodes["result"].as_source()
+    with job:
+        with pytest.raises(
+            SourceSpecMismatchError, match=r"slot .*node 'result'.*ITL-1559"
+        ):
+            _ = total.pod(stored, label="feedback")
+
+    assert "feedback" not in job.nodes
+
+
+@pytest.mark.parametrize(
+    "entry", ["sync", "async", "load_only", "slot", "node", "read"]
+)
+@pytest.mark.parametrize("kind", ["operator", "function"])
+def test_own_stored_results_introduced_by_proxy_rebind_are_refused(
+    entry: str, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orcapod.core.sources.source_proxy import SourceProxy
+    from orcapod.sources import DerivedSource
+
+    job = _stored_result_job(kind, copy=True)
+    foreign = _stored_result_job(kind, offset=10, copy=True)
+    foreign_results = foreign.nodes["result"].as_source()
+    own_results = job.nodes["result"].as_source()
+    proxy = SourceProxy(
+        foreign_results.source_id,
+        foreign_results.content_hash().to_string(),
+        foreign_results.pipeline_hash().to_string(),
+        *foreign_results.output_schema(),
+    )
+    proxy.bind(foreign_results)
+    slot = job.nodes["a"]
+    result = job.nodes["result"]
+    wrapped = DerivedSource(proxy, source_id="bridged", tags_as_data={"t1": "copy"})
+    job.bind(sources={"a": wrapped})
+    _ = job.run()
+    assert sorted(result.as_table()["x"].to_pylist()) == [11, 13]
+
+    proxy.bind(own_results)
+
+    def unexpected_check() -> bool:
+        pytest.fail("A source was checked before the invalid binding was refused")
+
+    monkeypatch.setattr(wrapped, "check_for_new_data", unexpected_check)
+    reads = {
+        "sync": job.run,
+        "async": lambda: asyncio.run(job.run_async()),
+        "load_only": lambda: job.run(load_only=True),
+        "slot": slot.run,
+        "node": result.run,
+        "read": slot.as_table,
+    }
+    with pytest.raises(
+        SourceSpecMismatchError, match=r"slot 'a'.*node 'result'.*ITL-1559"
+    ):
+        _ = reads[entry]()
+
+
+@pytest.mark.parametrize("read", ["iter_data", "async_iter_data", "held_row_count"])
+def test_cold_function_held_reads_refuse_a_slot_cycle(
+    tmp_path: Path, read: str
+) -> None:
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.operators import SelectDataColumns
+
+    job = _job(tmp_path)
+    slot = job.nodes["a"]
+    function = job.nodes["result_a"]
+    projection = OperatorJobNode(SelectDataColumns(["x", "y"]), [job.sources["a"]])
+    job.bind(sources={"a": projection})
+    projection.upstreams = (slot,)
+
+    async def read_async() -> None:
+        _ = [row async for row in function.async_iter_data()]
+
+    with pytest.raises(SourceSpecMismatchError, match=r"slot 'a'.*slot 'a'.*ITL-1559"):
+        if read == "iter_data":
+            _ = list(function.iter_data())
+        elif read == "async_iter_data":
+            asyncio.run(read_async())
+        else:
+            _ = function.held_row_count()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="Reassigning operator inputs can leave stale held rows on direct reads (ITL-1586).",
+)
+def test_rewired_operator_slot_does_not_read_stale_rows_from_same_hash_roots() -> None:
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SemiJoin
+
+    first, other, conflict = (
+        DictSource(
+            [{"t": tag, "x": value}],
+            source_id=name,
+            tag_columns=["t"],
+            tag_only_columns=True,
+        )
+        for name, tag, value in [("same", "a", 1), ("other", "a", 2), ("same", "b", 3)]
+    )
+    assert first.content_hash() == conflict.content_hash()
+    operator = OperatorJobNode(
+        SemiJoin(),
+        [first, other],
+        label="op",
+        pipeline_database=InMemoryArrowDatabase(),
+    )
+    slot = SourceJobNode.from_stream(operator, name="slot")
+    _ = operator.run()
+    assert slot.as_table().to_pylist() == [{"t": "a", "x": 1}]
+
+    operator.upstreams = (first, conflict)
+    for run in (slot.run, operator.run):
+        with pytest.raises(InconsistentSourceError, match=r"input 1.*input 2"):
+            _ = run()
+    try:
+        rows = slot.as_table().to_pylist()
+    except InconsistentSourceError:
+        return
+    assert rows == []

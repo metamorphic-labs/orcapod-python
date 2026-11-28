@@ -491,6 +491,11 @@ class DerivedSource(RootSource):
             else None
         )
 
+    @property
+    def stored_result_origin(self) -> StreamProtocol | None:
+        """Return the stored-result node whose live schema and keys this source uses."""
+        return self._origin if self.live_source_inputs is None else None
+
     def _origin_records(self) -> "pa.Table | None":
         """Return the origin's rows, or ``None`` when a job node has none stored.
 

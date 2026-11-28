@@ -8,6 +8,7 @@ rebound two nodes up makes every node below it stale, not only its direct consum
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Iterable
 from typing import Any
 
@@ -24,6 +25,15 @@ class RunHoldingNode:
     # The summary of the node's last ``run()`` (with the nodes it ran first); a class
     # default so nodes rebuilt from a saved descriptor start without one.
     _last_run: Any = None
+    _pipeline_job: weakref.ReferenceType[object] | None = None
+
+    def _set_pipeline_job(self, job: object) -> None:
+        """Keep a node's job provenance through recompilation without owning the job."""
+        self._pipeline_job = weakref.ref(job)
+
+    def _belongs_to_job(self, job: object) -> bool:
+        """Whether this node was compiled or loaded as part of this job."""
+        return self._pipeline_job is not None and self._pipeline_job() is job
 
     @property
     def last_run(self) -> Any:
