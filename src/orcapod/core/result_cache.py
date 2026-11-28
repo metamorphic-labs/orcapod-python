@@ -173,6 +173,15 @@ def _with_declared_token_columns(
     return outputs
 
 
+def context_result_path(
+    uri: tuple[str, ...], context_parameter: str | None
+) -> tuple[str, ...]:
+    """Scope context-taking result tables by the configured parameter name."""
+    if context_parameter is None:
+        return uri
+    return (*uri[:-1], f"ctx:{context_parameter}", uri[-1])
+
+
 class ResultCache:
     """Shared result caching backed by an ``ArrowDatabaseProtocol``.
 

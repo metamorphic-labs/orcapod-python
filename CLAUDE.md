@@ -1016,7 +1016,7 @@ current data context are the current entries.
   2026, ITL-1471; below, "Row ids"). A change to the common
   bookkeeping columns of a table kind moves its layout version, so the table gets a new path.
   Never add, rename or retype a stored column without it.
-- A function result table is at
+- A plain function's result table is at
   `<function>/<output schema hash>/v<function major>/python.function.v1/rev1/rdb_v1`, three
   components with three owners (`docs/reference/data-function-types.md`):
   - `python.function.v1`, the data function type and its MAJOR (what a function means and how
@@ -1035,6 +1035,8 @@ current data context are the current entries.
   - Pipeline tables carry no revision (`.../python.function.v1/schema:<pipeline hash>/pdb_v2`).
     A saved job names the type and major only (`data_function_type_id`); the revision comes
     from the installed library's declaration (`declaration_for(type id)`).
+- Context-taking result tables start with `side_effect_function` and add a
+  `ctx:<parameter>` component immediately before the data function type (ITL-1559).
 - A data function type's declaration (`PYTHON_FUNCTION`, beside its class in
   `core/data_function.py`; the classes in `core/data_function_types.py`, a leaf module) is
   the source of truth: type name, major, revision, identity recipe, run rules, and its record
@@ -1050,8 +1052,8 @@ current data context are the current entries.
   and every read or lookup keeps rows of the current data context only
   (`keep_rows_of_data_context`, or a lookup constraint on the column).
 - A table at an older layout is never read as current and never modified. What a node does
-  about such tables, rows of another data context, and completion tables under the same name
-  outside the current job's completion paths is decided in one place,
+  about such tables, rows of another data context, and completion tables at a node's
+  previous pipeline identity is decided in one place,
   `contexts/stored.account_for_stale_tables`: count and report, or, for a node that delivers
   side effects (a `SideEffectPod` node, or a function node whose pod takes the invocation
   context, `ctx_arg`), raise `SideEffectLogDataContextError` before any delivery. A new kind
@@ -1063,8 +1065,8 @@ current data context are the current entries.
   node's database; `<prefix>/source` for a cached source) and every table there whose last
   component is not in `contexts/stored.CURRENT_LAYOUTS` is of another layout
   (`tables_of_another_layout`). For a node that tracks completions, the same listing
-  finds current-layout completion tables outside the node's own path and those of its job
-  (`completion_path` and `job_completion_paths`, ITL-1559).
+  checks the exact current-layout path computed from that node's pipeline identity
+  before the context parameter entered the hash (`previous_completion_path`, ITL-1559).
   A new layout constant must be added to `CURRENT_LAYOUTS`. A
   store that cannot list raises `TableListingNotSupportedError`: side-effecting nodes then
   warn and proceed (developer, November 11, 2026). Every database class implements

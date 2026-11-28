@@ -51,11 +51,13 @@ from orcapod.protocols.core_protocols import (
     TrackerManagerProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.system_constants import constants
 from orcapod.types import (
     ColumnConfig,
+    ContentHash,
     PipelineConfig,
     PodConfig,
     Schema,
@@ -86,6 +88,44 @@ def _executor_supports_concurrent(
     """Return True if the data function's executor supports concurrent execution."""
     executor = data_function.executor
     return executor is not None and executor.supports_concurrent_execution
+
+
+def pipeline_hash_before_context_parameter(stream: StreamBase) -> ContentHash:
+    """Recompute a stream's pipeline hash using the pre-ITL-1559 pod identity.
+
+    Only the pipeline identity of a context-taking function changed. Reuse the
+    current identities of the sources and other leaves, and resolve the former
+    pod identity through the existing identity structures of its descendants.
+    """
+    hasher = stream.data_context.semantic_hasher
+    hashes: dict[int, ContentHash] = {}
+
+    def resolve(obj: Any) -> ContentHash:
+        if not isinstance(obj, PipelineElementProtocol):
+            return obj.content_hash(hasher)
+        key = id(obj)
+        if key not in hashes:
+            if isinstance(obj, _FunctionPodBase) and obj.ctx_arg_name is not None:
+                structure = (
+                    obj.data_function
+                    if type(obj).pipeline_identity_structure
+                    is _FunctionPodBase.pipeline_identity_structure
+                    else obj.pipeline_identity_structure()
+                )
+                hashes[key] = hasher.hash_object(structure, resolver=resolve)
+            elif (
+                isinstance(obj, StreamBase)
+                and obj.producer is not None
+                and obj.upstreams
+            ):
+                hashes[key] = hasher.hash_object(
+                    obj.pipeline_identity_structure(), resolver=resolve
+                )
+            else:
+                hashes[key] = obj.pipeline_hash(hasher)
+        return hashes[key]
+
+    return resolve(stream)
 
 
 class _FunctionPodBase(TraceableBase):
@@ -182,7 +222,9 @@ class _FunctionPodBase(TraceableBase):
 
     def pipeline_identity_structure(self) -> Any:
         """Include the parameter that receives the invocation context, when set."""
-        return self.identity_structure()
+        if self._ctx_arg_name is not None:
+            return self.identity_structure()
+        return self.data_function
 
     def _build_invocation_context(
         self,
@@ -1871,6 +1913,7 @@ def function_pod(
             data_function = CachedDataFunction(
                 data_function,
                 result_database=result_database,
+                context_parameter=ctx_arg,
             )
 
         # Create a simple typed function pod

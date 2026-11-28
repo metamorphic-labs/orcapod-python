@@ -1297,10 +1297,9 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
     skipped and computed again.
 
     The search lists tables under the node's function or pod name (ITL-954).
-    A table at an older layout or a current-layout completion table under the
-    same name outside the current job's completion paths counts. The latter can
-    occur when a pipeline hash changes (ITL-1559). ``record_paths`` names every
-    table found.
+    A table at an older layout or a current-layout completion table at the
+    node's previous pipeline identity (ITL-1559) counts. ``record_paths``
+    names every table found.
 
     A fresh database is not a safe way around this error: it holds no completions, so on
     it the node performs every side effect again. Run the node on a fresh database only
@@ -1350,7 +1349,7 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
         if self.found_context is None:
             return (
                 f"{node} performs side effects, and stored completions exist at "
-                f"different paths under the same name ({tables}). They cannot be "
+                f"its previous pipeline identity ({tables}). They cannot be "
                 "matched with current inputs, so nothing was delivered or written by "
                 "this node. Reopen the job with the version and pipeline that wrote "
                 "these tables to reuse the completions."

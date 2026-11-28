@@ -24,7 +24,7 @@ import sys
 import uuid
 from abc import abstractmethod
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence, Set
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Literal, NamedTuple, cast
@@ -38,6 +38,7 @@ from orcapod.core.function_pod import (
     fall_through_tags,
     function_input,
     function_input_schema,
+    pipeline_hash_before_context_parameter,
     result_data_schema,
     result_pod,
     with_fall_through,
@@ -1400,7 +1401,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     _token_column_types: "dict[str, pa.DataType] | None" = None
     # Set once a database that cannot list its tables was reported.
     _unlisted_store_reported: bool = False
-    _job_completion_paths: Set[tuple[str, ...]] = frozenset()
     # Instance ids of the inputs of the last completed run in this process, each with
     # its number of inputs; None when no run completed (ITL-1093). A class default so
     # nodes rebuilt from a saved descriptor start without a run.
@@ -1528,6 +1528,21 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """The pipeline table storing this live context-taking node's completions."""
         return self._versioned_pipeline_path if self._delivers_side_effects else None
 
+    def _previous_completion_path(self) -> tuple[str, ...] | None:
+        path = self.completion_log_path
+        if path is None:
+            return None
+        previous = pipeline_hash_before_context_parameter(self)
+        if previous == self.pipeline_hash():
+            return None
+        # The layout is last, with an instance component only at content scope.
+        schema_index = -2 if self._table_scope == "pipeline_hash" else -3
+        return (
+            *path[:schema_index],
+            f"schema:{previous.to_hex()}",
+            *path[schema_index + 1 :],
+        )
+
     def _begin_run(self) -> None:
         """Reset schema preflight and refresh the stored tables for this run.
 
@@ -1598,9 +1613,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         unchanged, and their number is reported (ITL-944). Such tables are looked for
         at this node's own path and, because the hashes in a path can differ between
         versions, anywhere under the function's name in the database (ITL-954). A node
-        that delivers side effects fails instead. Completion paths outside the
-        current job, stale result tables, and rows of another data context in the
-        current tables also count because their completions cannot be matched.
+        that delivers side effects fails instead. A completion table at the node's
+        previous pipeline identity, stale result tables, and rows of another data
+        context in the current tables also count because their completions cannot
+        be matched.
 
         Raises:
             SideEffectLogDataContextError: If this node delivers side effects and
@@ -1616,8 +1632,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if delivers and not self._current_tables_checked
             else None,
             name_path=self.node_name_path or None,
-            completion_path=self.completion_log_path,
-            job_completion_paths=self._job_completion_paths,
+            previous_completion_path=self._previous_completion_path(),
         )
         if delivers:
             for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
@@ -1695,8 +1710,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         pipeline_database: ArrowDatabaseProtocol | None = None,
         result_database: ArrowDatabaseProtocol | None = None,
         ephemeral_database: ArrowDatabaseProtocol | None = None,
-        *,
-        job_completion_paths: Set[tuple[str, ...]] = frozenset(),
     ) -> None:
         """Attach databases for persistent caching and pipeline records.
 
@@ -1727,8 +1740,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 via ``set_ephemeral_database()``. Equivalent to calling
                 ``set_ephemeral_database(ephemeral_database)`` after
                 ``attach_databases()``.
-            job_completion_paths: Current completion log paths in the job's
-                pipeline database.
         """
         if pipeline_database is not None:
             # A database that cannot store this node's tables refuses them now,
@@ -1737,7 +1748,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if ephemeral_database is not None:
             self.require_storable_results(ephemeral_database)
         # Another database has its own tables of other generations to account for.
-        self._job_completion_paths = job_completion_paths
         self._stale_tables_checked = False
         self._current_tables_checked = False
         self._pipeline_preflight_checked = False
@@ -1899,12 +1909,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         node._stored_schema = descriptor.get("output_schema", {})
         node._stored_node_uri = tuple(descriptor.get("node_uri") or ())
         node._node_type = descriptor["node_type"]
-        # The file records the data function URI. Its pod uses the side-effect
-        # prefix for both pipeline and result tables when it takes a context.
+        # The file records the data function URI. Context-taking pods prefix
+        # their pipeline paths, and new files also record their result path.
         pod_uri = node._stored_node_uri
         if node._node_type == "side_effect_function":
             pod_uri = ("side_effect_function",) + pod_uri
-        node._stored_result_record_path = pod_uri
+        node._stored_result_record_path = tuple(
+            descriptor.get("result_record_path", pod_uri)
+        )
         node._descriptor = descriptor
         node._table_scope = raw_table_scope
         node._node_identity_path_cache = None

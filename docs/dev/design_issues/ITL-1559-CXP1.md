@@ -9,8 +9,9 @@ A plain function pod and a context-taking pod with the same underlying data func
 had the same pipeline identity. Under the three-chain design they would become one graph
 node over the same slot, even though one receives an invocation context.
 
-**Fix:** Use the same structure for the pod's content and pipeline identities. Include
-the context parameter name when configured so the pod and its downstream steps have
-distinct pipeline hashes. The stale-table check refuses delivery when a completion table
-under the same name is outside the current job's completion paths. A saved job restores its
-context-taking function nodes and reads their results using its recorded identities.
+**Fix:** Include the context parameter in the pipeline identity when configured, giving the
+pod and its downstream steps distinct pipeline hashes. Plain pods retain the data function's
+pipeline identity. Result tables for context-taking pods also include the parameter name in
+their paths. The stale-table check refuses delivery when a completion table exists at the
+node's exact previous pipeline path. A saved job restores its context-taking function nodes
+and reads their results from the original result paths.

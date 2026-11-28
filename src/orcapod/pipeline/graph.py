@@ -254,12 +254,28 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 case FunctionNode():
                     if node._function_pod is not None:
                         descriptor["function_config"] = node._function_pod.to_config()
+                        if node._function_pod.ctx_arg_name is not None:
+                            from orcapod.core.result_cache import context_result_path
+
+                            descriptor["result_record_path"] = list(
+                                context_result_path(
+                                    node._function_pod.uri,
+                                    node._function_pod.ctx_arg_name,
+                                )
+                            )
                     elif "function_config" in node._descriptor:
                         # A loaded read-only node (its pod not rebuilt, e.g. an output
                         # of an unregistered class) writes its saved config back as it
                         # is, so saving again keeps the file's entry (PR 454).
                         descriptor["function_config"] = copy.deepcopy(
                             node._descriptor["function_config"]
+                        )
+                    if (
+                        node._function_pod is None
+                        and "result_record_path" in node._descriptor
+                    ):
+                        descriptor["result_record_path"] = copy.deepcopy(
+                            node._descriptor["result_record_path"]
                         )
                     descriptor["table_scope"] = node._table_scope
                     # Written for every function node, also a plain one (ITL-1019).
