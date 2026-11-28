@@ -254,12 +254,28 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 case FunctionNode():
                     if node._function_pod is not None:
                         descriptor["function_config"] = node._function_pod.to_config()
+                        if node._function_pod.ctx_arg_name is not None:
+                            from orcapod.core.result_cache import context_result_path
+
+                            descriptor["result_record_path"] = list(
+                                context_result_path(
+                                    node._function_pod.uri,
+                                    node._function_pod.ctx_arg_name,
+                                )
+                            )
                     elif "function_config" in node._descriptor:
                         # A loaded read-only node (its pod not rebuilt, e.g. an output
                         # of an unregistered class) writes its saved config back as it
                         # is, so saving again keeps the file's entry (PR 454).
                         descriptor["function_config"] = copy.deepcopy(
                             node._descriptor["function_config"]
+                        )
+                    if (
+                        node._function_pod is None
+                        and "result_record_path" in node._descriptor
+                    ):
+                        descriptor["result_record_path"] = copy.deepcopy(
+                            node._descriptor["result_record_path"]
                         )
                     descriptor["table_scope"] = node._table_scope
                     # Written for every function node, also a plain one (ITL-1019).
@@ -384,11 +400,12 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 deserialize_output_schema,
             )
 
+            node_type = descriptor.get("node_type")
             # Every node records its nullability (ITL-1043), and every function node
             # names its data-tags (ITL-1019).
             try:
                 require_nullability_records(descriptor)
-                if descriptor.get("node_type") == "function":
+                if node_type in ("function", "side_effect_function"):
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(
                         saved_fall_through_tags(descriptor)
                     )
@@ -416,7 +433,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     exc,
                 )
 
-            node_type = descriptor.get("node_type")
             source_config = descriptor.get("source_config") or {}
 
             if node_type == "source":
@@ -494,7 +510,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     )
                 reconstructed[node_hash] = node
 
-            elif node_type == "function":
+            elif node_type in ("function", "side_effect_function"):
                 up_hashes = upstream_map.get(node_hash, [])
                 upstream_node = reconstructed.get(up_hashes[0]) if up_hashes else None
                 node = FunctionNode.from_descriptor(

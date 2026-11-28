@@ -651,7 +651,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             self._database, self._result_database
         )
 
-        for node in (self._persistent_node_map or {}).values():
+        nodes = (self._persistent_node_map or {}).values()
+        for node in nodes:
             if isinstance(node, FunctionJobNode):
                 if self._unresolved_result_database is not None:
                     # Left without a database (see ``load``), never given ``_result``.
@@ -666,7 +667,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     cache_mode=node.cache_mode,
                 )
             elif isinstance(node, SideEffectJobNode):
-                node.attach_databases(pipeline_database=pipeline_db)
+                node.attach_databases(
+                    pipeline_database=pipeline_db,
+                )
 
     # ------------------------------------------------------------------
     # _iter_function_job_nodes() / apply_node_config()

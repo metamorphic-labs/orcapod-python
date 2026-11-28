@@ -1282,7 +1282,7 @@ class OrcapodDatabaseReadError(OrcapodDatabaseError):
 
 
 class SideEffectLogDataContextError(OrcapodDatabaseError):
-    """Raised when a side-effecting node finds completions logged under another data context.
+    """Raised when a side-effecting node finds incompatible stored completions.
 
     A node whose run is an external action finds what it already did by keys hashed
     under its data context: a side-effect pod in its invocation log, a function pod
@@ -1296,11 +1296,10 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
     operator and source tables do not fail this way: there, such rows are reported,
     skipped and computed again.
 
-    Tables written by Orcapod up to v0.2 are found by name: every table at an older
-    layout stored under the node's function or pod name in the job counts,
-    whatever hashes its path holds (ITL-954). A table of another function or pod
-    with the same name in the same job, or of another node of the same function,
-    therefore raises this error too; ``record_paths`` names every table found.
+    The search lists tables under the node's function or pod name (ITL-954).
+    A table at an older layout or evidence of completion at the node's previous
+    pipeline or result cache path (ITL-1559) counts. ``record_paths``
+    names every table found.
 
     A fresh database is not a safe way around this error: it holds no completions, so on
     it the node performs every side effect again. Run the node on a fresh database only
@@ -1312,7 +1311,8 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
         record_paths: Paths, from the root of the database, of the tables holding such
             completions.
         record_path: The first of ``record_paths``.
-        found_context: Data context key of the completions that do not match.
+        found_context: Data context key of the completions that do not match, or
+            ``None`` when only alternate current-layout paths were found.
         current_context: Data context key of the node.
         node_label: Label of the node.
     """
@@ -1320,7 +1320,7 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
     def __init__(
         self,
         record_paths: tuple[tuple[str, ...], ...],
-        found_context: str,
+        found_context: str | None,
         current_context: str,
         node_label: str | None = None,
     ) -> None:
@@ -1328,7 +1328,7 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
 
         Args:
             record_paths: Paths of the tables holding completions that do not match.
-            found_context: Data context key of those completions.
+            found_context: Data context key of those completions, if known.
             current_context: Data context key of the node.
             node_label: Label of the node, if known.
         """
@@ -1336,7 +1336,7 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
             tuple(path) for path in record_paths
         )
         self.record_path: tuple[str, ...] = self.record_paths[0]
-        self.found_context: str = found_context
+        self.found_context = found_context
         self.current_context: str = current_context
         super().__init__(
             self.record_paths, found_context, current_context, node_label=node_label
@@ -1346,6 +1346,14 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
         """Describe the tables, both data contexts and the remedy."""
         node = f"Node {self.node_label!r}" if self.node_label else "This node"
         tables = ", ".join(repr("/".join(path)) for path in self.record_paths)
+        if self.found_context is None:
+            return (
+                f"{node} performs side effects, and stored completions exist at "
+                f"a previous pipeline or result cache path ({tables}). They cannot be "
+                "matched with current inputs, so nothing was delivered or written by "
+                "this node. Reopen the job with the version and pipeline that wrote "
+                "these tables to reuse the completions."
+            )
         return (
             f"{node} performs side effects, and its stored completions were logged "
             f"under the data context {self.found_context!r} (in {tables}), but the "

@@ -27,7 +27,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
     default_value_refused,
     hash_default_value,
 )
-from orcapod.core.result_cache import ResultCache
+from orcapod.core.result_cache import ResultCache, context_result_path
 from orcapod.errors import (
     NoOutputsDeclaredError,
     OutputContainerTypeError,
@@ -1540,16 +1540,23 @@ class CachedDataFunction(DataFunctionWrapper):
         data_function: DataFunctionProtocol,
         result_database: ArrowDatabaseProtocol,
         record_path_prefix: tuple[str, ...] = (),
+        *,
+        context_parameter: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(data_function, **kwargs)
         self._result_database = result_database
         self._record_path_prefix = record_path_prefix
+        if context_parameter is not None:
+            record_path_prefix += ("side_effect_function",)
         self._cache = ResultCache(
             result_database=result_database,
-            record_path=record_path_prefix + self.uri,
+            record_path=context_result_path(
+                record_path_prefix + self.uri, context_parameter
+            ),
             revision=self.declaration.revision_component,
             auto_flush=True,
+            delivers_side_effects=context_parameter is not None,
             # The first uri component is the function's name; no hash before it.
             name_path=record_path_prefix + self.uri[:1],
         )
@@ -1595,9 +1602,9 @@ class CachedDataFunction(DataFunctionWrapper):
 
         ``**kwargs`` are forwarded to the wrapped data function's ``call``
         so that auto-provided arguments (e.g. ``InvocationContext``) reach
-        the underlying function.  They are intentionally excluded from the
-        cache key — such arguments are deterministic per row and pod, so the
-        same input data always produces the same output.
+        the underlying function. The configured context parameter, when present,
+        selects a separate result table. Lookup within a table uses the input
+        data hash.
 
         Raises:
             InputValidationError: If ``data`` is of another data context than this
@@ -1616,6 +1623,8 @@ class CachedDataFunction(DataFunctionWrapper):
             if output_data is not None:
                 module_logger.info(f"Cache hit for {data}!")
                 return output_data
+        else:
+            self._cache.check_before_side_effect(self.data_context_key)
         output_data = self._data_function.call(data, logger=logger, **kwargs)
         if output_data is not None:
             if not skip_cache_insert:
@@ -1659,6 +1668,8 @@ class CachedDataFunction(DataFunctionWrapper):
             if output_data is not None:
                 module_logger.info(f"Cache hit for {data}!")
                 return output_data
+        else:
+            self._cache.check_before_side_effect(self.data_context_key)
         output_data = await self._data_function.async_call(
             data, logger=logger, **kwargs
         )

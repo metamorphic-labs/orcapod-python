@@ -23,7 +23,11 @@ from orcapod.contexts.stored import (
     data_context_field,
     require_storable,
 )
-from orcapod.core.result_cache import ResultCache, pod_timestamp_type
+from orcapod.core.result_cache import (
+    ResultCache,
+    context_result_path,
+    pod_timestamp_type,
+)
 from orcapod.hooks import InvocationStatus
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
@@ -43,9 +47,9 @@ module_logger = logging.getLogger(__name__)
 class CachedFunctionPod(WrappedFunctionPod):
     """Pod-level caching wrapper that intercepts ``process_data()``.
 
-    Caches at the ``process_data(tag, data)`` level using only the
-    **input data content hash** as the cache key — the output of a
-    data function depends solely on the data, not the tag.
+    Caches at the ``process_data(tag, data)`` level using the input data
+    content hash. Pods that take an invocation context use a result table
+    scoped by the configured context parameter.
 
     Tag-level provenance tracking (tag + system tags + data hash) is
     handled separately by ``FunctionNode.add_pipeline_record``.
@@ -67,7 +71,7 @@ class CachedFunctionPod(WrappedFunctionPod):
         super().__init__(function_pod, **kwargs)
         self._cache = ResultCache(
             result_database=result_database,
-            record_path=self.uri,  # no prefix; db is pre-scoped
+            record_path=context_result_path(self.uri, self.ctx_arg_name),
             revision=function_pod.data_function.declaration.revision_component,
             auto_flush=auto_flush,
             # A pod that takes the invocation context performs an external action.
@@ -75,6 +79,7 @@ class CachedFunctionPod(WrappedFunctionPod):
             # The uri holds no hash up to the function's name, which comes after
             # "side_effect_function" for a pod that takes the invocation context.
             name_path=self.uri[: 2 if function_pod.ctx_arg_name is not None else 1],
+            previous_record_path=self.uri if self.ctx_arg_name is not None else None,
         )
 
     def require_storable_results(self) -> None:

@@ -7,11 +7,20 @@ exercising @function_pod(ctx_arg=...) as the preferred side-effect pod entry poi
 
 from __future__ import annotations
 
+import asyncio
+import json
+from pathlib import Path
+
 import pytest
 import pyarrow as pa
 
 from orcapod.core.streams import ArrowTableStream
 from orcapod.side_effects import InvocationContext
+from orcapod.system_constants import (
+    PIPELINE_DB_SCHEMA_VERSION,
+    RESULT_DB_SCHEMA_VERSION,
+    TRACKING_DB_SCHEMA_VERSION,
+)
 
 
 def _make_stream(n: int = 3) -> ArrowTableStream:
@@ -34,6 +43,349 @@ def _make_pipeline_db():
     from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
 
     return InMemoryArrowDatabase()
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reverse_columns", [False, True])
+@pytest.mark.filterwarnings(
+    "ignore:Batch is provisional:orcapod.errors.ProvisionalHashWarning"
+)
+def test_context_parameter_distinguishes_job_branches(
+    tmp_path: Path, async_path: bool, reverse_columns: bool
+) -> None:
+    """Two pods sharing a data function URI have separate identities and both run."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.operators import Batch, Join
+    from orcapod.side_effects import SideEffectPod
+    from orcapod.sources import DictSource
+    from orcapod.system_constants import constants
+
+    delivered: list[tuple[int, int]] = []
+
+    @function_pod(function_name="combine", output_keys=("sum", "difference"))
+    def plain(x: int, y: int) -> tuple[int, int]:
+        return x + y, x - y
+
+    @function_pod(
+        function_name="combine", output_keys=("sum", "difference"), ctx_arg="ctx"
+    )
+    def contextual(x: int, y: int, ctx: InvocationContext) -> tuple[int, int]:
+        assert isinstance(ctx, InvocationContext)
+        delivered.append((x, y))
+        return x + y + 100, x - y
+
+    tapped: list[tuple[int, int]] = []
+
+    def tap(sum: int, difference: int, ctx: InvocationContext) -> None:
+        tapped.append((sum, difference))
+
+    assert plain.pod.data_function.uri == contextual.pod.data_function.uri
+    assert plain.pod.pipeline_hash() != contextual.pod.pipeline_hash()
+
+    rows = [
+        {"id": 1, "x": 10, "group": "a", "y": 2},
+        {"id": 2, "x": 20, "group": "b", "y": 3},
+    ]
+    tags = ["id", "group"]
+    if reverse_columns:
+        rows = [dict(reversed(tuple(row.items()))) for row in rows]
+        tags.reverse()
+    source = DictSource(
+        rows, tag_columns=tags, tag_only_columns=True, source_id="input"
+    )
+    right = DictSource(
+        [
+            {"id": row["id"], "group": row["group"], "other": 5, "label": "joined"}
+            for row in rows
+        ],
+        tag_columns=tags,
+        tag_only_columns=True,
+        source_id="right",
+    )
+    root = tmp_path / "store"
+
+    def build_job() -> PipelineJob:
+        with PipelineJob(
+            name="context_identity", database=DeltaTableDatabase(root)
+        ) as job:
+            plain_stream = plain.pod(source, label="plain")
+            context_stream = contextual.pod(source, label="contextual")
+            Batch(batch_size=1).process(plain_stream, label="plain_batch")
+            Batch(batch_size=1).process(context_stream, label="context_batch")
+            Join()(plain_stream, right, label="plain_join")
+            Join()(context_stream, right, label="context_join")
+            SideEffectPod(tap).process(context_stream, label="tap")
+        return job
+
+    job = build_job()
+    plain_node = job.nodes["plain"]
+    context_node = job.nodes["contextual"]
+    assert plain_node.pipeline_hash() != context_node.pipeline_hash()
+    assert plain_node.content_hash() != context_node.content_hash()
+    assert plain_node.node_identity_path[-1] != context_node.node_identity_path[-1]
+
+    summary = asyncio.run(job.run_async()) if async_path else job.run()
+    assert summary.ok
+    stored_paths = {path[1:-1] for path in DeltaTableDatabase(root).list_sources()}
+    assert {
+        plain_node.node_identity_path,
+        context_node.node_identity_path,
+    } <= stored_paths
+    assert sorted(plain_node.as_table()["sum"].to_pylist()) == [12, 23]
+    assert sorted(context_node.as_table()["sum"].to_pylist()) == [112, 123]
+
+    plain_batch = job.nodes["plain_batch"]
+    context_batch = job.nodes["context_batch"]
+    assert plain_batch.pipeline_hash() != context_batch.pipeline_hash()
+    plain_columns = {
+        col
+        for col in plain_batch.as_table(columns={"system_tags": True}).column_names
+        if col.startswith(constants.SYSTEM_TAG_PREFIX)
+    }
+    context_columns = {
+        col
+        for col in context_batch.as_table(columns={"system_tags": True}).column_names
+        if col.startswith(constants.SYSTEM_TAG_PREFIX)
+    }
+    assert len(plain_columns) == len(context_columns) == 2
+    assert plain_columns.isdisjoint(context_columns)
+
+    plain_join = job.nodes["plain_join"].as_table(columns={"system_tags": True})
+    context_join = job.nodes["context_join"].as_table(columns={"system_tags": True})
+    assert sorted(plain_join["sum"].to_pylist()) == [12, 23]
+    assert sorted(context_join["sum"].to_pylist()) == [112, 123]
+    plain_tags, contextual_tags = (
+        {
+            name
+            for name in table.column_names
+            if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        }
+        for table in (plain_join, context_join)
+    )
+    assert len(plain_tags) == len(contextual_tags) == 4
+    assert len(plain_tags & contextual_tags) == 2
+
+    assert sorted(delivered) == [(10, 2), (20, 3)]
+    assert sorted(tapped) == [(112, 8), (123, 17)]
+    reopened = build_job()
+    assert (asyncio.run(reopened.run_async()) if async_path else reopened.run()).ok
+    assert sorted(delivered) == [(10, 2), (20, 3)]
+    assert sorted(tapped) == [(112, 8), (123, 17)]
+    assert sorted(reopened.nodes["contextual"].as_table()["sum"].to_pylist()) == [
+        112,
+        123,
+    ]
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("tap_only", [False, True], ids=["function", "tap"])
+def test_same_name_completion_logs_for_distinct_schemas(
+    tmp_path: Path, async_path: bool, tap_only: bool
+) -> None:
+    """Same-name nodes deliver once each, including after reopening their store."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.side_effects import SideEffectPod
+    from orcapod.sources import DictSource
+
+    delivered: list[int] = []
+
+    @function_pod(output_keys="result", ctx_arg="ctx")
+    def contextual(value: int, ctx: InvocationContext) -> int:
+        delivered.append(value)
+        return value
+
+    def observe(value: int, ctx: InvocationContext) -> None:
+        delivered.append(value)
+
+    pod = SideEffectPod(observe) if tap_only else contextual.pod
+    sources = (
+        DictSource(
+            [{"id": 1, "value": 1}],
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id="first",
+        ),
+        DictSource(
+            [{"id": 2, "group": "second", "value": 2}],
+            tag_columns=["id", "group"],
+            tag_only_columns=True,
+            source_id="second",
+        ),
+    )
+    root = tmp_path / "store"
+    layout = TRACKING_DB_SCHEMA_VERSION if tap_only else PIPELINE_DB_SCHEMA_VERSION
+
+    for _ in range(2):
+        with PipelineJob(name="sibling_logs", database=DeltaTableDatabase(root)) as job:
+            for label, source in zip(("first_step", "second_step"), sources):
+                pod.process(source, label=label)
+        summary = asyncio.run(job.run_async()) if async_path else job.run()
+        assert summary.ok
+        paths = DeltaTableDatabase(root).list_table_paths()
+        assert sum(path[-1] == layout for path in paths) == 2
+        assert sorted(delivered) == [1, 2]
+
+
+def test_context_parameter_name_enters_pipeline_identity() -> None:
+    """Renaming the context parameter changes both hashes with the same pod URI."""
+    from orcapod import function_pod
+
+    @function_pod(function_name="combine", output_keys="sum", ctx_arg="ctx")
+    def original(x: int, y: int, ctx: InvocationContext) -> int:
+        assert isinstance(ctx, InvocationContext)
+        return x + y
+
+    @function_pod(function_name="combine", output_keys="sum", ctx_arg="invocation")
+    def renamed(x: int, y: int, invocation: InvocationContext) -> int:
+        assert isinstance(invocation, InvocationContext)
+        return x + y
+
+    assert original.pod.uri == renamed.pod.uri
+    assert original.pod.input_data_schema == renamed.pod.input_data_schema
+    assert original.pod.pipeline_hash() != renamed.pod.pipeline_hash()
+    assert original.pod.content_hash() != renamed.pod.content_hash()
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("cache_kind", ["decorator", "job", "pod"])
+def test_context_parameter_isolates_result_caches(
+    tmp_path: Path, async_path: bool, cache_kind: str
+) -> None:
+    """A plain result or another context parameter cannot suppress delivery."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+    from orcapod.sources import DictSource
+
+    shared = InMemoryArrowDatabase()
+    decorator_db = shared if cache_kind == "decorator" else None
+    pod_db = shared if cache_kind == "pod" else None
+    delivered: list[str] = []
+
+    @function_pod(
+        function_name="operation", output_keys="result", result_database=decorator_db
+    )
+    def plain(value: int) -> int:
+        return value + 1
+
+    @function_pod(
+        function_name="operation",
+        output_keys="result",
+        ctx_arg="ctx",
+        result_database=decorator_db,
+        pod_cache_database=pod_db,
+    )
+    def contextual(value: int, ctx: InvocationContext) -> int:
+        delivered.append("ctx")
+        return value + 2
+
+    @function_pod(
+        function_name="operation",
+        output_keys="result",
+        ctx_arg="invocation",
+        result_database=decorator_db,
+        pod_cache_database=pod_db,
+    )
+    def renamed(value: int, invocation: InvocationContext) -> int:
+        delivered.append("invocation")
+        return value + 3
+
+    assert plain.pod.data_function.uri == contextual.pod.data_function.uri
+    assert contextual.pod.data_function.uri == renamed.pod.data_function.uri
+    source = DictSource(
+        [{"id": 1, "value": 10}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="input",
+    )
+    database = DeltaTableDatabase(tmp_path / "store")
+    for label, pod, value in (
+        ("plain", plain.pod, 11),
+        ("contextual", contextual.pod, 12),
+        ("renamed", renamed.pod, 13),
+    ):
+        # Separate jobs seed each layer in turn. Give decorator and pod cache
+        # cases separate outer databases so only the cache under test is shared.
+        result_database = shared if cache_kind == "job" else InMemoryArrowDatabase()
+        with PipelineJob(
+            name=label, database=database, result_database=result_database
+        ) as job:
+            pod.process(source, label=label)
+        assert (asyncio.run(job.run_async()) if async_path else job.run()).ok
+        assert job.nodes[label].as_table()["result"].to_pylist() == [value]
+
+    assert delivered == ["ctx", "invocation"]
+    result_suffix = (
+        plain.pod.data_function.declaration.revision_component,
+        RESULT_DB_SCHEMA_VERSION,
+    )
+    expected_paths: set[tuple[str, ...]] = {
+        (*pod.uri[:-1], f"ctx:{pod.ctx_arg_name}", pod.uri[-1], *result_suffix)
+        for pod in (contextual.pod, renamed.pod)
+    }
+    if cache_kind != "pod":
+        expected_paths.add(plain.pod.uri + result_suffix)
+    assert set(shared.list_table_paths()) == expected_paths
+
+
+def test_plain_function_subclass_keeps_data_function_pipeline_identity() -> None:
+    """An override of the plain pod's content identity affects only content."""
+    from orcapod import FunctionPod, function_pod
+
+    @function_pod(output_keys="result")
+    def plain(value: int) -> int:
+        return value
+
+    class CustomPlainPod(FunctionPod):
+        def identity_structure(self) -> tuple[object, str]:
+            return super().identity_structure(), "custom-content"
+
+    custom = CustomPlainPod(plain.pod.data_function)
+    assert custom.content_hash() != plain.pod.content_hash()
+    assert custom.pipeline_hash() == plain.pod.pipeline_hash()
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("audit", [False, True], ids=["removed_sibling", "audit_log"])
+def test_unrelated_tap_log_does_not_block_tracked_completion(
+    tmp_path: Path, async_path: bool, audit: bool
+) -> None:
+    """Logs of other tap invocations cannot block an unchanged or a new node."""
+    from orcapod import PipelineJob
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.side_effects import SideEffectPod, SideEffectPodConfig
+    from orcapod.sources import DictSource
+
+    delivered: list[int] = []
+
+    def tap(value: int, ctx: InvocationContext) -> None:
+        delivered.append(value)
+
+    first = DictSource(
+        [{"id": 1, "value": 1}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="first",
+    )
+    sibling = DictSource(
+        [{"id": 2, "group": "sibling", "value": 2}],
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+        source_id="sibling",
+    )
+    root = tmp_path / "store"
+    for reopening in (False, True):
+        with PipelineJob(name="tap_logs", database=DeltaTableDatabase(root)) as job:
+            pod = SideEffectPod(
+                tap, config=SideEffectPodConfig(track_completion=reopening or not audit)
+            )
+            if reopening or not audit:
+                pod.process(first, label="first")
+            if not reopening:
+                pod.process(sibling, label="sibling")
+        assert (asyncio.run(job.run_async()) if async_path else job.run()).ok
+    assert sorted(delivered) == [1, 2]
 
 
 class TestCtxArgSchema:
@@ -306,3 +658,390 @@ class TestCtxArgCachedPodWrapping:
         # Output values must match
         for (_, d1), (_, d2) in zip(rows1, rows2):
             assert d1.as_dict()["result"] == d2.as_dict()["result"]
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("legacy_case", ["function_log", "tap_log", "tap_and_results"])
+def test_reopening_pre_context_identity_completions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    async_path: bool,
+    legacy_case: str,
+) -> None:
+    """Only the unambiguous old completion paths block redelivery."""
+    from orcapod import FunctionPod, PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+    from orcapod.errors import SideEffectLogDataContextError
+    from orcapod.side_effects import SideEffectPod
+    from orcapod.sources import DictSource
+
+    delivered: list[tuple[str, int]] = []
+    root = tmp_path / "store"
+    only_downstream_log = legacy_case != "function_log"
+
+    def build_job(root: Path) -> PipelineJob:
+        @function_pod(output_keys="result", ctx_arg="ctx")
+        def contextual(value: int, ctx: InvocationContext) -> int:
+            delivered.append(("function", value))
+            return value + 100
+
+        def tap(result: int, ctx: InvocationContext) -> None:
+            delivered.append(("tap", result))
+
+        with PipelineJob(
+            name="context_identity",
+            database=DeltaTableDatabase(root),
+            # Exercise direct function redelivery when only its pipeline log persists.
+            result_database=None if only_downstream_log else InMemoryArrowDatabase(),
+        ) as job:
+            source = DictSource(
+                [{"id": 1, "value": 0}],
+                tag_columns=["id"],
+                tag_only_columns=True,
+                source_id="input",
+            )
+            rows = contextual.pod(source, label="contextual")
+            if only_downstream_log:
+                SideEffectPod(tap).process(rows, label="tap")
+        return job
+
+    def run(job: PipelineJob) -> None:
+        summary = asyncio.run(job.run_async()) if async_path else job.run()
+        assert summary.ok
+
+    with monkeypatch.context() as previous:
+        # Recreate main's pipeline identity while writing real completion records.
+        previous.setattr(
+            FunctionPod, "pipeline_identity_structure", lambda pod: pod.data_function
+        )
+        if legacy_case == "tap_and_results":
+            previous.setattr(
+                "orcapod.core.cached_function_pod.context_result_path",
+                lambda uri, _: uri,
+            )
+        run(build_job(root))
+
+    store = DeltaTableDatabase(root)
+    table_paths = store.list_table_paths()
+    (function_log,) = (
+        path for path in table_paths if path[-1] == PIPELINE_DB_SCHEMA_VERSION
+    )
+    if only_downstream_log:
+        # Keep the prior tap log and the result table, without the function log.
+        # With current results, the run reaches the tap without another delivery.
+        root = tmp_path / "tap_store"
+        tap_store = DeltaTableDatabase(root)
+        for path in table_paths:
+            if path != function_log:
+                rows = store.get_all_records(path, record_id_column="__rid")
+                assert rows is not None
+                tap_store.add_records(path, rows, record_id_column="__rid")
+        tap_store.flush()
+        store = tap_store
+        (expected_path,) = (
+            path for path in table_paths if path[-1] == TRACKING_DB_SCHEMA_VERSION
+        )
+        expected_label = "tap"
+        expected_deliveries = [("function", 0), ("tap", 100)]
+        if legacy_case == "tap_and_results":
+            (expected_path,) = (
+                path for path in table_paths if path[-1] == RESULT_DB_SCHEMA_VERSION
+            )
+            assert not any(part.startswith("ctx:") for part in expected_path)
+            expected_label = "contextual"
+    else:
+        expected_path = function_log
+        expected_label = "contextual"
+        expected_deliveries = [("function", 0)]
+    assert delivered == expected_deliveries
+
+    before = store.get_all_records(expected_path)
+    assert before is not None and before.num_rows == 1
+    if legacy_case == "tap_log":
+        job = build_job(root)
+        run(job)
+        run(job)
+        assert delivered == [*expected_deliveries, ("tap", 100)]
+        assert job.nodes["tap"].as_table()["result"].to_pylist() == [100]
+    else:
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            run(build_job(root))
+        assert info.value.node_label == expected_label
+        assert expected_path in info.value.record_paths
+        assert delivered == expected_deliveries
+    assert DeltaTableDatabase(root).get_all_records(expected_path) == before
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("run_in_job", [False, True], ids=["standalone", "job"])
+@pytest.mark.parametrize("cache_kind", ["decorator", "pod"])
+def test_pre_context_cache_only_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    async_path: bool,
+    run_in_job: bool,
+    cache_kind: str,
+) -> None:
+    """Only the old result cache in the contextual namespace blocks redelivery."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.errors import SideEffectLogDataContextError
+    from orcapod.sources import DictSource
+
+    deliveries: list[int] = []
+    cache_root = tmp_path / "cache"
+
+    def build_pod():
+        cache = DeltaTableDatabase(cache_root)
+
+        @function_pod(
+            output_keys="result",
+            ctx_arg="ctx",
+            result_database=cache if cache_kind == "decorator" else None,
+            pod_cache_database=cache if cache_kind == "pod" else None,
+        )
+        def action(value: int, ctx: InvocationContext) -> int:
+            deliveries.append(value)
+            return value + 100
+
+        return action.pod
+
+    source = DictSource(
+        [{"id": 1, "value": 10}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="input",
+    )
+
+    with monkeypatch.context() as previous:
+        if cache_kind == "decorator":
+            previous.setattr(
+                "orcapod.core.data_function.context_result_path",
+                lambda uri, _: uri[1:],
+            )
+        else:
+            previous.setattr(
+                "orcapod.core.cached_function_pod.context_result_path",
+                lambda uri, _: uri,
+            )
+        old_rows = list(build_pod().process(source).iter_data())
+    assert [data.as_dict()["result"] for _, data in old_rows] == [110]
+    assert deliveries == [10]
+
+    store = DeltaTableDatabase(cache_root)
+    (previous_path,) = store.list_table_paths()
+    assert not any(part.startswith("ctx:") for part in previous_path)
+    assert (previous_path[0] == "side_effect_function") == (cache_kind == "pod")
+    before = store.get_all_records(previous_path)
+    assert before is not None and before.num_rows == 1
+
+    def run() -> None:
+        pod = build_pod()
+        if run_in_job:
+            with PipelineJob(
+                name="upgrade", database=DeltaTableDatabase(tmp_path / "job")
+            ) as job:
+                pod.process(source, label="action")
+            summary = asyncio.run(job.run_async()) if async_path else job.run()
+            assert summary.ok
+            assert job.nodes["action"].as_table()["result"].to_pylist() == [110]
+        else:
+            stream = pod.process(source)
+            if async_path:
+
+                async def consume() -> None:
+                    assert [
+                        data.as_dict()["result"]
+                        async for _, data in stream.async_iter_data()
+                    ] == [110]
+
+                asyncio.run(consume())
+            else:
+                assert [data.as_dict()["result"] for _, data in stream.iter_data()] == [
+                    110
+                ]
+
+    if cache_kind == "decorator":
+        run()
+        run()
+        assert deliveries == [10, 10]
+    else:
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            run()
+        assert info.value.record_paths == (previous_path,)
+        assert deliveries == [10]
+    reopened = DeltaTableDatabase(cache_root)
+    assert len(reopened.list_table_paths()) == (2 if cache_kind == "decorator" else 1)
+    assert reopened.get_all_records(previous_path) == before
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "scenario", ["both", "plain_first", "remove_plain", "remove_plain_with_new_input"]
+)
+def test_current_sibling_log_is_not_a_previous_context_completion(
+    tmp_path: Path, async_path: bool, scenario: str
+) -> None:
+    """The plain tap's log remains usable when either branch runs on its own."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.side_effects import SideEffectPod
+    from orcapod.sources import DictSource
+
+    deliveries: list[tuple[str, int]] = []
+    root = tmp_path / "store"
+
+    @function_pod(function_name="step", output_keys="result")
+    def plain(value: int) -> int:
+        return value + 100
+
+    @function_pod(function_name="step", output_keys="result", ctx_arg="ctx")
+    def contextual(value: int, ctx: InvocationContext) -> int:
+        deliveries.append(("function", value))
+        return value + 200
+
+    def tap(result: int, ctx: InvocationContext) -> None:
+        deliveries.append(("tap", result))
+
+    def build_job(
+        *, keep_plain: bool = True, keep_contextual: bool = True, value: int = 10
+    ) -> PipelineJob:
+        source = DictSource(
+            [{"id": 1, "value": value}],
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id="input",
+        )
+        with PipelineJob(name="siblings", database=DeltaTableDatabase(root)) as job:
+            observe = SideEffectPod(tap)
+            if keep_plain:
+                observe.process(plain.pod(source, label="plain"), label="plain_tap")
+            if keep_contextual:
+                observe.process(
+                    contextual.pod(source, label="contextual"), label="context_tap"
+                )
+        return job
+
+    def run(job: PipelineJob) -> None:
+        assert (asyncio.run(job.run_async()) if async_path else job.run()).ok
+
+    if scenario == "plain_first":
+        run(build_job(keep_contextual=False))
+        assert deliveries == [("tap", 110)]
+
+    job = build_job()
+    run(job)
+    run(job)
+    reopened = build_job()
+    run(reopened)
+    assert reopened.nodes["plain_tap"].as_table()["result"].to_pylist() == [110]
+    assert reopened.nodes["context_tap"].as_table()["result"].to_pylist() == [210]
+    assert sorted(deliveries) == [("function", 10), ("tap", 110), ("tap", 210)]
+
+    if scenario.startswith("remove_plain"):
+        value = 11 if scenario == "remove_plain_with_new_input" else 10
+        deliveries.clear()
+        retained = build_job(keep_plain=False, value=value)
+        run(retained)
+        run(retained)
+        run(build_job(keep_plain=False, value=value))
+        assert retained.nodes["context_tap"].as_table()["result"].to_pylist() == [
+            value + 200
+        ]
+        expected = [("function", 11), ("tap", 211)] if value == 11 else []
+        assert deliveries == expected
+        run(build_job(value=value))
+        if value == 11:
+            expected.append(("tap", 111))
+        assert deliveries == expected
+
+
+@pytest.mark.parametrize(
+    "previous_identity", [False, True], ids=["current", "previous"]
+)
+def test_saved_context_function_keeps_its_results_and_downstream_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, previous_identity: bool
+) -> None:
+    """Load a saved context-taking function and its downstream side-effect node."""
+    from orcapod import FunctionPod, PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.side_effects import SideEffectPod
+    from orcapod.sources import DictSource
+
+    delivered: list[int] = []
+
+    @function_pod(output_keys="result", ctx_arg="ctx")
+    def contextual(value: int, ctx: InvocationContext) -> int:
+        delivered.append(value)
+        return value + 100
+
+    def tap(result: int, ctx: InvocationContext) -> None:
+        delivered.append(result)
+
+    source = DictSource(
+        [{"id": 1, "value": 0}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="input",
+    )
+    saved = tmp_path / "job.json"
+
+    def legacy_result_path(
+        uri: tuple[str, ...], _context_parameter: str | None
+    ) -> tuple[str, ...]:
+        return uri
+
+    with monkeypatch.context() as previous:
+        if previous_identity:
+            previous.setattr(
+                FunctionPod,
+                "pipeline_identity_structure",
+                lambda pod: pod.data_function,
+            )
+            previous.setattr(
+                "orcapod.core.cached_function_pod.context_result_path",
+                legacy_result_path,
+            )
+            previous.setattr(
+                "orcapod.core.result_cache.context_result_path",
+                legacy_result_path,
+            )
+        with PipelineJob(
+            name="saved_context", database=DeltaTableDatabase(tmp_path / "store")
+        ) as job:
+            SideEffectPod(tap).process(
+                contextual.pod(source, label="contextual"), label="tap"
+            )
+        assert job.run().ok
+        job.save(saved)
+
+    payload = json.loads(saved.read_text())
+    descriptor = next(
+        node
+        for node in payload["pipeline"]["nodes"].values()
+        if node["label"] == "contextual"
+    )
+    if previous_identity:
+        # Earlier files derived the result path from the URI.
+        del descriptor["result_record_path"]
+        saved.write_text(json.dumps(payload))
+
+    loaded = PipelineJob.load(saved)
+    contextual_node = loaded.nodes["contextual"]
+    assert contextual_node.node_type == "side_effect_function"
+    assert (
+        contextual_node.node_identity_path == job.nodes["contextual"].node_identity_path
+    )
+    assert contextual_node.as_source().as_table()["result"].to_pylist() == [100]
+    loaded.bind(sources={"input": source})
+    assert loaded.run(load_only=True).ok
+    for label in ("contextual", "tap"):
+        assert loaded.nodes[label].pipeline_hash() == job.nodes[label].pipeline_hash()
+        assert loaded.nodes[label].content_hash() == job.nodes[label].content_hash()
+        assert loaded.nodes[label].as_table()["result"].to_pylist() == [100]
+    assert delivered == [0, 100]
+
+    del descriptor["fall_through_tags"]
+    saved.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="saved node 'contextual'.*fall_through_tags"):
+        PipelineJob.load(saved)

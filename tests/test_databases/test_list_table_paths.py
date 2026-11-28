@@ -366,9 +366,9 @@ class TestConnector:
             current = name + ("new_hash", "rev1", "rdb_v1")
             other = (name[0][:-1] + "-", "old_hash", "rev0", "rdb_v0")
             _fill(store, [old_layout, old_revision, current, other])
-            assert tables_of_another_layout(store, name, "rev1") == sorted(
-                [old_layout, old_revision]
-            )
+            assert tables_of_another_layout(
+                store.list_table_paths(name), "rev1"
+            ) == sorted([old_layout, old_revision])
 
     def test_the_last_component_is_the_layout(self, tmp_path: Path):
         """The last listed component is the original layout component."""

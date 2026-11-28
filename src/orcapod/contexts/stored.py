@@ -17,8 +17,8 @@ The path of a table holds hashes, and those can differ between builds, so such a
 not looked for at a computed path. The beginning of the path, up to the name of the
 function or pod, holds no hash: the tables under it are listed (``list_table_paths``), and
 a table whose last path component is not one of the current layouts is of another layout
-(ITL-954). Tables of the versions before 0.4 are not looked for otherwise: nobody has such
-a store, and their layouts had the names the first release uses (ITL-1259).
+(ITL-954). This listing also finds current-layout completion tables that the
+current job does not address, which can happen when a pipeline hash changes (ITL-1559).
 
 Example:
     To list the data contexts a stored table holds, call
@@ -373,10 +373,13 @@ class StaleTables:
         tables: The tables found, each once.
         unlisted: The places that could not be searched because the database cannot
             list its tables.
+        other_completion_paths: Current-layout tables recording completions at
+            the caller's previous pipeline or result cache path.
     """
 
     tables: list[StaleTable] = field(default_factory=list)
     unlisted: list[UnlistedTables] = field(default_factory=list)
+    other_completion_paths: list[tuple[str, ...]] = field(default_factory=list)
 
     def include(self, other: "StaleTables") -> None:
         """Add what another search found, leaving out tables already known.
@@ -391,38 +394,34 @@ class StaleTables:
             if (table.record_path, table.old_layout) not in known
         )
         self.unlisted.extend(other.unlisted)
+        for path in other.other_completion_paths:
+            if path not in self.other_completion_paths:
+                self.other_completion_paths.append(path)
 
 
 def tables_of_another_layout(
-    database: object,
-    name_path: tuple[str, ...],
+    paths: list[tuple[str, ...]],
     result_revision: str | None = None,
 ) -> list[tuple[str, ...]]:
-    """List the tables under ``name_path`` that are at another layout than this build's.
+    """Select the listed tables with another layout than this build's.
 
     Another layout and the current ones are told apart by path components, never by a
     hash: every table this version writes ends in one of ``CURRENT_LAYOUTS``, and a
     function result table has its data function type's revision just before its layout
-    (``.../rev1/rdb_v1``, ITL-1259). ``name_path`` is expected to end with the name of one
-    function or pod, so that every table under it belongs to a node of that name.
+    (``.../rev1/rdb_v1``, ITL-1259).
 
     Args:
-        database: The database to list.
-        name_path: Leading path components, relative to the database's ``base_path``.
+        paths: The database's table paths under the function or pod name.
         result_revision: The revision component of the result tables the caller reads
-            (``rev1``). A result table under ``name_path`` with another revision is then
-            of another layout too. ``None`` checks the last component only.
+            (``rev1``). A listed result table with another revision is of another
+            layout too. ``None`` checks the last component only.
 
     Returns:
-        The paths, relative to the database's ``base_path``, of the tables under
-        ``name_path`` that are not at a current layout, sorted.
-
-    Raises:
-        TableListingNotSupportedError: If the database cannot list its tables.
+        The paths of tables that are not at a current layout, in listing order.
     """
     return [
         path
-        for path in _list_table_paths(database, name_path)
+        for path in paths
         if path[-1] not in CURRENT_LAYOUTS
         or (
             result_revision is not None
@@ -454,14 +453,16 @@ def find_stale_tables(
     current: tuple[tuple[str, ...], str] | None = None,
     name_path: tuple[str, ...] | None = None,
     result_revision: str | None = None,
+    previous_completion_path: tuple[str, ...] | None = None,
+    previous_result_path: tuple[str, ...] | None = None,
 ) -> StaleTables:
     """Find the stored rows of other generations that belong to one table of a node.
 
-    Two searches, neither of which writes anything:
-
     - under ``name_path``, by listing the database, for tables of another layout
-      wherever their hashes put them (ITL-954; not read, so not counted);
-    - in the current table, for rows of another data context.
+      wherever their hashes put them (ITL-954), and for the completion table of
+      this node's previous pipeline identity (ITL-1559);
+    - in the current table, for rows of another data context;
+    - at the exact previous result path, for evidence of completed calls (ITL-1559).
 
     Args:
         database: The database the paths belong to.
@@ -473,20 +474,25 @@ def find_stale_tables(
         result_revision: For a result cache, the revision of its data function type's
             record: a result table under ``name_path`` at another revision is listed too
             (``tables_of_another_layout``).
+        previous_completion_path: The exact path of this node's completion table
+            before its pipeline identity changed, relative to this database.
+        previous_result_path: The exact previous result table path in a namespace
+            reserved for context-taking pods.
 
     Returns:
         The tables of another layout found, then one entry per other data context
-        found in the current table (in key order); and ``name_path`` under
-        ``unlisted`` if the database could not list its tables.
+        found in the current table (in key order), the alternate completion paths,
+        and ``name_path`` under ``unlisted`` if the database could not list its tables.
     """
     found = StaleTables()
     if name_path is not None:
         under = database.base_path + name_path
         try:
-            listed = tables_of_another_layout(database, name_path, result_revision)
+            paths = _list_table_paths(database, name_path)
         except TableListingNotSupportedError as exc:
             found.unlisted.append(UnlistedTables(under, str(exc)))
         else:
+            other_layouts = tables_of_another_layout(paths, result_revision)
             found.include(
                 StaleTables(
                     [
@@ -497,10 +503,19 @@ def find_stale_tables(
                             True,
                             under,
                         )
-                        for path in listed
+                        for path in other_layouts
                     ]
                 )
             )
+            if (
+                previous_completion_path is not None
+                and previous_completion_path in paths
+            ):
+                found.other_completion_paths.append(
+                    database.base_path + previous_completion_path
+                )
+    if previous_result_path is not None and database.table_exists(previous_result_path):
+        found.other_completion_paths.append(database.base_path + previous_result_path)
     if current is not None:
         current_path, current_context = current
         for key, rows in sorted(stored_data_contexts(database, current_path).items()):
@@ -522,12 +537,11 @@ def account_for_stale_tables(
       nodes) reports each table with its number of rows and moves on.
     - A node whose run is an external action (a side-effect pod, or a function pod
       that takes the invocation context) must not act again for inputs it already
-      handled, and those completions cannot be matched under the current data
-      context. It fails before doing anything. Every old-layout table under the
-      node's name counts, so a table of another function or pod with the same name
-      in the job, or of another node of the same function, fails it too: the error
-      names the tables. Where the database cannot list its tables, the node warns and
-      proceeds (developer, November 11, 2026).
+      handled when those completions cannot be matched at the current path or under
+      the current data context. It fails before doing anything. Every old-layout table
+      and a completion table at the node's previous pipeline or result path count.
+      The error names the tables. Where the database cannot list its tables, the
+      node warns and proceeds (developer, November 11, 2026).
 
     Args:
         found: What ``find_stale_tables`` found for the node's tables.
@@ -539,10 +553,11 @@ def account_for_stale_tables(
             found. The caller adds the node label.
     """
     if delivers_side_effects:
-        if found.tables:
+        if found.tables or found.other_completion_paths:
             raise SideEffectLogDataContextError(
-                tuple(table.record_path for table in found.tables),
-                found.tables[0].data_context,
+                tuple(table.record_path for table in found.tables)
+                + tuple(found.other_completion_paths),
+                found.tables[0].data_context if found.tables else None,
                 current_context,
             )
         if found.unlisted:

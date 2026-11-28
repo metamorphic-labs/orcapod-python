@@ -45,7 +45,6 @@ from orcapod.errors import (
     UnstorableColumnError,
 )
 from orcapod.contexts.stored import (
-    StaleTables,
     account_for_stale_tables,
     data_context_field,
     find_stale_tables,
@@ -1114,16 +1113,14 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         self._set_modified_time(None)
 
     def _refuse_log_of_another_data_context(self) -> None:
-        """Refuse an invocation log holding deliveries of another data context.
+        """Refuse invocation logs holding deliveries this run cannot match.
 
         A delivery already made is found by a record id hashed under this node's
         data context, so deliveries logged under another one would not be found and
-        every side effect would be delivered again (ITL-944). Two cases: a log at an
-        older table layout (written by Orcapod up to v0.2), and rows of another data
-        context in the current log. An older log is looked for at this node's own
-        path and, because the hash in the path can differ between versions, anywhere
-        under the pod's name in the database (ITL-954). Checked at the start of every
-        run, so a log that appears between two runs of one node object is found too.
+        every side effect would be delivered again (ITL-944). The search looks under
+        the pod's name for older layouts (ITL-954). Logs at other pipeline paths
+        in the current layout belong to other taps (ITL-1559). Checked at the start
+        of every run, so a log of an older layout that appears between runs is found too.
         The current log is read and counted by data context the first time only;
         the later runs list the database, which reads no table.
 
@@ -1144,7 +1141,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             # The check runs before every run; that the database cannot list its tables
             # is reported once per node object and attached database.
             if self._unlisted_store_reported:
-                found = StaleTables(tables=found.tables)
+                found.unlisted.clear()
             self._unlisted_store_reported = True
         try:
             account_for_stale_tables(

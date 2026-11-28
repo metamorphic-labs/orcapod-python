@@ -38,6 +38,7 @@ from orcapod.core.function_pod import (
     fall_through_tags,
     function_input,
     function_input_schema,
+    pipeline_hash_before_context_parameter,
     result_data_schema,
     result_pod,
     with_fall_through,
@@ -83,7 +84,6 @@ from orcapod.errors import (
     UnstorableColumnError,
 )
 from orcapod.contexts.stored import (
-    StaleTables,
     keep_rows_of_data_context,
     require_same_data_context,
     account_for_stale_tables,
@@ -1140,12 +1140,7 @@ class FunctionNode(FunctionNodeBase):
         # FunctionNode loaded read-only is always UNAVAILABLE (no DB)
         node._load_status = LoadStatus.UNAVAILABLE
 
-        # Restore node_type from the stored URI prefix
-        node._node_type = (
-            "side_effect_function"
-            if descriptor.get("node_uri", [""])[0] == "side_effect_function"
-            else "function"
-        )
+        node._node_type = descriptor["node_type"]
 
         return node
 
@@ -1528,6 +1523,26 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             and self._function_pod.ctx_arg_name is not None
         )
 
+    @property
+    def completion_log_path(self) -> tuple[str, ...] | None:
+        """The pipeline table storing this live context-taking node's completions."""
+        return self._versioned_pipeline_path if self._delivers_side_effects else None
+
+    def _previous_completion_path(self) -> tuple[str, ...] | None:
+        path = self.completion_log_path
+        if path is None:
+            return None
+        previous = pipeline_hash_before_context_parameter(self)
+        if previous == self.pipeline_hash():
+            return None
+        # The layout is last, with an instance component only at content scope.
+        schema_index = -2 if self._table_scope == "pipeline_hash" else -3
+        return (
+            *path[:schema_index],
+            f"schema:{previous.to_hex()}",
+            *path[schema_index + 1 :],
+        )
+
     def _begin_run(self) -> None:
         """Reset schema preflight and refresh the stored tables for this run.
 
@@ -1598,10 +1613,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         unchanged, and their number is reported (ITL-944). Such tables are looked for
         at this node's own path and, because the hashes in a path can differ between
         versions, anywhere under the function's name in the database (ITL-954). A node
-        that delivers side effects fails instead, and for it the result tables and
-        rows of another data context in the current tables count too: none of them
-        can be matched with current inputs, so every side effect would be delivered
-        again.
+        that delivers side effects fails instead. A completion table at the node's
+        previous pipeline identity, stale result tables, and rows of another data
+        context in the current tables also count because their completions cannot
+        be matched.
 
         Raises:
             SideEffectLogDataContextError: If this node delivers side effects and
@@ -1617,6 +1632,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if delivers and not self._current_tables_checked
             else None,
             name_path=self.node_name_path or None,
+            previous_completion_path=self._previous_completion_path(),
         )
         if delivers:
             for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
@@ -1630,7 +1646,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 # That the database cannot list its tables is reported once per node
                 # object and attached database, not at every run.
                 if self._unlisted_store_reported:
-                    found = StaleTables(tables=found.tables)
+                    found.unlisted.clear()
                 self._unlisted_store_reported = True
         try:
             account_for_stale_tables(
@@ -1892,19 +1908,26 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         node._stored_pipeline_hash = descriptor.get("pipeline_hash")
         node._stored_schema = descriptor.get("output_schema", {})
         node._stored_node_uri = tuple(descriptor.get("node_uri") or ())
-        node._stored_result_record_path = tuple(descriptor.get("node_uri") or ())
+        node._node_type = descriptor["node_type"]
+        # The file records the data function URI. Context-taking pods prefix
+        # their pipeline paths, and new files also record their result path.
+        pod_uri = node._stored_node_uri
+        if node._node_type == "side_effect_function":
+            pod_uri = ("side_effect_function",) + pod_uri
+        node._stored_result_record_path = tuple(
+            descriptor.get("result_record_path", pod_uri)
+        )
         node._descriptor = descriptor
         node._table_scope = raw_table_scope
         node._node_identity_path_cache = None
 
-        # Compute _stored_pipeline_path from node_uri + pipeline_hash so that
+        # Compute _stored_pipeline_path from the pod URI + pipeline_hash so that
         # node_identity_path (used by get_all_records and _load_cached_entries)
         # resolves to the correct DB path.  This mirrors the live computation:
         #   path = function_pod.uri + (f"schema:{pipeline_hash}",)
-        # Since node_uri == function_pod.uri (same fields), we reconstruct it here.
         # The descriptor stores hashes as labelled values; a path holds bare digests.
         pipeline_hash_str = descriptor.get("pipeline_hash", "")
-        node._stored_pipeline_path = node._stored_node_uri + (
+        node._stored_pipeline_path = pod_uri + (
             f"schema:{_bare_digest(pipeline_hash_str)}",
         )
         if raw_table_scope != "pipeline_hash":
@@ -1948,13 +1971,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 pipeline_database=pipeline_db,
                 result_database=result_db,
             )
-
-        # Restore node_type from the stored URI prefix
-        node._node_type = (
-            "side_effect_function"
-            if descriptor.get("node_uri", [""])[0] == "side_effect_function"
-            else "function"
-        )
 
         return node
 
