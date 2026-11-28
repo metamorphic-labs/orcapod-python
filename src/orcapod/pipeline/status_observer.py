@@ -1,8 +1,8 @@
 """Run status observer for orcapod pipelines.
 
 Provides ``StatusObserver``, a drop-in observer that records per-data
-execution state transitions (``RUNNING``, ``SUCCESS``, ``FAILED``) to any
-``ArrowDatabaseProtocol`` implementation (in-memory, Delta Lake, etc.).
+execution state transitions (``RUNNING``, ``SUCCESS``, ``FAILED``) to an
+``ArrowDatabaseProtocol`` store such as in-memory or Delta Lake.
 
 Example::
 
@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any
 
 from uuid_utils import uuid7
 
+from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.observer import NoOpLogger
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
@@ -92,14 +93,18 @@ class StatusObserver:
         obs = StatusObserver(status_database=db.at("my_pipeline", "_status"))
 
     Args:
-        status_database: Any ``ArrowDatabaseProtocol`` instance.  May be
+        status_database: An ``ArrowDatabaseProtocol`` instance. May be
             a root database or a scoped view created via ``db.at(...)``.
+
+    Raises:
+        SpiralDBObserverNotSupportedError: If the database is backed by SpiralDB.
     """
 
     def __init__(
         self,
         status_database: ArrowDatabaseProtocol,
     ) -> None:
+        require_observer_database(status_database)
         self._db = status_database
         self._current_run_id: str = ""
         self._current_pipeline_uri: str = ""

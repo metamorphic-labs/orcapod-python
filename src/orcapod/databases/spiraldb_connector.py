@@ -619,6 +619,8 @@ class SpiralDBConnector:
     Scoped to a single dataset within a SpiralDB project, and to its keyed tables. Auth
     is spiral-sdk's: ``SPIRAL_*`` environment variables, or a saved ``spiral login``.
 
+    Status and logging observers reject databases backed by this connector at setup (ITL-1540).
+
     Args:
         project_id: SpiralDB project identifier (e.g. ``"my-project-123456"``).
         dataset: Dataset within the project. Defaults to ``"default"``.

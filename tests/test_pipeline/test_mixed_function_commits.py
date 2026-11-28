@@ -15,7 +15,8 @@ import deltalake
 import pyarrow as pa
 import pytest
 
-from orcapod import PipelineJob, function_pod
+from orcapod import PipelineJob
+from orcapod.core.function_pod import FunctionPod
 from orcapod.databases import (
     ConnectorArrowDatabase,
     DeltaTableDatabase,
@@ -29,7 +30,9 @@ from orcapod.sources import DictSource
 from orcapod.system_constants import (
     PIPELINE_DB_SCHEMA_VERSION,
     RESULT_DB_SCHEMA_VERSION,
+    constants,
 )
+from orcapod.types import PodConfig
 from tests.test_databases.test_connector_arrow_database import MockDBConnector
 
 Layout = Literal["memory", "delta", "noop", "connector"]
@@ -37,7 +40,6 @@ PIPELINE = PIPELINE_DB_SCHEMA_VERSION
 RESULT = RESULT_DB_SCHEMA_VERSION
 
 
-@function_pod(output_keys="y")
 async def double(x: int, offset: int) -> int:
     """Return a stable result with two bound input fields."""
     return 2 * x + offset
@@ -68,16 +70,21 @@ def make_job(
     results: ArrowDatabaseProtocol | None = None,
     *,
     reverse_order: bool = False,
+    max_concurrency: int = 5,
 ) -> PipelineJob:
     """Build a batch over five rows, with optionally separate result storage."""
     job = PipelineJob(name="mixed", database=pipeline)
     rows = [{"tag": i, "group": "all", "x": i, "offset": i + 10} for i in range(5)]
     tags = ["tag", "group"]
+    # The historical batching assertions assume every call can start at once.
+    pod = FunctionPod.from_fn(
+        double, output_keys="y", pod_config=PodConfig(max_concurrency=max_concurrency)
+    )
     if reverse_order:
         rows = [dict(reversed(tuple(row.items()))) for row in rows]
         tags.reverse()
     with job:
-        _ = double.pod(
+        _ = pod(
             DictSource(
                 data=rows, tag_columns=tags, tag_only_columns=True, source_id="src"
             ),
@@ -230,6 +237,63 @@ def test_mixed_database_batches_keep_main_cadence(
     assert job.nodes["out"].as_table().num_rows == 5
     if pipeline_kind != "noop":
         assert job.nodes["out"].as_source().as_table().num_rows == 5
+
+
+@pytest.mark.parametrize(("every", "batches"), [(1, [1] * 5), (3, [3, 2])])
+@pytest.mark.parametrize("limit", [1, 2])
+def test_low_async_concurrency_preserves_durable_rows_and_pipeline_commits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    every: int,
+    batches: list[int],
+    limit: int,
+) -> None:
+    """Pipeline commits contain only references to results already on disk."""
+    flush_batch = DeltaTableDatabase.flush_batch
+    durable_rows: dict[int, set[tuple[int, str, int]]] = {}
+    for concurrency in (5, limit):
+        pipeline = tmp_path / str(concurrency) / "pipeline"
+        results = tmp_path / str(concurrency) / "results"
+
+        def check_pipeline_references(
+            db: DeltaTableDatabase, path: tuple[str, ...]
+        ) -> None:
+            flush_batch(db, path)
+            if path[-1] == PIPELINE:
+                (pipeline_log,) = pipeline.rglob("_delta_log")
+                (result_log,) = results.rglob("_delta_log")
+                pipeline_table = deltalake.DeltaTable(str(pipeline_log.parent))
+                result_table = deltalake.DeltaTable(str(result_log.parent))
+                references = pipeline_table.to_pyarrow_table(
+                    columns=[constants.DATA_RECORD_ID]
+                ).column(0)
+                result_ids = result_table.to_pyarrow_table(
+                    columns=[DeltaTableDatabase.RECORD_ID_COLUMN]
+                ).column(0)
+                assert set(references.to_pylist()) <= set(result_ids.to_pylist())
+
+        with monkeypatch.context() as patch:
+            patch.setattr(DeltaTableDatabase, "flush_batch", check_pipeline_references)
+            job = make_job(
+                DeltaTableDatabase(pipeline),
+                DeltaTableDatabase(results),
+                reverse_order=concurrency != 5,
+                max_concurrency=concurrency,
+            )
+            run(job, True, every)
+
+        assert delta_history(pipeline, PIPELINE) == commits_of(batches)
+        reopened = make_job(DeltaTableDatabase(pipeline), DeltaTableDatabase(results))
+        table = reopened.nodes["out"].as_source().as_table()
+        durable_rows[concurrency] = {
+            (row["tag"], row["group"], row["y"]) for row in table.to_pylist()
+        }
+
+    assert (
+        durable_rows[limit]
+        == durable_rows[5]
+        == {(i, "all", 3 * i + 10) for i in range(5)}
+    )
 
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])

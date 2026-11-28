@@ -664,13 +664,8 @@ def test_empty_source_info_lists_keep_their_columns_type(layout: str) -> None:
     )
 
 
-def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:
-    """Pins a stream no job can run: a raw stream whose system-tag column holds a string
-    and a null. The job's sync path refuses it (the rows' system-tag fields differ in
-    their flags), and so does the channel, which builds such a stream from
-    its rows (CodeRabbit on PR #510); a job never sees such a stream,
-    because a source with a nullable system tag cannot be bound to a slot
-    (``SourceSpecMismatchError``)."""
+def test_a_raw_nullable_system_tag_keeps_its_field_in_a_job_and_channel() -> None:
+    """The stream's nullable string field applies to rows with and without a value."""
     raw = ArrowTableStream(
         pa.table(
             {
@@ -682,12 +677,11 @@ def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:
         ),
         tag_columns=["k"],
     )
-    assert _schema_outcome(lambda: _job_sync(SelectDataColumns(["x"]), raw)) == (
-        "refused",
-        "ArrowInvalid",
-    )
-    with pytest.raises(pa.ArrowInvalid):
-        run_on_channels(SelectDataColumns(["x"]), [raw], None)
+    expected = raw.as_table(columns=ALL).select([SYSTEM_TAG])
+    sync = _job_sync(SelectDataColumns(["x"]), raw)
+    channel = run_on_channels(SelectDataColumns(["x"]), [raw], None)
+    for result in (sync, channel):
+        assert_same_table(result.as_table(columns=ALL).select([SYSTEM_TAG]), expected)
 
 
 # --- Ending the output and closing the inputs ------------------------------------------------

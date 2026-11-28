@@ -90,6 +90,7 @@ class Tag(Datagram):
             data = _pa.Table.from_batches([data])
 
         extracted_sys_tags: dict[str, DataValue]
+        system_tag_table = None
 
         if isinstance(data, _pa.Table):
             # Arrow path: call super() first, then extract system-tag columns from
@@ -107,9 +108,12 @@ class Tag(Datagram):
                 if c.startswith(constants.SYSTEM_TAG_PREFIX)
             ]
             if sys_tag_cols:
+                system_tag_table = arrow_utils.normalize_table_to_large_types(
+                    data.select(sys_tag_cols), keep_null=True
+                )
                 extracted_sys_tags = (
                     self._data_context.type_converter.arrow_table_to_python_dicts(
-                        self._data_table.select(sys_tag_cols)  # type: ignore[union-attr]
+                        system_tag_table
                     )[0]
                 )
                 self._data_table = self._data_table.drop_columns(sys_tag_cols)  # type: ignore[union-attr]
@@ -138,7 +142,10 @@ class Tag(Datagram):
                 **kwargs,
             )
 
-        self._set_system_tags({**extracted_sys_tags, **(system_tags or {})})
+        if system_tag_table is not None and not system_tags:
+            self._set_system_tag_table(system_tag_table, extracted_sys_tags)
+        else:
+            self._set_system_tags({**extracted_sys_tags, **(system_tags or {})})
 
     def _set_system_tags(self, system_tags: dict[str, DataValue]) -> None:
         """Hold ``system_tags`` as this tag's system tags."""
@@ -147,6 +154,20 @@ class Tag(Datagram):
             [self._system_tags], default_type=str
         )
         self._system_tags_table: "pa.Table | None" = None
+        self._system_tags_from_arrow = False
+
+    def _set_system_tag_table(
+        self, table: "pa.Table", values: dict[str, DataValue]
+    ) -> None:
+        """Hold the system-tag fields and values supplied by an Arrow table."""
+        self._system_tags_table = table
+        self._system_tags = values
+        self._system_tags_python_schema = Schema(
+            self._data_context.type_converter.arrow_schema_to_python_schema(
+                table.schema
+            )
+        )
+        self._system_tags_from_arrow = True
 
     @classmethod
     def rows_of(
@@ -178,13 +199,15 @@ class Tag(Datagram):
             table, data_context, apart_prefix=constants.SYSTEM_TAG_PREFIX
         )
         for tag, system_tag_row, _ in rows:
-            tag._set_system_tags(
-                tag._data_context.type_converter.arrow_table_to_python_dicts(
-                    system_tag_row
-                )[0]
-                if system_tag_row is not None
-                else {}
-            )
+            if system_tag_row is None:
+                tag._set_system_tags({})
+            else:
+                tag._set_system_tag_table(
+                    system_tag_row,
+                    tag._data_context.type_converter.arrow_table_to_python_dicts(
+                        system_tag_row
+                    )[0],
+                )
             yield tag
 
     # ------------------------------------------------------------------
@@ -287,7 +310,12 @@ class Tag(Datagram):
         new_tag = super().copy(include_cache=include_cache, preserve_id=preserve_id)
         new_tag._system_tags = dict(self._system_tags)
         new_tag._system_tags_python_schema = self._system_tags_python_schema
-        new_tag._system_tags_table = self._system_tags_table if include_cache else None
+        new_tag._system_tags_from_arrow = self._system_tags_from_arrow
+        new_tag._system_tags_table = (
+            self._system_tags_table
+            if include_cache or self._system_tags_from_arrow
+            else None
+        )
         return new_tag
 
 

@@ -5,6 +5,8 @@ import struct
 from typing import Any
 import hashlib
 
+from orcapod.hashing.hash_utils import SHA256_ALGORITHM
+
 
 def bool_sequence_to_byte(sequence: list[bool]) -> bytes:
     """Convert a sequence of booleans to a byte array."""
@@ -824,13 +826,13 @@ def _serialize_complex_value(buffer: BytesIO, value: Any, data_type: pa.DataType
 
 def serialize_table_logical_hash(
     table: pa.Table,
-    algorithm: str = "sha256",
+    algorithm: str = SHA256_ALGORITHM,
     order_options: OrderOptions | None = None,
 ) -> str:
     """Create deterministic hash using binary serialization."""
     serialized = serialize_table_logical(table, order_options)
 
-    if algorithm == "sha256":
+    if algorithm == SHA256_ALGORITHM:
         hasher = hashlib.sha256()
     elif algorithm == "sha3_256":
         hasher = hashlib.sha3_256()

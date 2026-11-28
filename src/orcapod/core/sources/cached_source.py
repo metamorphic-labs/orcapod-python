@@ -14,6 +14,10 @@ from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import parse_source_id
+from orcapod.core.sources.stream_builder import (
+    require_supported_nullable_types,
+    validate_source_table,
+)
 from orcapod.errors import (
     CachedSourceIdMismatchError,
     InputValidationError,
@@ -269,7 +273,10 @@ class CachedSource(RootSource):
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """The wrapped source's Arrow schemas: the cache stores that source's rows."""
-        return typed_arrow_schemas(self._source)
+        schemas = typed_arrow_schemas(self._source)
+        for schema in schemas:
+            require_supported_nullable_types(schema)
+        return schemas
 
     # -------------------------------------------------------------------------
     # Cache path — scoped to source's content hash
@@ -357,7 +364,15 @@ class CachedSource(RootSource):
         refuse_restricted_cache_input(self._source)
         require_same_data_context(self._source.data_context_key, self.data_context_key)
         live_table = self._source.as_table(
-            columns={"source": True, "system_tags": True}
+            columns={"source": True, "system_tags": True, "meta": True}
+        )
+        validate_source_table(live_table)
+        live_table = live_table.drop(
+            [
+                name
+                for name in live_table.column_names
+                if name.startswith(constants.META_PREFIX)
+            ]
         )
 
         # Compute per-row record hashes for dedup: hash the full row including
@@ -411,9 +426,7 @@ class CachedSource(RootSource):
     def _cached_record_hashes(self) -> set[bytes]:
         """The record hashes of the rows cached under the current data context."""
         self._account_for_stale_tables()
-        records = self._cache_database.get_all_records(
-            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
-        )
+        records = self._read_cache_table()
         if records is None:
             return set()
         records = keep_rows_of_data_context(records, self.data_context_key)
@@ -483,6 +496,17 @@ class CachedSource(RootSource):
         self._update_modified_time()
         return True
 
+    def _read_cache_table(self) -> pa.Table | None:
+        """Read and validate the physical cache before using any of its columns."""
+        records = self._cache_database.get_all_records(
+            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        return (
+            None
+            if records is None
+            else validate_source_table(records, stored_cache=True)
+        )
+
     def _read_cached_records(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context.
 
@@ -514,9 +538,7 @@ class CachedSource(RootSource):
             InputValidationError: If a cached column reads back as another Arrow type.
         """
         self._account_for_stale_tables()
-        records = self._cache_database.get_all_records(
-            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
-        )
+        records = self._read_cache_table()
         if records is None:
             return None
         stored_rows = records.num_rows
@@ -546,9 +568,7 @@ class CachedSource(RootSource):
         """
         if self._source_ids_checked:
             return
-        records = self._cache_database.get_all_records(
-            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
-        )
+        records = self._read_cache_table()
         if records is None:
             return
         self._require_source_ids(
@@ -669,6 +689,7 @@ class CachedSource(RootSource):
         merged.update(data_schema)
         type_converter = self.data_context.type_converter
         arrow_schema = type_converter.python_schema_to_arrow_schema(merged)
+        require_supported_nullable_types(arrow_schema)
         return pa.Table.from_pylist([], schema=arrow_schema)
 
     @property
@@ -716,7 +737,8 @@ class CachedSource(RootSource):
 
         See ``typed_zero_row_table``; neither the cache nor the source is read.
         """
-        return typed_zero_row_table(self._source)
+        table = typed_zero_row_table(self._source)
+        return None if table is None else validate_source_table(table)
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the wrapped source."""

@@ -1,31 +1,42 @@
-"""Tests for PostgresHashCacher using a real Postgres via testcontainers.
+"""Tests for PostgresHashCacher against a PostgreSQL server.
 
 These tests are marked ``@pytest.mark.postgres`` and are **skipped by default**.
-To run them, pass ``--postgres`` and ensure Docker is available::
+To run them, pass ``--postgres``::
 
     uv run pytest tests/test_hashing/test_postgres_hash_cacher.py --postgres
 
-The ``pg_conninfo`` fixture uses ``testcontainers[postgres]`` to spin up a
-``postgres:16`` container automatically; no manual Postgres setup is needed.
-Tests in ``TestPostgresReprRedaction`` do **not** carry the postgres marker and
-run unconditionally because they test the pure ``_redact_conninfo()`` helper.
+When ``PGHOST`` is set, the fixture uses the configured PostgreSQL server and
+needs permission to create schemas. Otherwise it uses Docker to start a
+``postgres:16`` container. Each test puts its own schema first in the search
+path, followed by ``pg_catalog``.
+Tests without the postgres marker run without a server.
 """
 
 from __future__ import annotations
 
+import hashlib
+import os
 import threading
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from typing import cast
+from unittest.mock import Mock
+from uuid import uuid4
 
 import pytest
+from typing_extensions import override
 from upath import UPath
 
 psycopg = pytest.importorskip("psycopg")
 
+from psycopg import Connection, connect, errors, sql  # noqa: E402
+from psycopg.conninfo import make_conninfo  # noqa: E402
 from testcontainers.postgres import PostgresContainer  # noqa: E402
 
 from orcapod.hashing.file_hashers import FileHashKey  # noqa: E402
 from orcapod.hashing.postgres_hash_cacher import PostgresHashCacher  # noqa: E402
 from orcapod.types import ContentHash  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,11 +46,77 @@ from orcapod.types import ContentHash  # noqa: E402
 def make_key(
     path: str = "/a/b.txt", mtime_ns: int = 1000, size: int = 100
 ) -> FileHashKey:
-    return FileHashKey(path=UPath(path), mtime_ns=mtime_ns, size=size)
+    return FileHashKey(
+        path=UPath(path), mtime_ns=mtime_ns, size=size, algorithm="sha256"
+    )
 
 
 def make_hash(digest: bytes = b"\xab" * 32) -> ContentHash:
     return ContentHash(method="sha256", digest=digest)
+
+
+def test_identical_put_accepts_bytes_from_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept a stored TEXT label returned as bytes by the driver."""
+    value = make_hash()
+    insert = Mock(rowcount=0)
+    select = Mock(fetchone=Mock(return_value=(b"sha256", value.to_prefixed_digest())))
+    execute = Mock(side_effect=[insert, select])
+    conn = Mock(execute=execute, transaction=Mock(return_value=nullcontext()))
+    monkeypatch.setattr(
+        "orcapod.hashing.postgres_hash_cacher.psycopg.connect",
+        Mock(side_effect=[nullcontext(Mock()), conn]),
+    )
+
+    with PostgresHashCacher("") as cacher:
+        cacher.put(make_key(), value)
+
+    assert execute.call_count == 2
+
+
+class _VersionedContentHash(ContentHash):
+    @override
+    def to_prefixed_digest(self) -> bytes:
+        return b"v2:" + super().to_prefixed_digest()
+
+
+class _CustomEncodingLabel(str):
+    @override
+    def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+        return b"custom"
+
+
+class _ChangingAlgorithmKey(FileHashKey):
+    _algorithm_reads: int = 0
+
+    @override
+    def __getattribute__(self, name: str) -> object:
+        if name == "algorithm":
+            reads = self._algorithm_reads
+            object.__setattr__(self, "_algorithm_reads", reads + 1)
+            return "sha256" if reads < 2 else "sha3_256"
+        return super().__getattribute__(name)
+
+
+def _insert_raw(pg_conninfo: str, key: FileHashKey, blob: bytes) -> None:
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash, cached_at) "
+            "VALUES (%s, %s, %s, %s, %s, 1)",
+            (str(key.path), key.mtime_ns, key.size, key.algorithm, blob),
+        )
+
+
+def _assert_resolved_table_schema(
+    conn: Connection[tuple[object, ...]], *tables: str
+) -> None:
+    for table in tables:
+        assert conn.execute(
+            "SELECT relnamespace = to_regnamespace(current_schema()) "
+            "FROM pg_catalog.pg_class WHERE oid = to_regclass(%s)",
+            (table,),
+        ).fetchone() == (True,), f"{table} must resolve to the test schema"
 
 
 # ---------------------------------------------------------------------------
@@ -48,8 +125,11 @@ def make_hash(digest: bytes = b"\xab" * 32) -> ContentHash:
 
 
 @pytest.fixture(scope="module")
-def pg_conninfo():
-    """Start one Postgres container for the entire module; yield a conninfo string."""
+def pg_server_conninfo() -> Iterator[str]:
+    """Use the CI service when configured or start one container for the module."""
+    if os.environ.get("PGHOST"):
+        yield ""  # libpq reads the PG* environment variables.
+        return
     with PostgresContainer("postgres:16") as pg:
         yield (
             f"host={pg.get_container_host_ip()} "
@@ -61,12 +141,76 @@ def pg_conninfo():
 
 
 @pytest.fixture()
-def cacher(pg_conninfo):
-    """Fresh PostgresHashCacher with a cleared table for each test."""
-    c = PostgresHashCacher(pg_conninfo)
-    c.clear()
-    yield c
-    c.close()
+def pg_schema_conninfo(pg_server_conninfo: str) -> Iterator[str]:
+    """Give each test an empty schema ahead of the PostgreSQL catalog."""
+    schema = f"orcapod_hash_cache_test_{uuid4().hex}"
+    identifier = sql.Identifier(schema)
+    conninfo = psycopg.conninfo.make_conninfo(
+        pg_server_conninfo, options=f"-c search_path={schema},pg_catalog"
+    )
+    with psycopg.connect(pg_server_conninfo) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(identifier))
+    try:
+        with psycopg.connect(conninfo) as conn:
+            assert conn.execute("SELECT current_schemas(true)").fetchone() == (
+                [schema, "pg_catalog"],
+            )
+        yield conninfo
+    finally:
+        with psycopg.connect(pg_server_conninfo) as conn:
+            conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(identifier))
+
+
+@pytest.fixture()
+def pg_conninfo(pg_schema_conninfo: str, request: pytest.FixtureRequest) -> str:
+    """Initialize and verify the cache tables before a test can write to them."""
+    conninfo = pg_schema_conninfo
+    if hasattr(request, "param"):
+        conninfo = make_conninfo(conninfo, client_encoding=cast(str, request.param))
+    PostgresHashCacher(conninfo).close()
+    with connect(conninfo) as conn:
+        _assert_resolved_table_schema(
+            conn, "file_hash_cache_v2", "file_hash_cache_v2_meta"
+        )
+    return conninfo
+
+
+@pytest.fixture()
+def cacher(pg_conninfo: str) -> Iterator[PostgresHashCacher]:
+    """Open the cache in the test's own schema."""
+    with PostgresHashCacher(pg_conninfo) as c:
+        yield c
+
+
+@pytest.fixture()
+def public_cache_sentinels(pg_server_conninfo: str) -> Iterator[None]:
+    """Seed public tables owned by this test and check them after schema teardown."""
+    with psycopg.connect(pg_server_conninfo) as conn:
+        available = conn.execute(
+            """
+            SELECT has_schema_privilege(to_regnamespace('public'), 'CREATE')
+                AND to_regclass('public.file_hash_cache') IS NULL
+                AND to_regclass('public.file_hash_cache_v2') IS NULL
+            """
+        ).fetchone()
+        if available != (True,):
+            pytest.skip("The public schema cannot be used for test-owned cache tables")
+        conn.execute("CREATE TABLE public.file_hash_cache (sentinel integer)")
+        conn.execute("CREATE TABLE public.file_hash_cache_v2 (sentinel integer)")
+        conn.execute("INSERT INTO public.file_hash_cache VALUES (1)")
+        conn.execute("INSERT INTO public.file_hash_cache_v2 VALUES (2)")
+    try:
+        yield
+        with psycopg.connect(pg_server_conninfo) as conn:
+            assert conn.execute("SELECT * FROM public.file_hash_cache").fetchall() == [
+                (1,)
+            ]
+            assert conn.execute(
+                "SELECT * FROM public.file_hash_cache_v2"
+            ).fetchall() == [(2,)]
+    finally:
+        with psycopg.connect(pg_server_conninfo) as conn:
+            conn.execute("DROP TABLE public.file_hash_cache, public.file_hash_cache_v2")
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +255,6 @@ class TestPostgresHashCacherBasic:
         value = make_hash(b"\xcc" * 32)
 
         cacher1 = PostgresHashCacher(pg_conninfo)
-        cacher1.clear()
         cacher1.put(key, value)
         cacher1.close()
 
@@ -128,7 +271,6 @@ class TestPostgresHashCacherBasic:
         value = make_hash(b"\xdd" * 32)
 
         with PostgresHashCacher(pg_conninfo) as c:
-            c.clear()
             c.put(key, value)
 
         # Verify persistence (connection was closed but data committed)
@@ -151,7 +293,6 @@ class TestPostgresHashCacherReadOnly:
         value = make_hash()
 
         cacher = PostgresHashCacher(pg_conninfo, read_only=True)
-        cacher.clear()
         cacher.put(key, value)
         assert cacher.get(key) is None
         cacher.close()
@@ -161,7 +302,6 @@ class TestPostgresHashCacherReadOnly:
         value = make_hash(b"\xee" * 32)
 
         writable = PostgresHashCacher(pg_conninfo)
-        writable.clear()
         writable.put(key, value)
         writable.close()
 
@@ -183,7 +323,6 @@ class TestPostgresHashCacherReadOnly:
 class TestPostgresHashCacherThreshold:
     def test_small_file_not_cached(self, pg_conninfo):
         cacher = PostgresHashCacher(pg_conninfo, min_cache_size_bytes=100)
-        cacher.clear()
         key = make_key(size=50)
         cacher.put(key, make_hash())
         assert cacher.get(key) is None
@@ -191,7 +330,6 @@ class TestPostgresHashCacherThreshold:
 
     def test_file_at_threshold_is_cached(self, pg_conninfo):
         cacher = PostgresHashCacher(pg_conninfo, min_cache_size_bytes=100)
-        cacher.clear()
         key = make_key(size=100)
         value = make_hash()
         cacher.put(key, value)
@@ -202,7 +340,6 @@ class TestPostgresHashCacherThreshold:
 
     def test_large_file_is_cached(self, pg_conninfo):
         cacher = PostgresHashCacher(pg_conninfo, min_cache_size_bytes=100)
-        cacher.clear()
         key = make_key(size=200)
         value = make_hash()
         cacher.put(key, value)
@@ -211,7 +348,6 @@ class TestPostgresHashCacherThreshold:
 
     def test_none_threshold_caches_all(self, pg_conninfo):
         cacher = PostgresHashCacher(pg_conninfo, min_cache_size_bytes=None)
-        cacher.clear()
         key = make_key(size=1)
         value = make_hash()
         cacher.put(key, value)
@@ -220,7 +356,6 @@ class TestPostgresHashCacherThreshold:
 
     def test_zero_threshold_caches_all(self, pg_conninfo):
         cacher = PostgresHashCacher(pg_conninfo, min_cache_size_bytes=0)
-        cacher.clear()
         key = make_key(size=1)
         value = make_hash()
         cacher.put(key, value)
@@ -235,42 +370,104 @@ class TestPostgresHashCacherThreshold:
 
 @pytest.mark.postgres
 class TestPostgresHashCacherConcurrency:
-    def test_concurrent_insert_no_error_one_row(self, pg_conninfo):
-        """Two threads inserting the same key simultaneously → no error, one row."""
-        key = make_key("/concurrent.txt", mtime_ns=12345, size=999)
-        value = make_hash(b"\xff" * 32)
+    @pytest.mark.parametrize("fail_on_call", [1, 2])
+    def test_hash_provider_failure_preserves_valid_row(
+        self,
+        pg_conninfo: str,
+        cacher: PostgresHashCacher,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        fail_on_call: int,
+    ):
+        key = make_key()
+        original = make_hash().to_prefixed_digest()
+        _insert_raw(pg_conninfo, key, original)
+        real_new = hashlib.new
+        calls = 0
 
-        # Pre-clear using a dedicated cacher
-        setup = PostgresHashCacher(pg_conninfo)
-        setup.clear()
-        setup.close()
+        def transient_new(name: str) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == fail_on_call:
+                raise MemoryError("hash constructor allocation failed")
+            return real_new(name)
 
-        errors: list[Exception] = []
-
-        def insert() -> None:
-            try:
-                c = PostgresHashCacher(pg_conninfo)
-                c.put(key, value)
-                c.close()
-            except Exception as exc:
-                errors.append(exc)
-
-        threads = [threading.Thread(target=insert) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert errors == [], f"Concurrent inserts raised errors: {errors}"
-
-        # Verify exactly one row was written
+        monkeypatch.setattr(hashlib, "new", transient_new)
+        if fail_on_call == 1:
+            with pytest.raises(MemoryError, match="allocation failed"):
+                cacher.put(key, make_hash(bytes(32)))
+        else:
+            with pytest.raises(ValueError, match="Different hash"):
+                cacher.put(key, make_hash(bytes(32)))
+        assert calls == 1
         with psycopg.connect(pg_conninfo) as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM file_hash_cache "
+            assert conn.execute(
+                "SELECT hash, cached_at FROM file_hash_cache_v2"
+            ).fetchone() == (original, 1)
+        assert not caplog.records
+
+    @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
+    @pytest.mark.parametrize("same_hash", [True, False])
+    @pytest.mark.parametrize("malformed_existing", [False, True])
+    def test_concurrent_puts(
+        self,
+        pg_conninfo: str,
+        cacher: PostgresHashCacher,
+        same_hash: bool,
+        malformed_existing: bool,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        key = make_key("/concurrent.txt", mtime_ns=12345, size=999)
+        if malformed_existing:
+            _insert_raw(pg_conninfo, key, b"corrupt")
+        values = (
+            make_hash(b"\xff" * 32),
+            make_hash(bytes([255 if same_hash else 127]) * 32),
+        )
+        barrier = threading.Barrier(2)
+
+        def put(value: ContentHash) -> bool:
+            try:
+                barrier.wait(timeout=10)
+                cacher.put(key, value)
+            except ValueError as exc:
+                assert "Different hash" in str(exc)
+                return False
+            finally:
+                cacher.close()
+            return True
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            accepted = list(pool.map(put, values))
+        assert sum(accepted) == (2 if same_hash else 1)
+        assert cacher.get(key) == next(
+            value for value, success in zip(values, accepted, strict=True) if success
+        )
+        with psycopg.connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM file_hash_cache_v2 "
                 "WHERE path=%s AND mtime_ns=%s AND size=%s",
                 (str(key.path), key.mtime_ns, key.size),
-            ).fetchone()[0]
-        assert count == 1
+            ).fetchone() == (1,)
+        assert len(caplog.records) == int(malformed_existing)
+
+    @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
+    def test_conflicting_hash_is_refused_and_identical_hash_is_a_noop(
+        self, pg_conninfo: str, cacher: PostgresHashCacher
+    ):
+        key = make_key()
+        value = make_hash()
+        cacher.put(key, value)
+        with psycopg.connect(pg_conninfo) as conn:
+            conn.execute("UPDATE file_hash_cache_v2 SET cached_at=1")
+        cacher.put(key, value)
+        with pytest.raises(ValueError, match="Different hash"):
+            cacher.put(key, make_hash(b"\x01" * 32))
+        assert cacher.get(key) == value
+        with psycopg.connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT cached_at FROM file_hash_cache_v2"
+            ).fetchone() == (1,)
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +485,6 @@ class TestPostgresHashCacherParity:
         value = make_hash(b"\x12" * 32)
 
         pg_cacher = PostgresHashCacher(pg_conninfo)
-        pg_cacher.clear()
         pg_cacher.put(key, value)
         pg_result = pg_cacher.get(key)
         pg_cacher.close()
@@ -396,41 +592,129 @@ class TestEnableFileHashCachingPostgres:
 
 @pytest.mark.postgres
 class TestPostgresSchemaVersion:
-    def test_meta_table_contains_schema_version(self, pg_conninfo):
-        """After construction, file_hash_cache_meta stores schema_version = 1."""
+    def test_fixture_resolves_its_test_schema_before_pg_catalog(self, pg_conninfo: str):
+        with psycopg.connect(pg_conninfo) as conn:
+            row = conn.execute(
+                "SELECT current_schema(), current_schemas(true)"
+            ).fetchone()
+        assert row is not None
+        schema, search_path = row
+        assert isinstance(schema, str) and schema.startswith("orcapod_hash_cache_test_")
+        assert search_path == [schema, "pg_catalog"]
+        with psycopg.connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT relnamespace = to_regnamespace(%s) FROM pg_class "
+                "WHERE oid = to_regclass('file_hash_cache_v2')",
+                (schema,),
+            ).fetchone() == (True,)
+
+    @pytest.mark.usefixtures("public_cache_sentinels")
+    def test_fixture_isolates_public_cache_tables(self, request: pytest.FixtureRequest):
+        # Create the isolated schema after the public tables, so its cleanup runs first.
+        conninfo = cast(str, request.getfixturevalue("pg_conninfo"))
+        with psycopg.connect(conninfo) as conn:
+            assert conn.execute(
+                "SELECT to_regclass('file_hash_cache') IS DISTINCT FROM "
+                "to_regclass('public.file_hash_cache')"
+            ).fetchone() == (True,)
+            _assert_resolved_table_schema(conn, "file_hash_cache_v2")
+        with PostgresHashCacher(conninfo) as cacher:
+            key = make_key()
+            value = make_hash()
+            assert cacher.get(key) is None
+            cacher.put(key, value)
+            assert cacher.get(key) == value
+            cacher.clear()
+            assert cacher.get(key) is None
+
+    def test_meta_table_contains_schema_version(self, pg_conninfo: str):
         PostgresHashCacher(pg_conninfo).close()
 
         with psycopg.connect(pg_conninfo) as conn:
             row = conn.execute(
-                "SELECT value FROM file_hash_cache_meta WHERE key = 'schema_version'"
+                "SELECT value FROM file_hash_cache_v2_meta WHERE key = 'schema_version'"
             ).fetchone()
-        assert row is not None
-        assert row[0] == "1"
+        assert row == ("2",)
 
-    def test_old_schema_raises_with_migration_hint(self, pg_conninfo):
-        """A pre-existing table missing cached_at raises ValueError with DDL hint."""
-        # Drop and re-create without cached_at to simulate old schema.
+    def test_old_cache_is_preserved_beside_new_table(self, pg_schema_conninfo: str):
+        pg_conninfo = pg_schema_conninfo
+        key = make_key()
+        old_hash = make_hash()
+        new_hash = make_hash(b"\x01" * 32)
         with psycopg.connect(pg_conninfo) as conn:
-            conn.execute("DROP TABLE IF EXISTS file_hash_cache CASCADE")
-            conn.execute("DROP TABLE IF EXISTS file_hash_cache_meta CASCADE")
             conn.execute(
                 """
                 CREATE TABLE file_hash_cache (
-                    path     TEXT   NOT NULL,
-                    mtime_ns BIGINT NOT NULL,
-                    size     BIGINT NOT NULL,
-                    hash     BYTEA  NOT NULL,
+                    path TEXT NOT NULL, mtime_ns BIGINT NOT NULL, size BIGINT NOT NULL,
+                    hash BYTEA NOT NULL,
+                    cached_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
                     PRIMARY KEY (path, mtime_ns, size)
                 )
                 """
             )
+            _assert_resolved_table_schema(conn, "file_hash_cache")
+            conn.execute(
+                "INSERT INTO file_hash_cache VALUES (%s, %s, %s, %s, %s)",
+                (
+                    str(key.path),
+                    key.mtime_ns,
+                    key.size,
+                    old_hash.to_prefixed_digest(),
+                    42,
+                ),
+            )
+            conn.execute(
+                "CREATE INDEX idx_file_hash_cache_path_size_mtime "
+                "ON file_hash_cache (path, size, mtime_ns DESC)"
+            )
+            conn.execute(
+                "CREATE TABLE file_hash_cache_meta (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            _assert_resolved_table_schema(conn, "file_hash_cache_meta")
+            conn.execute(
+                "INSERT INTO file_hash_cache_meta VALUES ('schema_version', '1')"
+            )
 
-        with pytest.raises(ValueError, match="cached_at"):
-            PostgresHashCacher(pg_conninfo)
+        def old_snapshot() -> tuple[object, ...]:
+            with psycopg.connect(pg_conninfo) as conn:
+                return (
+                    conn.execute(
+                        "SELECT *, ctid::text, xmin::text FROM file_hash_cache ORDER BY path"
+                    ).fetchall(),
+                    conn.execute(
+                        "SELECT *, ctid::text, xmin::text FROM file_hash_cache_meta ORDER BY key"
+                    ).fetchall(),
+                    conn.execute(
+                        "SELECT a.attname, a.atttypid, a.attnotnull, pg_get_expr(d.adbin, d.adrelid) "
+                        "FROM pg_attribute AS a LEFT JOIN pg_attrdef AS d "
+                        "ON d.adrelid=a.attrelid AND d.adnum=a.attnum "
+                        "WHERE a.attrelid='file_hash_cache'::regclass AND a.attnum > 0 "
+                        "ORDER BY a.attnum"
+                    ).fetchall(),
+                    conn.execute(
+                        "SELECT indexdef FROM pg_indexes "
+                        "WHERE schemaname=current_schema() AND tablename='file_hash_cache' "
+                        "ORDER BY indexname",
+                    ).fetchall(),
+                )
 
-        # Restore clean state for subsequent tests.
+        original = old_snapshot()
+        with PostgresHashCacher(pg_conninfo) as c:
+            with psycopg.connect(pg_conninfo) as conn:
+                _assert_resolved_table_schema(
+                    conn, "file_hash_cache_v2", "file_hash_cache_v2_meta"
+                )
+            assert c.get(key) is None
+            c.put(key, new_hash)
+            assert c.get(key) == new_hash
+            c.clear()
+            assert c.get(key) is None
+        assert old_snapshot() == original
+
         with psycopg.connect(pg_conninfo) as conn:
-            conn.execute("DROP TABLE IF EXISTS file_hash_cache CASCADE")
+            assert conn.execute(
+                "SELECT count(*) FROM file_hash_cache_v2"
+            ).fetchone() == (0,)
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +727,6 @@ class TestPostgresHashCacherMatchMtime:
     def test_default_true_mtime_change_causes_miss(self, pg_conninfo):
         """Default (match_mtime=True): different mtime → cache miss."""
         cacher = PostgresHashCacher(pg_conninfo)
-        cacher.clear()
         cacher.put(make_key(mtime_ns=1000, size=100), make_hash(b"\xaa" * 32))
         assert cacher.get(make_key(mtime_ns=2000, size=100)) is None
         cacher.close()
@@ -451,7 +734,6 @@ class TestPostgresHashCacherMatchMtime:
     def test_false_mtime_change_is_hit(self, pg_conninfo):
         """match_mtime=False: different mtime, same path+size → cache hit."""
         cacher = PostgresHashCacher(pg_conninfo, match_mtime=False)
-        cacher.clear()
         value = make_hash(b"\xbb" * 32)
         cacher.put(make_key(mtime_ns=1000, size=100), value)
         result = cacher.get(make_key(mtime_ns=2000, size=100))
@@ -462,7 +744,6 @@ class TestPostgresHashCacherMatchMtime:
     def test_false_size_change_is_miss(self, pg_conninfo):
         """match_mtime=False: different size → cache miss."""
         cacher = PostgresHashCacher(pg_conninfo, match_mtime=False)
-        cacher.clear()
         cacher.put(make_key(mtime_ns=1000, size=100), make_hash())
         assert cacher.get(make_key(mtime_ns=2000, size=200)) is None
         cacher.close()
@@ -470,7 +751,6 @@ class TestPostgresHashCacherMatchMtime:
     def test_false_returns_latest_mtime_entry(self, pg_conninfo):
         """match_mtime=False: multiple entries for same path+size → returns highest mtime_ns."""
         cacher = PostgresHashCacher(pg_conninfo, match_mtime=False)
-        cacher.clear()
         hash_old = make_hash(b"\xaa" * 32)
         hash_new = make_hash(b"\xbb" * 32)
         cacher.put(make_key(mtime_ns=1000, size=100), hash_old)
@@ -519,3 +799,331 @@ class TestPostgresReprRedaction:
 
         raw = "host=localhost dbname=orcapod user=alice"
         assert _redact_conninfo(raw) == raw
+
+
+# ---------------------------------------------------------------------------
+# A hash is returned only for its own algorithm (ITL-1488)
+# ---------------------------------------------------------------------------
+
+
+_SIZES = {"sha256": 32, "md5": 16}
+
+
+def _key_for_algorithm(algorithm: str) -> FileHashKey:
+    return FileHashKey(
+        path=UPath("/a/b.txt"), mtime_ns=1000, size=100, algorithm=algorithm
+    )
+
+
+@pytest.mark.postgres
+class TestPostgresHashCacherAlgorithmLabel:
+    @pytest.mark.parametrize(
+        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
+    )
+    def test_entry_of_another_label_is_miss(
+        self, cacher: PostgresHashCacher, first: str, second: str
+    ):
+        cacher.put(
+            _key_for_algorithm(first), ContentHash(first, bytes([1]) * _SIZES[first])
+        )
+        assert cacher.get(_key_for_algorithm(second)) is None
+        assert cacher.get(_key_for_algorithm(first)) == ContentHash(
+            first, bytes([1]) * _SIZES[first]
+        )
+
+    @pytest.mark.parametrize(
+        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
+    )
+    def test_put_of_another_algorithm_retains_both_entries(
+        self, cacher: PostgresHashCacher, first: str, second: str
+    ):
+        cacher.put(
+            _key_for_algorithm(first), ContentHash(first, bytes([1]) * _SIZES[first])
+        )
+        cacher.put(
+            _key_for_algorithm(second), ContentHash(second, bytes([2]) * _SIZES[second])
+        )
+        assert cacher.get(_key_for_algorithm(second)) == ContentHash(
+            second, bytes([2]) * _SIZES[second]
+        )
+        assert cacher.get(_key_for_algorithm(first)) == ContentHash(
+            first, bytes([1]) * _SIZES[first]
+        )
+
+    @pytest.mark.parametrize(
+        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
+    )
+    def test_match_mtime_false_skips_newer_entry_of_another_label(
+        self, pg_conninfo: str, first: str, second: str
+    ):
+        c = PostgresHashCacher(pg_conninfo, match_mtime=False)
+        try:
+            older = FileHashKey(UPath("/a/b.txt"), 1000, 100, first)
+            newer = FileHashKey(UPath("/a/b.txt"), 2000, 100, second)
+            c.put(older, ContentHash(first, bytes([1]) * _SIZES[first]))
+            c.put(newer, ContentHash(second, bytes([2]) * _SIZES[second]))
+            assert c.get(FileHashKey(UPath("/a/b.txt"), 3000, 100, first)) == (
+                ContentHash(first, bytes([1]) * _SIZES[first])
+            )
+        finally:
+            c.close()
+
+
+_CRAFTED_BLOBS = [
+    pytest.param(b"sha256:" + b"\x07" * 25, id="raw-32-byte-blob-starting-with-prefix"),
+    pytest.param(b"sha256:" + b"\x07" * 33, id="digest-too-long"),
+    pytest.param(b"sha256:", id="empty-digest"),
+    pytest.param(b"sha256" + b"\x07" * 32, id="no-separator"),
+    pytest.param(b"md5:" + b"\x07" * 32, id="other-label"),
+]
+
+
+@pytest.mark.postgres
+class TestPostgresHashCacherStrictStore:
+    @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    def test_rejects_a_conflict_from_another_label(
+        self, pg_conninfo: str, match_mtime: bool, caplog: pytest.LogCaptureFixture
+    ):
+        with connect(pg_conninfo) as conn:
+            try:
+                _ = conn.execute(
+                    "CREATE COLLATION algorithm_ci "
+                    "(provider=icu, locale='und-u-ks-level2', deterministic=false)"
+                )
+            except errors.FeatureNotSupported as exc:
+                pytest.skip(f"ICU collation unavailable: {exc}")
+            conn.execute(
+                "ALTER TABLE file_hash_cache_v2 "
+                "ALTER COLUMN algorithm TYPE TEXT COLLATE algorithm_ci"
+            )
+        key = make_key()
+        original = make_hash()
+        blob = original.to_prefixed_digest()
+        _insert_raw(pg_conninfo, key, blob)
+        with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cache:
+            other_key = FileHashKey(key.path, key.mtime_ns, key.size, "SHA256")
+            with pytest.raises(ValueError, match="matched a row with algorithm label"):
+                cache.put(other_key, ContentHash("SHA256", b"\x02" * 32))
+            assert cache.get(key) == original
+        with connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT convert_to(algorithm, 'UTF8'), hash, cached_at FROM file_hash_cache_v2"
+            ).fetchall() == [(b"sha256", blob, 1)]
+        assert not caplog.records
+
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize(
+        ("key_type", "label"),
+        [
+            pytest.param(
+                FileHashKey, _CustomEncodingLabel("sha256"), id="custom-encoding"
+            ),
+            pytest.param(_ChangingAlgorithmKey, "sha256", id="changing-algorithm"),
+        ],
+    )
+    def test_reads_with_a_canonical_algorithm_snapshot(
+        self,
+        pg_conninfo: str,
+        match_mtime: bool,
+        key_type: type[FileHashKey],
+        label: str,
+    ):
+        key = make_key()
+        lookup_key = key_type(key.path, key.mtime_ns, key.size, label)
+        with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cache:
+            original = make_hash()
+            cache.put(key, original)
+            assert cache.get(lookup_key) == original
+
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize("same_digest", [True, False])
+    def test_preserves_valid_rows_with_custom_serialization(
+        self,
+        pg_conninfo: str,
+        match_mtime: bool,
+        same_digest: bool,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        key = make_key()
+        original = make_hash()
+        incoming = _VersionedContentHash(
+            "sha256", original.digest if same_digest else b"\x01" * 32
+        )
+        blob = original.to_prefixed_digest()
+        with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cache:
+            _insert_raw(pg_conninfo, key, blob)
+            if same_digest:
+                cache.put(key, incoming)
+            else:
+                with pytest.raises(ValueError, match="Different hash"):
+                    cache.put(key, incoming)
+            assert cache.get(key) == original
+        with connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT hash, cached_at FROM file_hash_cache_v2"
+            ).fetchall() == [(blob, 1)]
+        assert not caplog.records
+
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize(
+        ("key_label", "value_label"), [("sha256", "md5"), ("md5", "sha256")]
+    )
+    def test_put_of_another_algorithms_hash_is_refused(
+        self, pg_conninfo: str, match_mtime: bool, key_label: str, value_label: str
+    ):
+        c = PostgresHashCacher(pg_conninfo, match_mtime=match_mtime)
+        try:
+            value = ContentHash(value_label, b"\x01" * _SIZES[value_label])
+            with pytest.raises(ValueError, match="label"):
+                c.put(_key_for_algorithm(key_label), value)
+            assert c.get(_key_for_algorithm(key_label)) is None
+            assert c.get(_key_for_algorithm(value_label)) is None
+        finally:
+            c.close()
+
+    def test_put_of_a_digest_of_the_wrong_length_is_refused(
+        self, cacher: PostgresHashCacher
+    ):
+        with pytest.raises(ValueError, match="digest"):
+            cacher.put(
+                _key_for_algorithm("sha256"), ContentHash("sha256", b"\x01" * 31)
+            )
+        assert cacher.get(_key_for_algorithm("sha256")) is None
+
+    @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize("blob", _CRAFTED_BLOBS)
+    def test_repairs_a_malformed_stored_hash(
+        self,
+        pg_conninfo: str,
+        match_mtime: bool,
+        blob: bytes,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        with (
+            psycopg.connect(pg_conninfo) as conn,
+            PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cacher,
+        ):
+            key = make_key()
+            _insert_raw(pg_conninfo, key, blob)
+            assert cacher.get(key) is None
+            value = make_hash()
+            before_row = conn.execute(
+                "SELECT EXTRACT(EPOCH FROM clock_timestamp())::BIGINT"
+            ).fetchone()
+            cacher.put(key, _VersionedContentHash(value.method, value.digest))
+            assert cacher.get(key) == value
+            with pytest.raises(ValueError, match="Different hash"):
+                cacher.put(key, make_hash(b"\x01" * 32))
+            assert cacher.get(key) == value
+            row = conn.execute(
+                "SELECT cached_at, EXTRACT(EPOCH FROM clock_timestamp())::BIGINT "
+                "FROM file_hash_cache_v2"
+            ).fetchone()
+        assert before_row is not None and row is not None
+        (before,) = before_row
+        cached_at, after = row
+        assert isinstance(before, int) and isinstance(after, int)
+        assert isinstance(cached_at, int)
+        assert before <= cached_at <= after
+        (warning,) = caplog.records
+        assert warning.levelname == "WARNING"
+        assert str(key.path) in warning.getMessage()
+        assert key.algorithm in warning.getMessage()
+
+    def test_well_formed_stored_hash_is_read(
+        self, pg_conninfo: str, cacher: PostgresHashCacher
+    ):
+        with psycopg.connect(pg_conninfo) as conn:
+            conn.execute(
+                "INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                ("/a/b.txt", 1000, 100, "sha256", b"sha256:" + b"\x07" * 32),
+            )
+        assert cacher.get(_key_for_algorithm("sha256")) == ContentHash(
+            "sha256", b"\x07" * 32
+        )
+
+    def test_two_algorithms_written_concurrently_never_cross(self, pg_conninfo: str):
+        """Concurrent puts of two algorithms on one file: no error, no wrong hit.
+
+        Both hashes remain available throughout the concurrent writes.
+        """
+        PostgresHashCacher(pg_conninfo).close()
+        values = {
+            label: ContentHash(label, bytes([n]) * _SIZES[label])
+            for n, label in ((1, "sha256"), (2, "md5"))
+        }
+        errors: list[Exception] = []
+        barrier = threading.Barrier(8)
+
+        def write(label: str) -> None:
+            # A worker that fails, also while connecting, aborts the barrier so
+            # the others stop waiting and the error is reported (CodeRabbit, #594).
+            c: PostgresHashCacher | None = None
+            try:
+                c = PostgresHashCacher(pg_conninfo)
+                barrier.wait()
+                for _ in range(20):
+                    c.put(_key_for_algorithm(label), values[label])
+                    got = c.get(_key_for_algorithm(label))
+                    assert got == values[label]
+            except Exception as exc:
+                barrier.abort()
+                errors.append(exc)
+            finally:
+                if c is not None:
+                    c.close()
+
+        threads = [
+            threading.Thread(target=write, args=(label,))
+            for label in ("sha256", "md5") * 4
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+
+        reader = PostgresHashCacher(pg_conninfo)
+        try:
+            found = {label: reader.get(_key_for_algorithm(label)) for label in values}
+        finally:
+            reader.close()
+        assert found == values
+
+
+_INVALID_LABELS = [
+    pytest.param("sha256\x00", id="embedded-nul"),
+    pytest.param("shä256", id="non-ascii"),
+    pytest.param("", id="empty"),
+]
+
+
+@pytest.mark.postgres
+class TestPostgresHashCacherInvalidLabel:
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize("label", _INVALID_LABELS)
+    def test_put_raises_value_error_and_read_is_a_miss(
+        self, pg_conninfo: str, match_mtime: bool, label: str
+    ):
+        c = PostgresHashCacher(pg_conninfo, match_mtime=match_mtime)
+        try:
+            with pytest.raises(ValueError):
+                c.put(_key_for_algorithm(label), ContentHash(label, b"\x01" * 32))
+            with psycopg.connect(pg_conninfo) as conn:
+                conn.execute(
+                    "INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (
+                        "/a/b.txt",
+                        1000,
+                        100,
+                        label if "\x00" not in label else "sha256",
+                        label.encode("utf-8") + b":" + b"\x07" * 32,
+                    ),
+                )
+            assert c.get(_key_for_algorithm(label)) is None
+        finally:
+            c.close()

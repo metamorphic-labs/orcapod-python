@@ -34,6 +34,7 @@ from decimal import Decimal
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from orcapod.core.operators import Join, MergeJoin, SemiJoin
@@ -78,7 +79,6 @@ def _arranged(spec: Spec, variant: str, roles: str) -> ArrowTableSource:
 
 SEEDS = range(12)
 # The fields whose flags a complete table decides by its values.
-SETTLED_PREFIXES = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
 # Batch sizes drawn for the cuts: empty and one-row batches included.
 SIZES = (0, 1, 1, 2, 3, 5, 64)
 
@@ -228,11 +228,11 @@ def assert_same_rows(
     """
     for batch in batches:
         assert batch.schema.names == list(kernel.output_columns)
-        # One schema for every batch of the run; the fields a complete table decides
-        # by its values are declared nullable (``_flag_by_values`` settles them).
+        # One schema for every batch of the run. The complete table settles the
+        # source-info flags. Join has already settled its sorted system tags.
         assert batch.schema.equals(batches[0].schema, check_metadata=True)
         for field in batch.schema:
-            if field.name.startswith(SETTLED_PREFIXES):
+            if field.name.startswith(constants.SOURCE_PREFIX):
                 assert field.nullable, field.name
     got = (
         pa.Table.from_batches(batches)
@@ -823,9 +823,6 @@ def test_a_null_typed_input_that_ends_empty_is_read_in_its_zero_row_form() -> No
 
 
 def test_merge_join_over_a_join_of_inputs_of_one_pipeline_hash() -> None:
-    # A Join of inputs tied on pipeline hash declares its system tags nullable; a table
-    # built from its rows flags them by their values. MergeJoin over it, in the kernel,
-    # declares them nullable and the complete table settles them as the sync path's.
     def tied(source_id: str, keys: list[int], groups: list[str]) -> ArrowTableSource:
         return ArrowTableSource(
             pa.table(
@@ -840,15 +837,113 @@ def test_merge_join_over_a_join_of_inputs_of_one_pipeline_hash() -> None:
             source_id=source_id,
         )
 
-    joined = Join()(
+    tied_inputs = (
         tied("a", [1, 2, 3], ["x", "y", "x"]),
         tied("b", [2, 1, 3], ["y", "x", "x"]),
         tied("c", [3, 2, 1], ["x", "y", "x"]),
     )
-    other = _keyed_source("o", "int", 6, {"z": pa.int64()}, 4)
+    other = _keyed_source("o", "int", 6, {"z": pa.int64(), "w": pa.int8()}, 4)
+    assert len({source.pipeline_hash() for source in tied_inputs}) == 1
+    columns = {"system_tags": True}
+    operator = Join()
+    expected_values = None
+    for inputs in itertools.permutations((*tied_inputs, other)):
+        joined = operator(*inputs)
+        computed = operator.static_process(*inputs)
+        table = joined.as_table(columns=columns)
+        prediction = joined.output_schema(columns=columns)
+        assert prediction == computed.output_schema(columns=columns)
+        tag_schema, _ = prediction
+        names = [
+            name for name in tag_schema if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        ]
+        assert len(names) == 8
+        fields = table.select(names).schema
+        assert all(
+            field.type == pa.large_string() and not field.nullable for field in fields
+        )
+        assert all(
+            tag.as_table(columns=columns).select(names).schema == fields
+            for tag, _ in joined.iter_data()
+        )
+        values = table.sort_by("k").select(names).to_pylist()
+        if expected_values is None:
+            expected_values = values
+        assert values == expected_values
+
+        kernel = StreamingJoin(operator, inputs)
+        zero = kernel.zero_row_result.as_table(columns=columns)
+        assert zero.num_rows == 0
+        assert zero.select(names).schema == fields
+        out = []
+        for i, source in enumerate(inputs):
+            for batch in _sent(source).to_batches():
+                out.extend(kernel.push(i, batch))
+        assert out
+        tied_hash = tied_inputs[0].pipeline_hash().to_hex()
+        tied_names = [name for name in names if f"::{tied_hash}:" in name]
+        assert len(tied_names) == 6
+        emitted = pa.Table.from_batches(out).sort_by("k").select(names)
+        assert emitted.schema == fields
+        assert emitted.to_pylist() == values
+
+    joined = operator(*tied_inputs)
     for inputs in ((joined, other), (other, joined)):
         _check(_merge_kernel, MergeJoin().static_process, inputs)
         _check(_join_kernel, Join().static_process, inputs, seeds=range(4))
+
+
+def test_join_keeps_nullable_tied_raw_system_tag_fields() -> None:
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("_tag_source_id::seed", pa.large_string(), False),
+            pa.field("_tag_record_id::seed", pa.large_string(), True),
+        ]
+    )
+    inputs = tuple(
+        ArrowTableStream(
+            pa.Table.from_arrays(
+                [
+                    pa.array([1]),
+                    pa.array([source], pa.large_string()),
+                    pa.array([record], pa.large_string()),
+                ],
+                schema=schema,
+            ),
+            tag_columns=["k"],
+            data_tags=["k"],
+        )
+        for source, record in (("a", None), ("b", "r"), ("c", "s"))
+    )
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    columns = {"system_tags": True}
+    for ordered in itertools.permutations(inputs):
+        operator = Join()
+        joined = operator(*ordered)
+        expected = joined.as_table(columns=columns)
+        record_fields = [
+            f for f in expected.schema if f.name.startswith("_tag_record_id")
+        ]
+        assert len(record_fields) == 3
+        assert all(f.nullable for f in record_fields)
+        pq.write_table(expected, pa.BufferOutputStream())
+        assert joined.output_schema(columns=columns) == operator.static_process(
+            *ordered
+        ).output_schema(columns=columns)
+        kernel = StreamingJoin(operator, ordered)
+        names = expected.column_names
+        assert (
+            kernel.zero_row_result.as_table(columns=columns).select(names).schema
+            == expected.schema
+        )
+        emitted = [
+            result
+            for i, stream in enumerate(ordered)
+            for batch in _transport(stream).to_batches()
+            for result in kernel.push(i, batch)
+        ]
+        assert pa.Table.from_batches(emitted).select(names).equals(expected)
 
 
 # ---------------------------------------------------------------------------
@@ -1033,20 +1128,42 @@ def test_an_empty_run_ends_with_the_types_of_the_sync_result(
     assert_same_rows(out, instance, want)
 
 
-def test_a_source_refuses_a_null_typed_column() -> None:
-    # The kernels' domain is what a job carries (module docstring): no source takes a
-    # ``null``-typed column, with rows or without, tag or data.
-    for table, tags in (
-        (pa.table({"k": [1], "x": pa.array([None], pa.null())}), ["k"]),
-        (pa.table({"k": pa.array([None], pa.null()), "x": [1]}), ["k"]),
-        (
-            pa.table({"k": pa.array([], pa.int64()), "x": pa.array([], pa.null())}),
-            ["k"],
-        ),
-    ):
-        with pytest.raises(ValueError, match="type null"):
+@pytest.mark.parametrize("row_count", [0, 2])
+@pytest.mark.parametrize("column", ["k", "x", "__unused"])
+@pytest.mark.parametrize(
+    "bad_type",
+    [
+        pa.null(),
+        pa.large_list(pa.null()),
+        pa.struct([("child", pa.null())]),
+    ],
+)
+def test_a_source_refuses_a_null_typed_column(
+    row_count: int, column: str, bad_type: pa.DataType
+) -> None:
+    arrays: dict[str, pa.Array[Any]] = {
+        "k": pa.array([1] * row_count, pa.int64()),
+        "g": pa.array(["group"] * row_count, pa.large_string()),
+        "x": pa.array([2] * row_count, pa.int64()),
+        "y": pa.array([3] * row_count, pa.int64()),
+    }
+    fields: dict[str, pa.Field[Any]] = {
+        name: pa.field(name, values.type, nullable=False)
+        for name, values in arrays.items()
+    }
+    arrays[column] = pa.array([None] * row_count, type=bad_type)
+    fields[column] = pa.field(column, bad_type)
+    for order in (list(fields), list(reversed(fields))):
+        table = pa.Table.from_arrays(
+            [arrays[name] for name in order],
+            schema=pa.schema([fields[name] for name in order]),
+        )
+        with pytest.raises(
+            InputValidationError,
+            match=rf"{column!r}.*declare a supported nullable type",
+        ):
             ArrowTableSource(
-                table, tag_columns=tags, tag_only_columns=True, source_id="s"
+                table, tag_columns=["k", "g"], tag_only_columns=True, source_id="s"
             )
 
 

@@ -31,6 +31,10 @@ class CountingFileHasher:
         self.inner = inner
         self.call_count = 0
 
+    @property
+    def hash_algorithm(self) -> str:
+        return self.inner.hash_algorithm
+
     def hash_file(self, file_path: PathLike) -> ContentHash:
         self.call_count += 1
         return self.inner.hash_file(file_path)

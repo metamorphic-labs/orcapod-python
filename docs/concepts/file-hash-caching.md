@@ -16,17 +16,52 @@ default, configurable via the `algorithm` argument). It does this every time,
 with no memory of previous results.
 
 `HashCacher` is a protocol for any object that maps a `FileHashKey` to a
-`ContentHash`. The key is a three-field struct:
+`ContentHash`. The key is a four-field struct:
 
 ```
-FileHashKey(path, mtime_ns, size)
+FileHashKey(path, mtime_ns, size, algorithm)
 ```
 
-The `mtime_ns` and `size` fields encode the file's identity at a specific
-point in time. If the file is modified — its modification time or byte count
-changes — the key is different, so the old entry is never returned. You do
-not need to explicitly invalidate entries; the key change handles it
-automatically.
+An ordinary lookup trusts the file's resolved path, nanosecond modification
+time, and byte size. A change to any of these fields gives the file a
+different key in the default lookup mode. If a file is rewritten to the same
+size at the same path and its original modification time is restored, the
+lookup returns the cached hash without reading the file. This hit bypasses
+the write and its conflict check.
+
+`FileHashKey.algorithm` is **PROVISIONAL**. Its value is the hash label
+(`ContentHash.method`) reported by the file hasher's `hash_algorithm` property.
+The cache stores each algorithm's hash separately for a given file state.
+For example, `orcapod warm-cache --algorithm md5` fills MD5 entries. A later
+SHA-256 lookup can fill its own entries alongside them.
+
+A cache write raises `ValueError` if the hash label or digest length is invalid
+for the key, or if the key already holds a different well-formed hash. Writing
+an identical hash leaves the existing entry and its timestamp unchanged. Reads
+accept values in the exact format `<label>:<digest>`, with the key's label and
+that algorithm's digest length. The persistent caches treat malformed values
+as misses. The next valid write for the same key replaces the malformed value,
+refreshes its timestamp, and logs a warning naming the file and hash algorithm.
+An incompatible hash returned by a custom cache is also a miss.
+
+`orcapod warm-cache --force` skips the cache lookup and recomputes each eligible
+file's hash. Content-hashing algorithms read the file's contents. The
+`hash_path` algorithm checks that the file exists and hashes its path string.
+If a new hash differs from a well-formed hash stored for the same key,
+the cache retains the original entry and the command reports a file error. If
+a rehash and write conflict occurs while a pipeline hashes a file column, it can
+surface as `RuntimeError: Failed to process column 'recording'`, with a
+`ValueError` cause beginning `Different hash already cached for FileHashKey`
+and naming the file and algorithm. To replace a stale valid hash, clear the
+[current cache](#cache-storage) and rerun the pipeline or warmer to rebuild the
+entries. An explicit operation to replace a valid hash is tracked separately
+(ITL-1547). Let file rewrites advance the modification time to avoid stale hits
+in the default mode.
+
+The label must name an algorithm whose digest length is fixed: a `hashlib`
+algorithm such as `sha256` or `md5`, or `hash_path`, `xxh64` or `crc32`. Every algorithm
+`FileHasher` can hash with qualifies. `CachedFileHasher` refuses (`ValueError`) an
+inner hasher with any other label when it is built.
 
 `CachedFileHasher` wraps a `FileHasher` with any `HashCacher`. When you call
 `hash_file(path)` on it, it first constructs the key from the file's current
@@ -127,7 +162,7 @@ enable_file_hash_caching(
 
 ## Ignoring mtime in cache lookups
 
-By default, a cache hit requires **path, mtime_ns, and size** to all match the stored
+By default, a cache hit requires **path, mtime_ns, size, and algorithm** to all match the stored
 entry. In several common deployment scenarios, mtime is unreliable — it changes even
 when file content has not — causing spurious cache misses and unnecessary re-hashing:
 
@@ -148,7 +183,7 @@ when file content has not — causing spurious cache misses and unnecessary re-h
   timestamps that differ from the values recorded in the cache.
 
 Set `match_mtime=False` to drop mtime from the lookup criterion. A cache hit then
-requires only **path and size** to match:
+requires **path, size, and algorithm** to match:
 
 ```python
 from orcapod.contexts import enable_file_hash_caching
@@ -156,7 +191,7 @@ from orcapod.contexts import enable_file_hash_caching
 enable_file_hash_caching(match_mtime=False)
 ```
 
-When multiple cache entries share the same path and size (recorded at different
+When multiple cache entries share the same path, size, and algorithm (recorded at different
 mtimes), Orcapod returns the hash from the entry with the most recent `mtime_ns`.
 
 **The write path is unchanged.** mtime is always recorded when a new entry is
@@ -204,16 +239,24 @@ You can override this path in two ways:
 - Set the `ORCAPOD_HASH_CACHE_DB` environment variable to the desired path.
 - Pass the `db_path` argument to `enable_file_hash_caching()`.
 
+SQLite and PostgreSQL use the new `file_hash_cache_v2` table. The old
+`file_hash_cache` table remains untouched and the cacher reads only the new
+table. SQLite uses `PRAGMA user_version` to record the layout of the new table.
+PostgreSQL records version 2 in `file_hash_cache_v2_meta`. ITL-1535 tracks
+migration of old caches, including both SQLite layouts (with and without
+`cached_at`). Let your next pipeline run or `orcapod warm-cache` hash the files
+once more to fill the new table.
+
 To inspect cached entries using the SQLite command-line tool:
 
 ```bash
-sqlite3 ~/.orcapod/file_hash_cache.db "SELECT path, size, cached_at FROM file_hash_cache LIMIT 10;"
+sqlite3 ~/.orcapod/file_hash_cache.db "SELECT path, size, algorithm, cached_at FROM file_hash_cache_v2 LIMIT 10;"
 ```
 
 To clear all cached entries:
 
 ```bash
-sqlite3 ~/.orcapod/file_hash_cache.db "DELETE FROM file_hash_cache;"
+sqlite3 ~/.orcapod/file_hash_cache.db "DELETE FROM file_hash_cache_v2;"
 ```
 
 ## When caching helps -- and when it doesn't
@@ -248,7 +291,7 @@ Orcapod ships two hash cache backends. Pick based on your deployment:
 |---|---|---|
 | Setup | Zero — file on disk | Requires a running Postgres server |
 | Scope | Per-machine | Shared across machines and pipeline runs |
-| Concurrency | Single-writer | Multi-writer safe (`ON CONFLICT DO NOTHING`) |
+| Concurrency | One writer at a time | Concurrent writers |
 | Best for | Local development, single-machine pipelines | Distributed pipelines, shared caches |
 
 ### Using the SQLite backend (default)
@@ -298,13 +341,14 @@ hasher = CachedFileHasher(file_hasher=FileHasher(), cacher=cacher)
 (`CREATE TABLE IF NOT EXISTS`):
 
 ```sql
-CREATE TABLE IF NOT EXISTS file_hash_cache (
+CREATE TABLE IF NOT EXISTS file_hash_cache_v2 (
     path      TEXT   NOT NULL,
     mtime_ns  BIGINT NOT NULL,
     size      BIGINT NOT NULL,
+    algorithm TEXT   NOT NULL,
     hash      BYTEA  NOT NULL,
     cached_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
-    PRIMARY KEY (path, mtime_ns, size)
+    PRIMARY KEY (path, mtime_ns, size, algorithm)
 )
 ```
 

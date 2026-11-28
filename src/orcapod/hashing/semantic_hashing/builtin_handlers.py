@@ -897,14 +897,13 @@ def register_builtin_python_type_handlers(
     if file_hasher is None:
         from orcapod.hashing.file_hashers import FileHasher
 
-        file_hasher = FileHasher(algorithm="sha256")
+        file_hasher = FileHasher()
 
     if directory_hasher is None:
         from orcapod.hashing.directory_hashers import BasicDirectoryHasher
 
         directory_hasher = BasicDirectoryHasher(
             file_hasher=file_hasher,
-            algorithm="sha256",
         )
 
     if function_info_extractor is None:

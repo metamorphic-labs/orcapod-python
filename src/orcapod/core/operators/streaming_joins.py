@@ -64,8 +64,9 @@ How a kernel stays equal to the sync path:
   batch of pairs gives the sync rows.
 - **Field flags.** A batch's flags are the sync result's, except the system-tag and
   source-info fields: a complete table decides those by its values (``StaticOutputOperatorPod._flag_by_values``,
-  the last step of F), so a kernel declares every such field nullable and the stream made
-  from its batches settles them.
+  the last step of F). The input layout declares these fields nullable and the stream
+  made from the batches settles them. Join's sorted system-tag fields are already
+  declared non-nullable when the kernel emits them.
 
 A kernel holds only what can still match: a side's rows are dropped when the other side
 closes (nothing can arrive to match them), and an arriving row is not kept once the
@@ -130,13 +131,15 @@ TRANSPORT_COLUMNS: dict[str, bool] = {"source": True, "system_tags": True}
 _ROW = ("__streaming_left_row", "__streaming_right_row")
 
 
-def _settled_by_values(schema: pa.Schema) -> pa.Schema:
-    """``schema`` with every system-tag and source-info field nullable.
+def _settled_by_values(schema: pa.Schema, *, system_tags: bool = True) -> pa.Schema:
+    """``schema`` with source-info and, optionally, system-tag fields nullable.
 
     What a kernel declares for the fields a complete table decides by its values
     (``StaticOutputOperatorPod._flag_by_values``): one record batch of many cannot.
     """
-    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+    prefixes = (constants.SOURCE_PREFIX,)
+    if system_tags:
+        prefixes = (*prefixes, constants.SYSTEM_TAG_PREFIX)
     return pa.schema(
         [
             field.with_nullable(True) if field.name.startswith(prefixes) else field
@@ -145,7 +148,9 @@ def _settled_by_values(schema: pa.Schema) -> pa.Schema:
     )
 
 
-def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
+def _row_built_zero_rows(
+    stream: StreamProtocol, *, keep_system_tag_flags: bool = False
+) -> tuple[StreamProtocol, bool]:
     """``stream`` with no rows, as an input rebuilt from rows of it reads.
 
     The zero-row input (``_materialize_upstream`` with no rows) put through F: what
@@ -153,6 +158,7 @@ def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
 
     Args:
         stream: An input stream (its description).
+        keep_system_tag_flags: Use the input's declared system-tag nullability.
 
     Returns:
         The zero-row stream in the row-built form, and whether its Arrow types differ
@@ -163,6 +169,14 @@ def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
     zero = pod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the operators' one form of an input
     table = zero.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     row_built = pod._flag_by_values(row_built_columns(table, stream.keys()))  # pyright: ignore[reportPrivateUsage]  # F's last step
+    if keep_system_tag_flags:
+        fields = [
+            field.with_nullable(table.schema.field(field.name).nullable)
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+            else field
+            for field in row_built.schema
+        ]
+        row_built = pa.Table.from_arrays(row_built.columns, schema=pa.schema(fields))
     differs = any(
         field.type != table.schema.field(field.name).type for field in row_built.schema
     )
@@ -410,6 +424,7 @@ class StreamingJoinKernel(ABC):
 
     # How many inputs the operator takes; ``None`` for one or more.
     ARITY: ClassVar[int | None] = None
+    KEEP_SYSTEM_TAG_FLAGS: ClassVar[bool] = False
 
     def __init__(
         self, operator: StaticOutputOperatorPod, inputs: Sequence[StreamProtocol]
@@ -424,13 +439,21 @@ class StreamingJoinKernel(ABC):
         self.inputs: tuple[StreamProtocol, ...] = tuple(inputs)
         # Each input as the sync path reads rows of it, with no rows (the row-built
         # form), and whether that differs from how it reads the input with none.
-        built = [_row_built_zero_rows(stream) for stream in self.inputs]
+        built = [
+            _row_built_zero_rows(
+                stream, keep_system_tag_flags=self.KEEP_SYSTEM_TAG_FLAGS
+            )
+            for stream in self.inputs
+        ]
         self._zero_rows: tuple[StreamProtocol, ...] = tuple(z for z, _ in built)
         self._null_typed: tuple[bool, ...] = tuple(d for _, d in built)
         # The schema of every batch of an input, in its row-built layout; the fields a
         # complete table decides by values declared nullable.
         self._layouts: tuple[pa.Schema, ...] = tuple(
-            _settled_by_values(stream.as_table(columns=TRANSPORT_COLUMNS).schema)
+            _settled_by_values(
+                stream.as_table(columns=TRANSPORT_COLUMNS).schema,
+                system_tags=not self.KEEP_SYSTEM_TAG_FLAGS,
+            )
             for stream in self._zero_rows
         )
         self._closed: list[bool] = [False] * len(self.inputs)
@@ -642,8 +665,9 @@ class StreamingJoinKernel(ABC):
     def _emitted(self, tables: list[pa.Table]) -> list[pa.RecordBatch]:
         """The record batches of the output tables, holding ``output_columns``.
 
-        Every system-tag and source-info field is declared nullable: the complete
-        table's values decide those flags (``StaticOutputOperatorPod._flag_by_values``).
+        A source-info field is nullable until the complete table settles its flag
+        (``StaticOutputOperatorPod._flag_by_values``). System tags keep the field
+        from the kernel so Join's sorted tags retain their non-nullable declaration.
         """
         batches: list[pa.RecordBatch] = []
         for table in tables:
@@ -651,7 +675,8 @@ class StreamingJoinKernel(ABC):
                 self._emitted_any = True
                 table = table.select(list(self.output_columns)).combine_chunks()
                 table = pa.Table.from_arrays(
-                    table.columns, schema=_settled_by_values(table.schema)
+                    table.columns,
+                    schema=_settled_by_values(table.schema, system_tags=False),
                 )
                 batches.extend(table.to_batches())
         return batches
@@ -677,6 +702,8 @@ class StreamingJoin(StreamingJoinKernel):
         operator: The ``Join``.
         inputs: Its input streams, in call order.
     """
+
+    KEEP_SYSTEM_TAG_FLAGS: ClassVar[bool] = True
 
     def __init__(self, operator: Join, inputs: Sequence[StreamProtocol]) -> None:
         super().__init__(operator, inputs)

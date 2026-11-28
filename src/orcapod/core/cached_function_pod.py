@@ -241,10 +241,19 @@ class CachedFunctionPod(WrappedFunctionPod):
                 python_schema=pf.get_execution_data_schema(),
                 data_context=pf.data_context,
             )
-            self._cache.store(
+            # Write if missing (ITL-1503): a result stored for this input since the
+            # lookup above (an equal input computed at the same moment) is used and
+            # this one discarded, reported as a cache hit.
+            stored = self._cache.store_if_missing(
                 data, output, var_dg, exec_dg, data_context_key=self.data_context_key
             )
-            output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
+            if stored is not None:
+                module_logger.info(
+                    "A result for this input was stored meanwhile; using it"
+                )
+                output = stored.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
+            else:
+                output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output
 
     async def async_process_data(
@@ -294,10 +303,19 @@ class CachedFunctionPod(WrappedFunctionPod):
                 python_schema=pf.get_execution_data_schema(),
                 data_context=pf.data_context,
             )
-            self._cache.store(
+            # Write if missing (ITL-1503): a result stored for this input since the
+            # lookup above (an equal input computed at the same moment) is used and
+            # this one discarded, reported as a cache hit.
+            stored = self._cache.store_if_missing(
                 data, output, var_dg, exec_dg, data_context_key=self.data_context_key
             )
-            output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
+            if stored is not None:
+                module_logger.info(
+                    "A result for this input was stored meanwhile; using it"
+                )
+                output = stored.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
+            else:
+                output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output
 
     def _invoke_with_hooks(

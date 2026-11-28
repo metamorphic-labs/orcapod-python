@@ -268,7 +268,7 @@ class TestSemaphoreZeroDeadlock:
 
     def test_resolve_concurrency_accepts_none(self):
         """max_concurrency=None means unlimited (no semaphore)."""
-        pod_config = PodConfig()
+        pod_config = PodConfig(max_concurrency=None)
         pipeline_config = PipelineConfig()
         assert resolve_concurrency(pod_config, pipeline_config) is None
 

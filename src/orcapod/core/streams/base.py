@@ -85,14 +85,10 @@ def reads_as_its_class(obj: object, cls: type) -> bool:
 
 
 def system_tags_as_rows_give(table: pa.Table) -> bool:
-    """Whether every system-tag column is what the row rebuild gives: non-null text.
+    """Whether the optimized row-building path may use these system tags.
 
-    ``main`` rebuilt a node's table from its rows, whose system tags are typed from
-    their values: a ``large_string`` field, non-nullable, with no field metadata (the
-    only kind library code makes). A whole table is its rows only when its system tags
-    are already so, in their values as in their fields: a narrow integer, a nullable
-    field, a null value (also in a field declared non-nullable) or field metadata (an
-    Arrow extension's, which a tag drops) is decided by the rows (ITL-1347).
+    The optimized path still uses the ITL-1347 gate for non-nullable text
+    without field metadata. The row path now carries declared system-tag fields.
 
     Args:
         table: The table.
@@ -272,13 +268,10 @@ def row_built_columns(
        column of ``table``.
     3. Normalized to the large types without keeping ``null``: each row's datagram
        stores a ``null`` column as ``large_string`` (``Datagram._init_from_table``).
-    4. The system-tag and source-info fields as a row builds them
-       (``row_built_provenance``): no field metadata of their own. A source-info
-       column keeps the type the stream gives it (ITL-1491).
+    4. Keep the declared system-tag fields. Strip top-level metadata from
+       source-info fields while preserving their types (``row_built_provenance``).
 
-    Whether a system-tag or source-info field is nullable depends on its values over
-    the complete table (``StaticOutputOperatorPod._flag_by_values``), so it is not
-    decided here.
+    Source-info field nullability is settled over the complete table.
 
     Args:
         table: A table of user tags, system tags, data and source info.
@@ -288,23 +281,23 @@ def row_built_columns(
     Returns:
         The same values, selected and ordered, in their large types.
     """
-    return row_built_provenance(
-        arrow_utils.normalize_table_to_large_types(
-            table.select(row_built_names(table.column_names, keys))
-        )
-    )
+    selected = table.select(row_built_names(table.column_names, keys))
+    normalized = arrow_utils.normalize_table_to_large_types(selected)
+    for index, field in enumerate(selected.schema):
+        if field.name.startswith(constants.SYSTEM_TAG_PREFIX) and (
+            field.type != normalized.schema.field(index).type
+        ):
+            normalized = normalized.set_column(index, field, selected.column(index))
+    return row_built_provenance(normalized)
 
 
 def row_built_provenance(table: pa.Table) -> pa.Table:
-    """Give ``table``'s system-tag and source-info fields the form a row builds.
+    """Give ``table``'s source-info fields the form a row builds.
 
-    A row builds its system-tag and source-info fields anew, so the fields carry no
-    field metadata of their own. A source-info column's type is left as it is, the
-    metadata of a list's item field included: the type is determined by the
-    pipeline and a row carries the typed column, so it is never typed from its
-    tokens (developer, November 27, 2026, ITL-1491). The fields' nullability is left
-    as it is (``StaticOutputOperatorPod._flag_by_values`` decides it). Other fields
-    are not touched.
+    A row rebuilds the top-level token field without metadata. The column
+    keeps its declared type, including nested item fields and their metadata
+    (ITL-1491). Source-info field nullability is settled separately by
+    ``StaticOutputOperatorPod._flag_by_values``.
 
     Args:
         table: A table of user tags, system tags, data and source info.
@@ -312,9 +305,10 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
     Returns:
         The same columns under the rebuilt fields.
     """
-    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     fields = [
-        field.remove_metadata() if field.name.startswith(prefixes) else field
+        field.remove_metadata()
+        if field.name.startswith(constants.SOURCE_PREFIX)
+        else field
         for field in table.schema
     ]
     if all(
@@ -412,9 +406,11 @@ def stream_arrow_schema(
     converted by its data context (``arrow_types_declared`` is then false), and one
     whose schema is known only by polling (nothing declared, nothing polled:
     ``schema_requires_io``) answers with no column. Each
-    system-tag and source-info field is stated nullable: a table decides its flag from
-    its values (F's last step). A source-info field's type is the declared
-    token type, which its rows keep (ITL-1491). A ``null`` column keeps the zero-row ``null`` type; rows
+    source-info field is stated nullable: a table decides its flag from
+    its values (F's last step). System-tag fields keep their declared flags and
+    metadata. A source-info field's type is the declared token type, which its
+    rows keep (ITL-1491). Outside system tags, a ``null`` column keeps the
+    zero-row ``null`` type; rows
     carry ``large_string`` (ITL-1319). ITL-1307 later reads it from ``Schema`` instead,
     here.
 
@@ -475,9 +471,8 @@ def stream_arrow_schema(
     keys = given_keys if given_keys is not None else keys_of_rows(table, typed.keys())
     names = row_built_names(table.column_names, keys)
     schema = row_built_provenance(table.select(names)).schema
-    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     for index, field in enumerate(schema):
-        if field.name.startswith(prefixes):
+        if field.name.startswith(constants.SOURCE_PREFIX):
             schema = schema.set(index, field.with_nullable(True))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
     return schema
 
@@ -530,13 +525,10 @@ class CompleteStreamFeed:
     def _row_built_table(self) -> pa.Table:
         """The stream's table in the row-built form: its one read.
 
-        The table first: reading it is the stream's one read (an unpolled source polls
-        here), and its keys are then known without another. Its system tags must be
-        what rows give (``system_tags_as_rows_give``: non-null text, no field
-        metadata); otherwise, as on the eager routes of a job, the table is the one
-        its rows build (``main``'s row path), so a narrow or nullable system tag is
-        retyped as a row retypes it. Only a stream that holds such a column (a raw
-        ``ArrowTableStream``) is read that way, and its reads have no effect.
+        The table first: reading it is the stream's one read (an unpolled source
+        polls here), and its keys are then known without another. The existing
+        system-tag gate sends other fields through the row path, which carries
+        their declared system-tag fields.
         """
         table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
         if not system_tags_as_rows_give(table):

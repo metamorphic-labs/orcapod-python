@@ -68,6 +68,61 @@ ALL = {"system_tags": True, "source": True}
 TIMEOUT = 5.0
 
 
+def test_raw_system_tag_fields_survive_a_record_batch_channel() -> None:
+    """A channel carries a stream's system-tag Arrow fields through to its rows."""
+    system = pa.schema(
+        [
+            pa.field("_tag_rank", pa.int8(), False, metadata={b"purpose": b"rank"}),
+            pa.field("_tag_label", pa.large_string(), True),
+        ]
+    )
+    schema = pa.schema(
+        [
+            pa.field("subject", pa.large_string(), False),
+            pa.field("trial", pa.int16(), False),
+            pa.field("x", pa.int8(), False),
+            pa.field("y", pa.int8(), False),
+            *system,
+        ]
+    )
+    table = pa.Table.from_arrays(
+        [
+            pa.array(values, field.type)
+            for values, field in zip(
+                (["a", "b"], [1, 2], [3, 4], [5, 6], [7, 8], ["a", None]),
+                schema,
+                strict=True,
+            )
+        ],
+        schema=schema,
+    )
+    stream = ArrowTableStream(table, tag_columns=("subject", "trial"))
+
+    async def forward() -> StreamProtocol:
+        output = OutputChannel(stream)
+        async for batch in stream.open_channel():
+            assert batch.select(system.names).schema.equals(system, check_metadata=True)
+            await output.send(batch)
+        await output.close()
+        return output.result()
+
+    assert pa.schema([stream.arrow_schema().field(n) for n in system.names]).equals(
+        system, check_metadata=True
+    )
+    rebuilt = run(forward)
+    assert (
+        rebuilt.as_table(columns=ALL)
+        .select(system.names)
+        .schema.equals(system, check_metadata=True)
+    )
+    for tag, _ in rebuilt.iter_data():
+        assert (
+            tag.as_table(columns=ALL)
+            .select(system.names)
+            .schema.equals(system, check_metadata=True)
+        )
+
+
 def run(make: Callable[[], Awaitable[T]]) -> T:
     """Run a coroutine to its end; a channel that never wakes fails the test."""
 

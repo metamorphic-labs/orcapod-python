@@ -153,6 +153,8 @@ export default defineConfig({
 								page('Tracing a value', 'tutorial/tracing-a-value'),
 								page('Chaining pipelines', 'tutorial/chaining-pipelines'),
 								page('Handling errors', 'tutorial/handling-errors'),
+								page('Missing values', 'tutorial/missing-values'),
+								page('Coming from pandas or Polars', 'tutorial/coming-from-pandas-or-polars'),
 							],
 						},
 						page('Where next', 'tutorial/where-next'),

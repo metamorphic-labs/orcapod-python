@@ -523,7 +523,19 @@ class TestConfig:
         config = src.to_config()
         assert config["source_name"] == "custom_id"
 
-    def test_to_config_system_tag_columns_preserved(self, connector):
+    def test_to_config_system_tag_columns_preserved(self, connector, monkeypatch):
+        get_column_info = connector.get_column_info
+
+        def with_non_nullable_session_id(table_name: str) -> list[ColumnInfo]:
+            """Declare the connector's string key as non-nullable."""
+            return [
+                ColumnInfo(info.name, info.arrow_type, nullable=False)
+                if info.name == "session_id"
+                else info
+                for info in get_column_info(table_name)
+            ]
+
+        monkeypatch.setattr(connector, "get_column_info", with_non_nullable_session_id)
         src = DBTableSource(
             connector,
             "measurements",
@@ -532,7 +544,7 @@ class TestConfig:
             tag_only_columns=True,
         )
         config = src.to_config()
-        assert "system_tag_columns" in config
+        assert config["system_tag_columns"] == ["session_id"]
 
 
 class TestQueryOverride:
