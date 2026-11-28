@@ -57,11 +57,6 @@ class Layout:
         merged: Columns holding one element per input (``MergeJoin``), each element from
             another input of the same row.
         content_hash_column: The content hash column's name when it is not the default.
-        null_tokens: Whether a source-info cell may be null beside a value. Only for a
-            plain ``DerivedSource`` (``node.as_source()``), whose source info is null in
-            every row by the current design (ITL-1059); every other view fails on it.
-        no_system_tags: Whether the view may have no system tags although they are
-            asked for: the same plain ``DerivedSource`` (ITL-1059), and nothing else.
         fold_label: The label of the fold that produced the folded system tags, for a
             view with members: ``BATCH_FOLD_LABEL`` (``Batch``) or
             ``GROUP_BY_FOLD_LABEL`` (``GroupBy``).
@@ -72,8 +67,6 @@ class Layout:
     members: frozenset[str] = frozenset()
     merged: frozenset[str] = frozenset()
     content_hash_column: str = DEFAULT_CONTENT_HASH_COLUMN
-    null_tokens: bool = False
-    no_system_tags: bool = False
     fold_label: str | None = None
 
 
@@ -209,12 +202,7 @@ class _RowChecker:
     def _check_present_token(self, column: str, value: Any, token: str | None) -> None:
         """A source-info cell that is present must not be null beside a value."""
         name = f"{constants.SOURCE_PREFIX}{column}"
-        if name not in self.row or token is not None:
-            return
-        if self.layout.null_tokens:
-            # ITL-1059: a plain DerivedSource has null source info by design (for now).
-            self.checked.add(name)
-        elif value is not None:
+        if name in self.row and token is None and value is not None:
             self.fail(name, f"null token beside the value {value!r}")
 
     def resolve_data(self) -> None:
@@ -722,8 +710,7 @@ def assert_requested_columns(
 
     A table asked to be sorted (``sort_by_tags`` or ``all_info``) must be in tag order.
     Source info (one ``_source_<column>`` per data column) and system tags (at least one
-    source-id / record-id pair) are required too when asked for; a plain
-    ``DerivedSource`` has no system tags by design (``layout.no_system_tags``, ITL-1059).
+    source-id / record-id pair) are required too when asked for.
 
     Args:
         table: The produced table.
@@ -753,7 +740,7 @@ def assert_requested_columns(
     if require_sorted and (all_info or columns.get("sort_by_tags")):
         # List-valued tags (Batch) too: nulls last, inside a list too.
         assert_sorted_by_tags(table, layout.tag_keys)
-    if (all_info or columns.get("system_tags")) and not layout.no_system_tags:
+    if all_info or columns.get("system_tags"):
         pairs = [
             c
             for c in names
