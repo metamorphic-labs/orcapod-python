@@ -135,10 +135,11 @@ Every result table has, besides its type's record:
 | `__input_data_hash` | `large_binary` | yes | the hash of the input data (`arrow_v1`): the key a result is looked up by |
 | each output key | its declared type | as declared | the output value |
 | `_source_<key>` | `large_string` | yes | the output's source-info token, `<uri parts joined by ":">::<result record id>::<key>` |
-| `__pod_ts` | `timestamp[us, tz=UTC]` | yes | when the result was stored; the newest wins when two rows share an input |
+| `__pod_ts` | `timestamp[us, tz=UTC]` | yes | when the result was stored. Lookup by input data hash uses the newest timestamp and breaks ties by greater result id |
 | `__data_context` | `large_string` | no | the data context that wrote the row (`std:v1:default`) |
 
-The database keeps the row's record id, a UUID of 16 bytes, as its record id column.
+The database keeps the row's record id, a UUIDv7 of 16 bytes, as its record id column.
+The result cache compares those bytes to break timestamp ties.
 
 ```python
 stored = types_store.get_all_records(next(p for p in types_store.list_sources() if "_result" in p))
@@ -178,8 +179,10 @@ result have two record ids, and each keeps its row. A row is written unless this
 stored that record, so the table keeps every distinct record of every node:
 
 - the same instance recorded again with the same result is one row;
-- a recompute has a new result, so it is a new row, and the row recorded last is
-  the instance's current one;
+- a recompute has a new result, so it is a new row. The instance's current record
+  has the latest `__recorded_at`. On a tie, a record with an available result
+  wins over one whose ephemeral result is gone. If both results are available
+  or both are gone, the greater result id wins;
 - an input that arrives with other source-info tokens (its upstream result was
   computed again) is a new instance: it gets a new row. Its result is looked up
   in the result database by the input data hash: when a result is stored there

@@ -137,6 +137,13 @@ _PIPELINE_RECORDING_FIELDS = (
 )
 
 
+def _pipeline_record_order(
+    recorded_at: datetime, result_id: bytes
+) -> tuple[datetime, bytes]:
+    """Order records of one instance by recording time, then by result UUID bytes."""
+    return recorded_at, result_id
+
+
 def _pipeline_meta_schema() -> pa.Schema:
     """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
 
@@ -1282,6 +1289,14 @@ class _JoinedRecords(NamedTuple):
 _TAGINFO_ROW = "__fetch_taginfo_row"
 _RESULT_ROW = "__fetch_result_row"
 _EPHEMERAL_RESULT_ROW = "__fetch_ephemeral_result_row"
+
+# Logged for inputs with persistent records and no matching result in either store.
+_NO_STORED_RESULT_MESSAGE = (
+    "%d inputs have persistent pipeline records but no stored result matching their "
+    "records in either result database (the results may have been deleted externally). "
+    "A full run takes the result the store holds for the input, or computes it when "
+    "there is none; a load-only run skips it."
+)
 
 # The pipeline-table columns the fetch filters, joins and reads entries by.
 _TAGINFO_MATCH_COLUMNS = (
@@ -3647,31 +3662,27 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self,
         instance_ids: list[bytes] | None = None,
     ) -> _JoinedRecords | None:
-        """Internal primitive: fetch both DBs and inner-join, supporting two databases.
+        """Join pipeline records to their results and collect missing-result placeholders.
 
-        Fetches ``taginfo`` from the pipeline database, partitions rows by
-        ``IS_EPHEMERAL_COL`` into persistent and ephemeral groups, performs two
-        independent inner joins (one per database), merges with persistent priority
-        via an anti-join, and returns the combined result.
+        Partition the pipeline rows by ``IS_EPHEMERAL_COL`` and join each group
+        to its result database by the exact result id. Keep all matched rows
+        from both databases. Warn for inputs with persistent records and no
+        match in either database. For ephemeral rows with a missing result,
+        keep a placeholder per instance from the latest record, breaking ties
+        by the greater result id.
 
-        Persistent miss rows (tag entry with no matching result DB row) emit a
-        WARNING-level log. Ephemeral miss rows (cross-session miss) are silently
-        dropped.
-
-        If ``instance_ids`` is provided, the result is filtered to matching
+        If ``instance_ids`` is provided, filter joined rows to matching
         ``INSTANCE_ID_COL`` values before conversion to Arrow.
 
         Args:
-            instance_ids: If given, return only rows whose
+            instance_ids: If given, keep only joined rows whose
                 ``INSTANCE_ID_COL`` value is in this list.
-                If ``None``, return all rows.
 
         Returns:
-            A ``_JoinedRecords`` whose ``table`` always includes a
-            ``INSTANCE_ID_COL`` column, or ``None`` when either
-            the pipeline database or cached function pod is absent. A 0-row
-            table (not ``None``) is returned when both fetches succeed but
-            no matching rows exist — callers check ``num_rows`` themselves.
+            The joined table with its ``INSTANCE_ID_COL`` column and any
+            placeholders. The table can be empty even when placeholders exist.
+            Returns ``None`` when the pipeline database, cached function pod,
+            or pipeline table is absent.
         """
         if self._cached_function_pod is None or self._pipeline_database is None:
             return None
@@ -3742,31 +3753,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 results = keep_rows_of_data_context(results, context_key).drop(
                     [constants.DATA_CONTEXT_COL]
                 )
-            if results is None:
-                # Tag table has persistent entries but result DB is empty — data loss
-                logger.warning(
-                    "%d pipeline DB entries have no match in persistent result DB "
-                    "— data may have been deleted externally. "
-                    "These inputs will be recomputed.",
-                    persistent_taginfo_df.height,
-                )
-            else:
                 results_schema = results.schema
-                full_persistent_df = persistent_taginfo_df.join(
+                persistent_df = persistent_taginfo_df.join(
                     _row_frame(results, (constants.DATA_RECORD_ID,), _RESULT_ROW),
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
-                # Warn about persistent tag rows that found no match in the result DB
-                missing_count = persistent_taginfo_df.height - full_persistent_df.height
-                if missing_count > 0:
-                    logger.warning(
-                        "%d pipeline DB entries have no match in persistent result DB "
-                        "— data may have been deleted externally. "
-                        "These inputs will be recomputed.",
-                        missing_count,
-                    )
-                persistent_df = full_persistent_df
 
         # ------------------------------------------------------------------
         # Ephemeral join
@@ -3818,12 +3810,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             for index, row in enumerate(unmatched_table.to_pylist()):
                 instance = row[INSTANCE_ID_COL]
                 previous = empty_taginfo_rows.get(instance)
-                # Several rows of one instance whose results are gone: the one
-                # recorded last stands for the instance.
-                if (
-                    previous is not None
-                    and previous[PIPELINE_RECORDED_AT_COL]
-                    > row[PIPELINE_RECORDED_AT_COL]
+                # Keep the newest record for the instance, even if its result is gone.
+                if previous is not None and _pipeline_record_order(
+                    row[PIPELINE_RECORDED_AT_COL], row[constants.DATA_RECORD_ID]
+                ) <= _pipeline_record_order(
+                    previous[PIPELINE_RECORDED_AT_COL],
+                    previous[constants.DATA_RECORD_ID],
                 ):
                     continue
                 # Use OUTPUT_DATA_HASH_COL so that the downstream result cache
@@ -3855,15 +3847,28 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         # ------------------------------------------------------------------
         # Keep both databases' rows until the latest row of each instance is chosen.
-        # Persistent rows come last so they retain priority when recording times tie.
         # ------------------------------------------------------------------
         if ephemeral_df.height > 0 and persistent_df.height > 0:
             merged_df = pl.concat([ephemeral_df, persistent_df], how="diagonal")
         elif ephemeral_df.height > 0:
             merged_df = ephemeral_df
-        elif persistent_df.height > 0:
-            merged_df = persistent_df
         else:
+            merged_df = persistent_df
+
+        if persistent_taginfo_df.height > 0:
+            # A match in either store serves the input (ITL-1525).
+            missing_instances = persistent_taginfo_df.select(INSTANCE_ID_COL)
+            if merged_df.height > 0:
+                missing_instances = missing_instances.join(
+                    merged_df.select(INSTANCE_ID_COL), on=INSTANCE_ID_COL, how="anti"
+                )
+            if missing_instances.height > 0:
+                logger.warning(
+                    _NO_STORED_RESULT_MESSAGE,
+                    missing_instances.get_column(INSTANCE_ID_COL).n_unique(),
+                )
+
+        if merged_df.height == 0:
             # No results found in either database — return empty table preserving taginfo schema
             empty_table = taginfo.slice(0, 0)
             return _JoinedRecords(
@@ -4007,9 +4012,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """Return the persistent stored rows of *fetched* as a stream.
 
         The stream is built over the stored Arrow records with the internal
-        columns dropped, so every column keeps the type it was stored with. A
-        instance with several records (it was recomputed) contributes only the one
-        recorded last (``__recorded_at``).
+        columns dropped, so every column keeps the type it was stored with.
+        An instance with several records contributes only the one with the latest
+        ``__recorded_at``, breaking ties by the greater result id.
 
         Returns:
             The instance id of each row, in stream order, the stream, and the
@@ -4020,16 +4025,19 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if joined.num_rows == 0:
             return None
         all_instance_ids = cast(list[bytes], joined.column(INSTANCE_ID_COL).to_pylist())
-        # One row per instance id: when a instance has several records (it
-        # was recomputed), the one recorded last -- the latest result -- wins, in the position where the instance first
-        # appears. Ties keep the later row.
+        # Keep the winning record in the position where its instance first appears.
         recorded_at = cast(
             "list[datetime]", joined.column(PIPELINE_RECORDED_AT_COL).to_pylist()
+        )
+        result_ids = cast(
+            "list[bytes]", joined.column(constants.DATA_RECORD_ID).to_pylist()
         )
         chosen_row: dict[bytes, int] = {}
         for row, instance_id in enumerate(all_instance_ids):
             current = chosen_row.get(instance_id)
-            if current is None or recorded_at[row] >= recorded_at[current]:
+            if current is None or _pipeline_record_order(
+                recorded_at[row], result_ids[row]
+            ) > _pipeline_record_order(recorded_at[current], result_ids[current]):
                 chosen_row[instance_id] = row
         chosen_row = {
             instance: row
@@ -4049,10 +4057,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if c.startswith(constants.META_PREFIX)
             or c == constants.NODE_CONTENT_HASH_COL
         ]
-        data_ids = [
-            uuid.UUID(bytes=bytes(cast(bytes, record_id)))
-            for record_id in joined.column(constants.DATA_RECORD_ID).to_pylist()
-        ]
+        data_ids = [uuid.UUID(bytes=result_ids[row]) for row in chosen_row.values()]
         # A fall-through column is the stored tag column in its data role (ITL-1023):
         # the table states which (ITL-1019). In the stream the binding is the shared
         # name, so the marker stays with the stored table.

@@ -1398,7 +1398,13 @@ data. The rules:
   A row built by `Data` still gives an untyped null the `large_string` type.
   `PolarsFilter` is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (`arrow_utils.restore_column_types` and
-  `restore_schema_nullability`). Every other operator takes its values from the input's Arrow
+  `restore_schema_nullability`). The round trip changes values (a `date64` off midnight comes
+  back at midnight) and is not fixed (ITL-1296, deferred; developer, November 28, 2026):
+  building a `PolarsFilter` issues `PolarsFilterWarning` every time (not once per process; a
+  load warns once per saved `PolarsFilter` node, rebuilt or kept read-only; one helper,
+  `filters.warn_polars_filter_values`),
+  `Filter` is the filter the user documentation shows, and `PolarsFilter` is mentioned there
+  only with that warning. Every other operator takes its values from the input's Arrow
   arrays (`take`, a slice, list offsets; `Join`, `SemiJoin`, `MergeJoin` and `GroupBy` give
   Polars only prepared keys and row numbers), so its values are the input's, bit for bit.
   This holds for every operator, also one that passes its rows through unchanged (select,
@@ -1801,7 +1807,9 @@ data. The rules:
   tag on one side and data on the other, is ignored (by name only); the right input's data
   columns are never read. No shared tag column: every left row is returned. Ignored names
   raise `SemiJoinIgnoredColumnWarning` once per operator and set of names (provisional in
-  v0.3: may become an error); the async path warns only when no validation ran.
+  v0.3: may become an error); the job's async path warns only without validation of the
+  current pair. Direct row-channel calls always require `validate_inputs(left, right)`
+  for that exact pair.
 - `Join`, `MergeJoin` and `SemiJoin` accept a shared TAG key whose types differ only in
   nullability (`T` against `T | None`), because a null key matches nothing (developer,
   November 13, 2026, ITL-829). `Join` and `MergeJoin` give the key `T` when any input has it

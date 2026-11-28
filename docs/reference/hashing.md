@@ -6,7 +6,7 @@ orcapod-python framework. For conceptual background on the two identity chains
 Every hash listed here that Orcapod stores or embeds in a name is pinned as a golden value;
 how released values are protected is described in [Golden Hashes](golden-hashes.md). A
 release freezes every golden value except those of the provisional operators
-(`orcapod.operators.PROVISIONAL_OPERATORS`, such as `PolarsFilter` and `Filter`) and of every step downstream
+(`orcapod.operators.PROVISIONAL_OPERATORS`, such as `Filter` and `GroupBy`) and of every step downstream
 of one: their identity may still change in a later release (see
 [Provisional operators](../concepts/operators.md#provisional-operators)).
 
@@ -325,7 +325,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | tensor value hash | element digest, flags, strides, class | SHA-256, `torch_tensor_v1` | `torch.Tensor` value hash | `logical_types/torch_type.py:tensor_digest` |
 | pandas value hash | descriptor, `\0`, `b"arrow_ordered_v1:" + D` | SHA-256, `pandas_dataframe_v1` / `pandas_series_v1` | pandas value hash | `hashing/pandas_value_hash.py:pandas_frame_content_hash`, `hashing/pandas_value_hash.py:pandas_series_content_hash`, `hashing/labelled_hash.py:labelled_content_hash`, `hashing/semantic_hashing/builtin_handlers.py:PandasDataFrameHandler.digest`, `hashing/semantic_hashing/builtin_handlers.py:PandasSeriesHandler.digest` |
 | Polars value hash | descriptor, `\0`, starfix digest called directly (a step of this algorithm) | SHA-256, `polars_dataframe_v1` / `polars_series_v1` | Polars value hash | `logical_types/polars_type.py:_digest`, `logical_types/polars_type.py:_values_digest` |
-| Polars expression hash | the expression's canonical tree | SHA-256 of canonical JSON, `polars_expr_v1` | `PolarsFilter` identity | `hashing/semantic_hashing/polars_expr.py:polars_expr_content_hash` |
+| Polars expression hash | the expression's canonical tree | SHA-256 of canonical JSON, `polars_expr_v1` | `PolarsFilter` identity (an operator that is not recommended) | `hashing/semantic_hashing/polars_expr.py:polars_expr_content_hash` |
 | value handlers with an ignore list | wrap the value digests above | the type's label | top level, nested, Arrow cell | `logical_types/ignore_list.py:IgnoreListHandler.handle`, `logical_types/ignore_list.py:IgnoreListHandler.hash_ignoring` |
 | parse a stored hash | `"<label>:<hex>"` or `b"<label>:" + digest` | the stored label | saved jobs and pipelines, proxies, a node's saved run hash, a cached output hash | `types/__init__.py:ContentHash.from_string`, `types/__init__.py:ContentHash.from_prefixed_digest` |
 | folds of `Batch` / `GroupBy` | the canonical JSON list of a group's member values, for each system tag | SHA-256 hex after the operation's label: `batch_v1` (`batch.py`), `group_v1` (`group_by.py`); one helper | folded source id and record id | `utils/arrow_utils.py:fold_system_tag_values` |
@@ -400,6 +400,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 | hooks (`pod_hash`) | `core/function_pod.py:_FunctionPodBase._build_post_run_payload` |
 | in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase.prepare_invocation`, `pipeline/base.py:AbstractPipelineBase.prepare_invocation.<locals>.<genexpr>`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations.<locals>.<genexpr>`, `pipeline/job.py:PipelineJob.compile`, `pipeline/restrictions.py:sources_read` (the source identity a restriction is kept under, ITL-1218) |
 | in-memory source registration keys | `pipeline/source_consistency.py:require_consistent_sources` |
+| in-memory lookup keys for a validated operator input or input pair (ITL-1358) | `core/operators/index.py:Index.validate_unary_input`, `core/operators/index.py:Index.async_execute`, `core/operators/pick.py:Pick.validate_unary_input`, `core/operators/pick.py:Pick.async_execute`, `core/operators/semijoin.py:SemiJoin.validate_binary_inputs`, `core/operators/semijoin.py:SemiJoin.async_execute` |
 | in-memory topological sort of compiled and restored nodes, using the pipeline hash to order ready invocations | `pipeline/base.py:AbstractPipelineBase._ordered_node_map.<locals>.order_key` |
 | canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
@@ -740,11 +741,16 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 
 ### 1c. Polars expression predicates
 
-**Provisional.** `PolarsFilter` is a provisional operator (ITL-1266): its identity, and the
+**Not recommended.** `PolarsFilter` can change the values it passes through and warns every
+time one is built; use `Filter` (see [PolarsFilter](../concepts/operators.md#polarsfilter)).
+This section describes its identity only.
+
+**Provisional.** `PolarsFilter` (not recommended, above) is a provisional operator (ITL-1266): its identity, and the
 `polars_expr_v1` hashes that only it feeds, are not frozen with data context v1. Their golden
 values are in the provisional golden files ([Golden Hashes](golden-hashes.md#provisional-files)).
 
-`PolarsFilter.identity_structure()` is `("PolarsFilter", predicates, constraints)`, with
+The identity of the operator (not recommended, above),
+`PolarsFilter.identity_structure()`, is `("PolarsFilter", predicates, constraints)`, with
 `predicates` always a tuple. Keyword constraints hash as plain values. A `pl.Expr` predicate
 hashes through `PolarsExprHandler` to the leaf `polars_expr_v1:<hex>`.
 
@@ -1223,7 +1229,10 @@ instance and the result it points at.
   and result (the record id covers the node's content hash; developer, November 26, 2026), so it
   keeps its own row. A recompute (the
   stored result is gone) has a new result id, so it is a new row; among the rows of one
-  instance, the one recorded last is the current one. There is no recomputation index.
+  instance, the one recorded last is the current one. If records have the same
+  recording time, a record with an available result wins over one whose ephemeral
+  result is gone. Among equally timed records whose results are all available
+  or all gone, the greater result UUID wins. There is no recomputation index.
   "Recorded last" is read from `__recorded_at`, the recording process's UTC clock at the
   write: a clock set back between two writes of one instance leaves the earlier record
   current until a later write.

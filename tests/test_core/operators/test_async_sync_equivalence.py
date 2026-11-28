@@ -73,6 +73,9 @@ from orcapod.utils import arrow_utils
 pytestmark = [
     pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning"),
     pytest.mark.filterwarnings("ignore::orcapod.errors.RejoinDifferingColumnWarning"),
+    # PolarsFilter is built here on purpose; the warning of every construction is tested in
+    # test_polars_filter_warning.py (ITL-1296).
+    pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning"),
 ]
 
 Row: TypeAlias = tuple[TagProtocol, DataProtocol]
@@ -351,6 +354,8 @@ def sync_rows(op: StaticOutputOperatorPod, *sources: StreamProtocol) -> list[Row
 async def _run_async(
     op: StaticOutputOperatorPod, sources: Sequence[StreamProtocol]
 ) -> list[Row]:
+    if isinstance(op, SemiJoin):
+        op.validate_inputs(*sources)
     channels: list[Channel[Row]] = [Channel(buffer_size=64) for _ in sources]
     output: Channel[Row] = Channel(buffer_size=64)
     for stream, channel in zip(sources, channels):

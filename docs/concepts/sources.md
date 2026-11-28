@@ -556,7 +556,7 @@ applied the same condition. `where` refuses float ranges for now (ITL-1477).
 
 A restriction is not an operator:
 
-- An operator (`Filter`, `SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
+- An operator (`Filter`, `SemiJoin`) is a step of the pipeline. It is a node of the
   graph and part of the pipeline's identity: a pipeline with a filter computes something
   else than one without, and its nodes have other hashes and other stored tables.
 - A restriction is attached to the source. It chooses which of the source's rows flow and
@@ -696,7 +696,7 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   revisiting the float refusals. SpiralDB cannot compare a `float16` column, so Orcapod reads the rows the
   other conditions select and compares them itself, by the same rule and before `limit`. To
   select rows by such values as Orcapod matches them, filter
-  inside the pipeline (`PolarsFilter`). An infinite value is saved as `{"float": "inf"}` or
+  inside the pipeline (`Filter`). An infinite value is saved as `{"float": "inf"}` or
   `{"float": "-inf"}`, since JSON has no such number.
 - **One restriction per source identity in a pipeline.** Restrictions are equal by statement.
   On an integer column, `t >= 3` and `t > 2` select the same rows but count as two
