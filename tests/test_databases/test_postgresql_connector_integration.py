@@ -689,7 +689,7 @@ def test_catalog_uses_the_first_schema_on_the_search_path(
     connector: PostgreSQLConnector,
 ) -> None:
     _, _, _, primary = connector.current_location()
-    fallback = f'JOIN."{uuid.uuid4().hex[:12]}'
+    fallback = f'JOIN."%{uuid.uuid4().hex[:12]}'
     base_dsn = _base_dsn()
     path = ("job", "pdb_v2")
     with psycopg.connect(base_dsn, autocommit=True) as admin:

@@ -472,7 +472,9 @@ class PostgreSQLConnector:
             if row is None:
                 return []
             schema = cast(str, row[0])
-            catalog = pg_sql.Identifier(schema, STORE_PATH_CATALOG)
+            # Psycopg scans percent signs even inside quoted identifiers when
+            # the statement also has bound parameters.
+            catalog = pg_sql.Identifier(schema.replace("%", "%%"), STORE_PATH_CATALOG)
             match = pg_sql.SQL("= %s" if exact else "LIKE %s ESCAPE '!'")
             _ = cur.execute(
                 pg_sql.SQL("""
@@ -532,6 +534,9 @@ class PostgreSQLConnector:
                         pg_sql.SQL("CREATE TABLE IF NOT EXISTS {} {}").format(
                             catalog, fields
                         )
+                    )
+                    catalog = pg_sql.Identifier(
+                        schema.replace("%", "%%"), STORE_PATH_CATALOG
                     )
                     _ = cur.execute(
                         pg_sql.SQL("""
@@ -857,8 +862,11 @@ class PostgreSQLConnector:
                 else:
                     conflict_clause = f'ON CONFLICT ("{escaped_id}") DO NOTHING'
 
+            target = sql_table_identifier(table_name, schema)
+            if schema is not None:
+                target = target.replace("%", "%%")
             sql = (
-                f"INSERT INTO {sql_table_identifier(table_name, schema)} ({col_list}) VALUES ({placeholders}) "
+                f"INSERT INTO {target} ({col_list}) VALUES ({placeholders}) "
                 f"{conflict_clause}"
             )
             rows_iter = (tuple(row[c] for c in cols) for row in records.to_pylist())

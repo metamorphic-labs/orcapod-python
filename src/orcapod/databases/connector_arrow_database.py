@@ -138,7 +138,7 @@ class ConnectorArrowDatabase:
         _scoped_path: tuple[str, ...] = (),
     ) -> None:
         self._connector = connector
-        self._sql_store = (
+        self._sql_store: SQLStoreConnector | None = (
             connector if isinstance(connector, SQLStoreConnector) else None
         )
         self.max_hierarchy_depth = max_hierarchy_depth
