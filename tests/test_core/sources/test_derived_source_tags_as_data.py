@@ -24,7 +24,11 @@ from orcapod import PipelineJob, function_pod
 from orcapod.core.sources import CachedSource, DerivedSource, RootSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.utils.schema_utils import arrow_schema_identity
-from orcapod.errors import InputValidationError, SourceSlotNameCollisionError
+from orcapod.errors import (
+    InputValidationError,
+    RowIdentifierError,
+    SourceSlotNameCollisionError,
+)
 from orcapod.operators import Join, SelectDataColumns
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.types import ColumnConfig
@@ -428,6 +432,63 @@ class TestProvenance:
                 ]
             assert d_table.column(name).to_pylist() == values, name
         assert derived.pipeline_hash() == recipe.pipeline_hash()
+
+
+class _SourceWithoutSystemTags(DictSource):
+    """An origin that returns user columns even when system tags are requested."""
+
+    def as_table(self, *, columns=None, all_info=False) -> pa.Table:
+        return super().as_table()
+
+    def head(self, n=10, *, columns=None, all_info=False):
+        return super().head(n)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["table", "head", "async"])
+@pytest.mark.parametrize(
+    "key_columns", [None, (), ("cohort",)], ids=["folded", "positional", "keyed"]
+)
+@pytest.mark.parametrize("problem", ["missing", "repeated"])
+async def test_source_lineage_is_required_for_every_key_policy(
+    problem: str, key_columns: tuple[str, ...] | None, route: str
+) -> None:
+    if problem == "missing":
+        origin = _SourceWithoutSystemTags(
+            [{"cohort": "a", "x": 5}], tag_columns=["cohort"], tag_only_columns=True
+        )
+        expected_error = "no complete system-tag pair"
+    else:
+        database = InMemoryArrowDatabase()
+        for cohort, value in [("a", 5), ("b", 7)]:
+            origin = CachedSource(
+                DictSource(
+                    [{"id": 1, "cohort": cohort, "x": value}],
+                    record_id_columns=["id"],
+                    source_id="history",
+                    tag_columns=["id", "cohort"],
+                    tag_only_columns=True,
+                ),
+                cache_database=database,
+            )
+            history = origin.as_table(columns={"system_tags": True})
+        (record_column,) = _prefixed(history, "_tag_record_id")
+        assert history[record_column].to_pylist() == ['{"id":1}'] * 2
+        expected_error = "not uniquely identified by their system tags"
+
+    derived = DerivedSource(
+        origin,
+        tags_as_data={"cohort": "cohort_copy"},
+        source_id="derived",
+        record_id_columns=key_columns,
+    )
+    with pytest.raises(RowIdentifierError, match=expected_error):
+        if route == "table":
+            derived.as_table()
+        elif route == "head":
+            derived.head()
+        else:
+            await anext(derived.async_iter_data())
 
 
 class TestIdentity:

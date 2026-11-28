@@ -164,7 +164,8 @@ class DerivedSource(RootSource):
     Both forms stamp one new system-tag pair and a fresh source-info token
     (``<source id>::<record id>::<column>``) for every data column, including copies.
     By default the record id folds the upstream source/record pairs in column-name
-    order. The origin's stored tables keep their own provenance.
+    order. Every key policy requires complete upstream pairs that uniquely identify
+    the selected rows. The origin's stored tables keep their own provenance.
 
     Identity (``tags_as_data`` form):
         - ``source_id`` is required: there is no default (developer, November 21,
@@ -500,9 +501,7 @@ class DerivedSource(RootSource):
 
         origin = self._origin
         if isinstance(origin, RootSource):
-            return origin.as_table(
-                columns={"system_tags": self._record_id_columns is None}
-            )
+            return origin.as_table(columns={"system_tags": True})
         if isinstance(origin, OperatorJobNode):
             records = origin._stored_rows_for_source()  # pyright: ignore[reportPrivateUsage]  # internal stored read for derivation
         else:
@@ -644,8 +643,6 @@ class DerivedSource(RootSource):
         from orcapod.core.nodes.function_node import PIPELINE_RECORDED_AT_COL
 
         node_origin = not isinstance(self._origin, RootSource)
-        if not node_origin and self._record_id_columns is not None:
-            return table, []
         lineages = self._read_lineage(table)
         operator_ties = False
         if node_origin and len(set(lineages)) < len(lineages):
@@ -803,7 +800,7 @@ class DerivedSource(RootSource):
                 self, origin=origin_kind
             )
         if isinstance(self._origin, RootSource):
-            origin_columns = {"system_tags": self._record_id_columns is None}
+            origin_columns = {"system_tags": True}
             origin_head = self._origin.head(n, columns=origin_columns)
             if (
                 config.sort_by_tags

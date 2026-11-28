@@ -22,6 +22,23 @@ REFERENCE = PROJECT_ROOT / "docs" / "reference" / "hashing.md"
 SITE = re.compile(r"`([\w/]+\.py:[\w.<>]+)`")
 
 
+def test_tagged_derived_source_identity_table_documents_positional_marker() -> None:
+    """The identity table lists the marker and the explicit empty tuple that adds it."""
+    identity_table = (
+        REFERENCE.read_text(encoding="utf-8")
+        .split("### 1a. ", 1)[1]
+        .split("### 1b. ", 1)[0]
+    )
+    (row,) = [
+        line
+        for line in identity_table.splitlines()
+        if line.startswith("| `DerivedSource` with `tags_as_data` |")
+    ]
+    recipe = row.split("|")[2]
+    assert '("record_id_policy", "position")' in recipe
+    assert "record_id_columns=()" in recipe
+
+
 def _documented_sites() -> set[str]:
     """The call sites named in the inventory section of the hashing reference."""
     text = REFERENCE.read_text(encoding="utf-8")

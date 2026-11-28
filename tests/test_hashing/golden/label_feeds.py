@@ -42,6 +42,7 @@ RENAMED: dict[str, str] = {
     "polars_dataframe_v1": "renamedpolarsdataframe_v9",
     "polars_series_v1": "renamedpolarsseries_v9",
     "directory_v1": "renameddirectory_v9",
+    "derived_row_v1": "renamedderivedrow_v9",
     "torch_tensor_v1": "renamedtorchtensor_v9",
 }
 """Every label a test renames, with its stand-in. The file hash's ``sha256`` names the
@@ -58,6 +59,7 @@ def rename_labels() -> None:
     non-public definitions are set directly.
     """
     from orcapod.contexts import get_default_context
+    from orcapod.core.sources import derived_source
     from orcapod.hashing import arrow_hashers, directory_hashers, pandas_value_hash
     from orcapod.hashing.semantic_hashing import builtin_handlers, polars_expr
 
@@ -78,6 +80,7 @@ def rename_labels() -> None:
     builtin_handlers.PolarsDataFrameHandler.HASH_LABEL = RENAMED["polars_dataframe_v1"]
     builtin_handlers.PolarsSeriesHandler.HASH_LABEL = RENAMED["polars_series_v1"]
     directory_hashers.DIRECTORY_HASH_LABEL = RENAMED["directory_v1"]  # pyright: ignore[reportConstantRedefinition]
+    derived_source.DERIVED_ROW_FOLD_LABEL = RENAMED["derived_row_v1"]  # pyright: ignore[reportConstantRedefinition]
     try:  # torch is optional: its label is renamed only where it is installed
         from orcapod.hashing.semantic_hashing.torch_handler import TorchTensorHandler
     except ImportError:
