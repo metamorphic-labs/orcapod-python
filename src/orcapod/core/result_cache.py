@@ -98,46 +98,57 @@ Stated once, for every function: the column is a nullable ``large_string`` whate
 write holds, and a null token is a ``large_string`` null. ``ResultCache.store`` refuses
 a row whose token column has any other type, so a table's token type never follows
 the values of a write, and stores a null for an output whose row has no token column,
-so every stored row has every declared token column. A token column that names no
+so every stored row has every declared token column. The stored field is this one
+whatever the row's own field says: a row's non-nullable token field is stored
+nullable. A token column that names no
 output of the row is refused. Custom token types are not supported.
 """
 
 
 def _with_declared_token_columns(
-    data_table: pa.Table, output_keys: tuple[str, ...]
+    data_table: pa.Table, output_keys: tuple[str, ...], carried: pa.Schema
 ) -> pa.Table:
     """Give a result row exactly its declared token columns, in output order.
 
-    Every output has one token column, ``RESULT_TOKEN_COLUMN``. A row that has none
-    for an output gets it as a null; the columns are laid out as an ordinary result
-    row is, the outputs and then their token columns in output order.
+    Every output has one token column, the declared field ``RESULT_TOKEN_COLUMN``
+    whatever the row's own field says: a column the row has is wrapped again under
+    the declared field (the same array, never a cast), so a non-nullable field of
+    the row is stored nullable; a row that has none for an output gets it as a null.
+    The columns are laid out as an ordinary result row is, the outputs and then their
+    token columns in output order.
 
     Args:
         data_table: The output row, with the source-info columns it has.
         output_keys: The row's output keys, in order.
+        carried: The schema of the row's own token columns
+            (``DataProtocol.source_info_table``), which keeps the Arrow type of a
+            token that ``data_table`` gives typed from its value.
 
     Returns:
         The row with one token column per output.
 
     Raises:
         InputValidationError: If a ``_source_<key>`` column has another type than
-            ``RESULT_TOKEN_COLUMN`` declares (naming each such column and both
-            types), or names no output of the row.
+            ``RESULT_TOKEN_COLUMN`` declares, in the row or in ``carried`` (naming
+            each such column and both types), or names no output of the row.
     """
     prefix = constants.SOURCE_PREFIX
+    declared_type = RESULT_TOKEN_COLUMN.arrow_type
     token_fields = [f for f in data_table.schema if f.name.startswith(prefix)]
-    other = [
-        field
-        for field in token_fields
-        if str(field.type) != RESULT_TOKEN_COLUMN.arrow_type
-    ]
+    # The type each token column has: the row's own where it is not the declared
+    # one, otherwise the table's.
+    given = {field.name: field.type for field in token_fields}
+    for field in carried:
+        if field.name.startswith(prefix) and str(field.type) != declared_type:
+            given[field.name] = field.type
+    other = {name: kind for name, kind in given.items() if str(kind) != declared_type}
     if other:
-        columns = ", ".join(f"{field.name!r} is {field.type}" for field in other)
+        columns = ", ".join(f"{name!r} is {kind}" for name, kind in other.items())
         raise InputValidationError(
             "A function result's source-info token is one string: every token "
-            f"column of a result table is {RESULT_TOKEN_COLUMN.arrow_type} "
-            f"(nullable), but {columns}. Nothing was written. Give each output one "
-            "string token, or none (a null token)."
+            f"column of a result table is {declared_type} (nullable), but "
+            f"{columns}. Nothing was written. Give each output one string token, or "
+            "none (a null token)."
         )
     declared = [f"{prefix}{key}" for key in output_keys]
     stray = [field.name for field in token_fields if field.name not in declared]
@@ -148,15 +159,18 @@ def _with_declared_token_columns(
             f"{list(output_keys)}). Nothing was written."
         )
     token_type = pa.large_string()
-    for name in declared:
-        if name not in data_table.column_names:
-            data_table = data_table.append_column(
-                pa.field(name, token_type, nullable=RESULT_TOKEN_COLUMN.nullable),
-                pa.nulls(data_table.num_rows, type=token_type),
-            )
-    return data_table.select(
-        [n for n in data_table.column_names if n not in declared] + declared
-    )
+    tokens = [
+        data_table.column(name)
+        if name in data_table.column_names
+        else pa.nulls(data_table.num_rows, type=token_type)
+        for name in declared
+    ]
+    outputs = data_table.drop_columns([field.name for field in token_fields])
+    for name, token in zip(declared, tokens):
+        outputs = outputs.append_column(
+            pa.field(name, token_type, nullable=RESULT_TOKEN_COLUMN.nullable), token
+        )
+    return outputs
 
 
 class ResultCache:
@@ -423,7 +437,9 @@ class ResultCache:
         self._account_for_stale_tables(data_context_key)
 
         data_table = output_data.as_table(columns={"source": True})
-        data_table = _with_declared_token_columns(data_table, output_data.keys())
+        data_table = _with_declared_token_columns(
+            data_table, output_data.keys(), output_data.source_info_table().schema
+        )
 
         # Add variation and execution columns with prefixes.
         # Use a running counter for insertion position since add_column shifts indices.

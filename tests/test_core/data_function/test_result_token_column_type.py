@@ -401,3 +401,260 @@ def test_a_token_column_for_a_name_that_is_no_output_is_refused(
         else (after is not None and after.equals(before))
     )
     assert function.get_cached_output_for_data(Data({"x": 3, "y": 4})) is None
+
+
+# ---------------------------------------------------------------------------
+# Review of df106ed3 (ITL-1563, round 3)
+# ---------------------------------------------------------------------------
+
+
+class _NonNullableTokens(Data):
+    """An output whose row declares the named token fields non-nullable."""
+
+    non_nullable: tuple[str, ...] = ()
+
+    def as_table(self, *args: Any, **kwargs: Any) -> pa.Table:
+        table = super().as_table(*args, **kwargs)
+        for key in self.non_nullable:
+            index = table.schema.get_field_index(f"{constants.SOURCE_PREFIX}{key}")
+            if index >= 0:
+                table = table.set_column(
+                    index,
+                    table.schema.field(index).with_nullable(False),
+                    table.column(index),
+                )
+        return table
+
+
+def _non_nullable_output(
+    keys: tuple[str, ...], non_nullable: tuple[str, ...]
+) -> _NonNullableTokens:
+    values: dict[str, Any] = {"total": 7, "label": "3+4"}
+    output = _NonNullableTokens(
+        {key: values[key] for key in keys}, source_info=_string_tokens(keys)
+    )
+    output.non_nullable = non_nullable
+    return output
+
+
+NON_NULLABLE: tuple[tuple[str, ...], ...] = (
+    ("total",),
+    ("label",),
+    ("total", "label"),
+    ("label", "total"),
+)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+@pytest.mark.parametrize("non_nullable", NON_NULLABLE)
+@pytest.mark.parametrize("other", ("missing", "null", "call"))
+@pytest.mark.parametrize("non_nullable_first", (True, False))
+def test_a_non_nullable_token_field_is_stored_as_the_declared_nullable_field(
+    backend: str,
+    keys: tuple[str, ...],
+    non_nullable: tuple[str, ...],
+    other: str,
+    non_nullable_first: bool,
+    tmp_path: Path,
+) -> None:
+    """Review finding 1: the incoming field's flag never reaches the table."""
+    function = _function(_database(backend, tmp_path), keys)
+    strict_input, other_input = Data({"x": 3, "y": 4}), Data({"x": 1, "y": 2})
+    strict_output = _non_nullable_output(keys, non_nullable)
+    row = strict_output.as_table(columns={"source": True})
+    assert [
+        row.schema.field(f"{constants.SOURCE_PREFIX}{key}").nullable for key in keys
+    ] == [key not in non_nullable for key in keys]
+
+    def write_strict() -> None:
+        function.record_data(strict_input, strict_output)
+
+    def write_other() -> None:
+        if other == "call":
+            assert function.call(other_input) is not None
+        elif other == "null":
+            function.record_data(other_input, _output(keys, dict.fromkeys(keys, None)))
+        else:
+            function.record_data(other_input, _partial_output(keys, ()))
+
+    for write in (
+        (write_strict, write_other)
+        if non_nullable_first
+        else (write_other, write_strict)
+    ):
+        write()
+        table = function.get_all_cached_outputs()
+        assert table is not None
+        assert _output_and_token_columns(function) == _expected_columns(keys)
+        for key in keys:
+            field = table.schema.field(f"{constants.SOURCE_PREFIX}{key}")
+            assert (field.type, field.nullable) == (pa.large_string(), True)
+
+    assert _stored_rows(function) == 2
+    found = function.get_cached_output_for_data(strict_input)
+    assert found is not None
+    assert found.source_info() == _string_tokens(keys)
+    assert function.get_cached_output_for_data(other_input) is not None
+
+
+def _table_output(keys: tuple[str, ...], tokens: dict[str, pa.Array[Any]]) -> Data:
+    """A hand-built output made from an Arrow table whose token columns are typed."""
+    table = _output(keys, _string_tokens(keys)).as_table(columns={"source": True})
+    for key, array in tokens.items():
+        name = f"{constants.SOURCE_PREFIX}{key}"
+        table = table.set_column(table.schema.get_field_index(name), name, array)
+    return Data(table)
+
+
+# Non-null tokens in a column whose Arrow type is not a string: the type text the
+# error names, and the column.
+TYPED_TOKENS: dict[str, tuple[str, pa.Array[Any]]] = {
+    "dictionary": (
+        "dictionary<values=large_string, indices=int32, ordered=0>",
+        pa.array(["custom::id::t"], type=pa.large_string()).dictionary_encode(),
+    ),
+    "binary": ("large_binary", pa.array([b"custom::id::t"], type=pa.large_binary())),
+    "list": (LIST_TYPE, pa.array([["a", "b"]], type=pa.large_list(pa.large_string()))),
+}
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+@pytest.mark.parametrize("kind", sorted(TYPED_TOKENS))
+@pytest.mark.parametrize("typed", (("total",), ("label",), ("total", "label")))
+@pytest.mark.parametrize("stored_first", (True, False))
+def test_a_typed_arrow_token_column_is_refused_by_the_type_the_row_carries(
+    backend: str,
+    keys: tuple[str, ...],
+    kind: str,
+    typed: tuple[str, ...],
+    stored_first: bool,
+    tmp_path: Path,
+) -> None:
+    """Review finding 2: ``as_table`` types a token from its value; the row's own
+    token columns (``source_info_table``) are what is checked."""
+    type_text, array = TYPED_TOKENS[kind]
+    function = _function(_database(backend, tmp_path), keys)
+    if stored_first:
+        assert function.call(Data({"x": 1, "y": 2})) is not None
+    before = function.get_all_cached_outputs()
+    output = _table_output(keys, dict.fromkeys(typed, array))
+    with pytest.raises(InputValidationError) as error:
+        function.record_data(Data({"x": 3, "y": 4}), output)
+    message = str(error.value)
+    for key in typed:
+        assert f"'{constants.SOURCE_PREFIX}{key}' is {type_text}" in message
+    for key in set(keys) - set(typed):
+        assert f"'{constants.SOURCE_PREFIX}{key}'" not in message
+    assert "one string" in message
+    after = function.get_all_cached_outputs()
+    if before is None:
+        assert after is None
+    else:
+        assert after is not None and after.equals(before)
+    assert function.get_cached_output_for_data(Data({"x": 3, "y": 4})) is None
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+def test_a_small_string_arrow_token_column_is_stored_as_large_string(
+    backend: str, keys: tuple[str, ...], tmp_path: Path
+) -> None:
+    """A ``string`` token column is the same type in its large variant: accepted."""
+    function = _function(_database(backend, tmp_path), keys)
+    array = pa.array(["custom::id::small"], type=pa.string())
+    function.record_data(
+        Data({"x": 3, "y": 4}), _table_output(keys, dict.fromkeys(keys, array))
+    )
+    assert function.call(Data({"x": 1, "y": 2})) is not None
+    assert _token_types(function) == {
+        f"{constants.SOURCE_PREFIX}{key}": "large_string" for key in keys
+    }
+    found = function.get_cached_output_for_data(Data({"x": 3, "y": 4}))
+    assert found is not None
+    assert found.source_info() == dict.fromkeys(keys, "custom::id::small")
+
+
+# A NULL token in a column declared with another type: a row gives it as a
+# ``large_string`` null on every view today (``source_info_table``: "a null token is a
+# large_string null whatever type its column declares"), so the declared type never
+# reaches ``ResultCache.store``.
+NULL_TYPED_TOKENS: dict[str, pa.Array[Any]] = {
+    "list": pa.nulls(1, pa.large_list(pa.large_string())),
+    "dictionary": pa.array([None], type=pa.large_string()).dictionary_encode(),
+    "binary": pa.nulls(1, pa.large_binary()),
+}
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=pytest.fail.Exception,
+    reason=(
+        "ITL-1563, open until PR 607: a row gives a null token as a large_string "
+        "null whatever Arrow type its column declares, so the declared type of an "
+        "all-null token column does not reach ResultCache.store and the row is "
+        "stored with a null large_string token. PR 607 makes a row keep its token "
+        "columns' Arrow types; remove this mark then."
+    ),
+)
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+@pytest.mark.parametrize("kind", sorted(NULL_TYPED_TOKENS))
+def test_a_null_token_in_a_typed_arrow_column_is_refused(
+    keys: tuple[str, ...], kind: str
+) -> None:
+    function = _function(InMemoryArrowDatabase(), keys)
+    output = _table_output(keys, {"total": NULL_TYPED_TOKENS[kind]})
+    with pytest.raises(InputValidationError):
+        function.record_data(Data({"x": 3, "y": 4}), output)
+
+
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+@pytest.mark.parametrize("kind", sorted(NULL_TYPED_TOKENS))
+def test_a_null_token_in_a_typed_arrow_column_is_stored_as_a_large_string_null(
+    keys: tuple[str, ...], kind: str
+) -> None:
+    """What the open route does today: the value and the stored type are sound."""
+    function = _function(InMemoryArrowDatabase(), keys)
+    output = _table_output(keys, {"total": NULL_TYPED_TOKENS[kind]})
+    function.record_data(Data({"x": 3, "y": 4}), output)
+    assert function.call(Data({"x": 1, "y": 2})) is not None
+    table = function.get_all_cached_outputs()
+    assert table is not None and table.num_rows == 2
+    for key in keys:
+        field = table.schema.field(f"{constants.SOURCE_PREFIX}{key}")
+        assert (field.type, field.nullable) == (pa.large_string(), True)
+    found = function.get_cached_output_for_data(Data({"x": 3, "y": 4}))
+    assert found is not None
+    assert found.source_info()["total"] is None
+
+
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+def test_a_table_already_holding_a_list_token_column_is_not_rewritten(
+    keys: tuple[str, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding 3, the changelog's caveat: a Delta result table written before
+    this fix with a list token keeps its column type; an ordinary write to it still
+    fails as a database write error, and its rows stay."""
+    from orcapod.core import result_cache
+    from orcapod.errors import OrcapodDatabaseWriteError
+
+    database = DeltaTableDatabase(tmp_path / "store")
+    function = _function(database, keys)
+    with monkeypatch.context() as before_the_fix:
+        before_the_fix.setattr(
+            result_cache, "_with_declared_token_columns", lambda table, *_: table
+        )
+        function.record_data(
+            Data({"x": 3, "y": 4}), _output(keys, dict.fromkeys(keys, ["a", "b"]))
+        )
+    old = function.get_all_cached_outputs()
+    assert old is not None and old.num_rows == 1
+    assert set(_token_types(function).values()) == {LIST_TYPE}
+
+    with pytest.raises(OrcapodDatabaseWriteError):
+        _ = function.call(Data({"x": 1, "y": 2}))
+    again = _function(
+        DeltaTableDatabase(tmp_path / "store"), keys
+    ).get_all_cached_outputs()
+    assert again is not None and again.equals(old)

@@ -154,6 +154,19 @@ token for an output (its row has no `_source_<key>` column) is stored with a nul
 there, on every database, in either order of the writes. A token column that names no
 output of the result is refused the same way, before anything is written.
 
+The stored field is the declared one whatever the written row's own field says: a row
+whose token field is non-nullable is stored under the nullable field, with its values
+unchanged. The type that is checked is the one the row carries
+(`DataProtocol.source_info_table`), so a token column that is dictionary-encoded or
+binary is refused too. One case is not refused yet: a null token in a column declared
+with another type, which a row gives as a `large_string` null and which is stored as
+one.
+
+A result table that already holds a list token column, written before this rule by a
+custom `record_data`, is not rewritten: its path and column type stay, and every later
+write to it fails as a database write error. Remove that table, or use a new result
+database, and store the results again.
+
 ```python
 stored = types_store.get_all_records(next(p for p in types_store.list_sources() if "_result" in p))
 print([name for name in stored.column_names if not name.startswith("__pf_")])
