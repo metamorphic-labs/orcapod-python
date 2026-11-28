@@ -1515,6 +1515,21 @@ data. The rules:
   of the token values and of any list item fields. CachedSource writes these fields
   and their record hashes under `sdb_v2`. The operator cache stores and hashes the
   output stream's declared fields under `odb_v3` (ITL-1562).
+  A cached-source table (`sdb_v2`) also stores `__recorded_at`
+  (`cached_source.SOURCE_RECORDED_AT_COL`, `timestamp[us, tz=UTC]`, non-nullable; the
+  developer's "written-at" column, November 28, 2026, ITL-1396): when the cache wrote the
+  row, one time per write. It is appended after the record hashes, so it is in no hash,
+  record id or token; every read of the cache drops it (`CachedSource._STORED_ONLY_COLUMNS`);
+  a row delivered again is skipped and keeps its first time. Nothing selects by it: it
+  exists so that "present the latest" can be offered later without a new layout. A
+  `CachedSource` refuses, before anything is written, a delivery holding a row whose
+  record id the cache holds under another `_record_hash` (`CachedSourceChangedRowError`,
+  `_require_no_changed_rows`): one rule for every wrapped source, key columns or
+  position (a reorder or a middle insert of a positional source is refused; an append is
+  not). It is a decided rule, not a stopgap. Deliveries only: a cache table that already
+  holds two contents for one record id (written outside the rule) is still read as it is
+  (open, see the design entry `ITL-1396-CS1`); tests build that state with
+  `tests/test_core/sources/cache_versions.write_outside_the_rule`.
   A row built by `Data` still gives an untyped null the `large_string` type.
   `PolarsFilter` is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (`arrow_utils.restore_column_types` and

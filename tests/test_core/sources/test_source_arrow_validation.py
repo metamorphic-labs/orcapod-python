@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import Collection
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 from uuid import UUID
@@ -34,6 +35,7 @@ from orcapod.core.sources import (
     SpiralDBTableSource,
     SQLiteTableSource,
 )
+from orcapod.core.sources.cached_source import SOURCE_RECORDED_AT_COL
 from orcapod.core.sources.source_proxy import SourceProxy
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -721,6 +723,10 @@ def test_cached_source_presents_stored_token_fields_as_nullable(
         table.column(position),
     )
     table = table.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
+    table = table.append_column(
+        pa.field(SOURCE_RECORDED_AT_COL, pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.array([datetime.now(timezone.utc)] * 2, pa.timestamp("us", tz="UTC")),
+    )
     database.add_records(
         cache.cache_path,
         with_data_context(table, source.data_context_key),

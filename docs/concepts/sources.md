@@ -776,6 +776,38 @@ which spiral-sdk does not read. Until their dataset is migrated they read as not
 schema that release read it with, so schemas, hashes and source ids stay the same
 ([the steps](https://github.com/metamorphic-labs/orcapod-python/blob/main/RELEASING.md#migrating-a-spiraldb-dataset-from-pyspiral)).
 
+### `CachedSource`: a record id names one row
+
+A `CachedSource` (`source.cached(cache_database=...)`) keeps every row its wrapped source
+ever delivered: a row later removed from the source stays in the cache. A record id names
+one row, so the cache never takes a second, different row under a record id it holds:
+
+- **The same row again** (same record id, same content) is the normal case: nothing is
+  written.
+- **A row under a new record id** is added.
+- **A changed row under a record id the cache holds** is refused, with
+  `CachedSourceChangedRowError`, before anything is written: the cache is left as it was,
+  the cached source presents no rows, and a job stores nothing new. The error names the
+  source id, the first five record ids concerned and how many rows changed. "Changed" means
+  any stored value of the row differs: a tag, a data column, a system tag or a source-info
+  token.
+
+Changed data is another dataset. Give the source a new `source_id`, or keep a new cache for
+it (another `cache_path` or cache database).
+
+The rule is the same for every wrapped source, whatever its record ids are made from:
+
+| Record ids | Accepted | Refused |
+|---|---|---|
+| Key columns (`record_id_columns=["subject", "session"]`) | the same rows in any order, a row under a new key, a missing row | another value under a key the cache holds |
+| Position (no key columns) | the same rows in the same order, rows appended at the end, rows missing from the end | a changed row, a reorder, a row inserted or removed before the last one (each gives a position another row) |
+
+Each cached row also records when the cache wrote it, in the stored column
+`__recorded_at` (a UTC timestamp). It is bookkeeping of the cache table only: no read of the
+cached source presents it, and it is part of no record id, source-info token or hash. A row
+delivered again is not written again and keeps its first time. Nothing selects rows by it
+today.
+
 ### `DerivedSource`
 
 A `DerivedSource` is a source whose rows come from something Orcapod already has: another
@@ -933,7 +965,7 @@ and neither does a source's own `run()` outside a job (`source.run()` does what
 | `SpiralDBTableSource` | holds no rows (every read scans the pinned version); reads the table's current version (no row of it, and `max_rows` does not apply) and pins it when it is newer, so the next read returns the new rows; an `asof` you gave never moves; record ids are the canonical JSON of the key columns, so only new or changed rows are new entries (a version that moves without a change, if SpiralDB moves it on compaction, re-runs the nodes below and reuses every stored result) |
 | `CSVSource` | reads the file's modification time and size; when either changed, reads the file again and holds the new rows if they changed (row order counts only without key columns) |
 | `SQLiteTableSource`, `PostgreSQLTableSource`, `DBTableSource` | reads the whole table again and holds the new rows if they changed (with key columns in any order, so an unordered `SELECT` is not a change) |
-| `CachedSource` | checks the source it wraps; when that source's modified time moved since the cache last took in its rows (also when another source over it made the check), compares the rows' record hashes with the rows it presents (before its first read, with the cache: a read; nothing is written) and moves only when it will present new rows, (a row removed from the wrapped source stays cached); the check guarantees nothing for two cached sources that share one cache (the same `cache_path` or table): give each its own cache (ITL-1143) |
+| `CachedSource` | checks the source it wraps; when that source's modified time moved since the cache last took in its rows (also when another source over it made the check), compares the rows' record hashes with the rows it presents (before its first read, with the cache: a read; nothing is written) and moves only when it will present new rows, (a row removed from the wrapped source stays cached; a changed row under a record id the cache holds refuses the next read, see [a record id names one row](#cachedsource-a-record-id-names-one-row)); the check guarantees nothing for two cached sources that share one cache (the same `cache_path` or table): give each its own cache (ITL-1143) |
 | `DerivedSource` | over a source, checks it; reads the origin's rows again when the origin's modified time moved since this source read them (a source that took in new data, a job node that ran again); holds the new rows if they changed; one that holds no rows (over a job node that had not run) moves when its origin's time moves |
 | `SourceProxy` | checks the source bound to it; its modified time follows that source's, and binding or unbinding moves it |
 

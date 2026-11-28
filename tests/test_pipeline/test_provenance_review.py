@@ -41,6 +41,7 @@ from orcapod.operators import (
 )
 from orcapod.sources import ArrowTableSource, CachedSource, DictSource
 from orcapod.system_constants import constants
+from tests.test_core.sources.cache_versions import write_outside_the_rule
 
 pytestmark = pytest.mark.filterwarnings("ignore::Warning")
 
@@ -164,6 +165,7 @@ def test_two_cached_versions_of_one_record(tmp_path: Path) -> None:
         tag_only_columns=True,
         source_id="v",
     )
+    write_outside_the_rule(second, cache, ("shared",))
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="v", database=InMemoryArrowDatabase())
     with job:
@@ -567,6 +569,7 @@ def test_two_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> Non
         tag_only_columns=True,
         source_id="v",
     )
+    write_outside_the_rule(second, cache, ("shared",))
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="vv", database=InMemoryArrowDatabase())
     with job:
@@ -767,6 +770,7 @@ def test_date_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> No
         tag_only_columns=True,
         source_id="v",
     )
+    write_outside_the_rule(second, cache, ("shared",))
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="dates", database=InMemoryArrowDatabase())
     with job:
@@ -1434,6 +1438,7 @@ def test_an_input_row_must_keep_the_tags_the_step_keeps(
         )
 
     CachedSource(data("old"), cache_database=cache, cache_path=("shared",)).as_table()
+    write_outside_the_rule(data("new"), cache, ("shared",))
     current = CachedSource(data("new"), cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name=f"tagged{mode}", database=InMemoryArrowDatabase())
     with job:
@@ -2025,6 +2030,7 @@ def test_every_held_version_of_a_record_gets_its_reason(
         )
 
     CachedSource(data(first), cache_database=cache, cache_path=("shared",)).as_table()
+    write_outside_the_rule(data(second), cache, ("shared",))
     a = CachedSource(data(second), cache_database=cache, cache_path=("shared",))
     b = DictSource(
         [{"k": "old", "y": 2}], tag_columns=["k"], tag_only_columns=True, source_id="b"
@@ -3206,19 +3212,19 @@ def test_batches_of_two_cached_versions_of_one_record(
 
     cache = DeltaTableDatabase(tmp_path / "cache")
 
-    def version(x: int) -> CachedSource:
-        return CachedSource(
-            DictSource(
-                [{"k": "a", "g": "1", "x": x, "y": 0}],
-                tag_columns=["k", "g"],
-                tag_only_columns=True,
-                source_id="v",
-            ),
-            cache_database=cache,
-            cache_path=("shared",),
+    def data(x: int) -> DictSource:
+        return DictSource(
+            [{"k": "a", "g": "1", "x": x, "y": 0}],
+            tag_columns=["k", "g"],
+            tag_only_columns=True,
+            source_id="v",
         )
 
+    def version(x: int) -> CachedSource:
+        return CachedSource(data(x), cache_database=cache, cache_path=("shared",))
+
     version(1).as_table()  # the first version is cached
+    write_outside_the_rule(data(2), cache, ("shared",))
     cached = version(2)
     job = PipelineJob(name=f"vb{mode}", database=InMemoryArrowDatabase())
     with job:

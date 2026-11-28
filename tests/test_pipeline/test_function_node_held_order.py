@@ -27,6 +27,7 @@ from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.operators import Batch, GroupBy
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.sources import CachedSource, DictSource
+from tests.test_core.sources.cache_versions import write_outside_the_rule
 
 
 @function_pod(output_keys=["y", "w"])
@@ -283,6 +284,7 @@ def test_tied_group_members_follow_the_held_order(mode: str) -> None:
     CachedSource(
         _source([old], tags), cache_database=cache, cache_path=("joint",)
     ).as_table()
+    write_outside_the_rule(_source([new], tags), cache, ("joint",))
     versions = CachedSource(
         _source([new], tags), cache_database=cache, cache_path=("joint",)
     )

@@ -58,6 +58,8 @@ These exceptions and warnings report problems identifying, binding, or reading s
 
 ::: orcapod.errors.CachedSourceIdMismatchError
 
+::: orcapod.errors.CachedSourceChangedRowError
+
 ::: orcapod.errors.SourceSlotNameCollisionError
 
 ## Pipeline execution
