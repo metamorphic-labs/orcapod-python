@@ -199,7 +199,7 @@ class ArrowDatabaseProtocol(Protocol):
         (a table at ``prefix`` itself included). Tables stored below another table
         are listed too. Paths are relative to ``self.base_path``, like the
         ``record_path`` of every other method, and each begins with ``prefix``.
-        The listing opens no table and loads no record.
+        The listing opens no record table and loads no record.
 
         Orcapod uses it to find tables written by an earlier version, whose paths
         it cannot compute because the hashes inside them changed (ITL-954).
@@ -214,7 +214,9 @@ class ArrowDatabaseProtocol(Protocol):
           ``abfs://`` only when the matching ``fsspec`` package is installed and
           can reach the database with its default credentials. A cloud database that
           cannot be listed raises ``TableListingNotSupportedError``.
-        - ``ConnectorArrowDatabase`` (SQLite, PostgreSQL, SpiralDB): the tables
+        - ``ConnectorArrowDatabase`` on SQLite or PostgreSQL: the original paths of
+          registered record tables and pending batches, matched by exact components.
+        - ``ConnectorArrowDatabase`` on other connectors: the tables
           whose name in the backend starts with the name ``prefix`` maps to. A
           table name does not keep the path it was made from, so the components
           after ``prefix`` come back as the backend stores them: every character

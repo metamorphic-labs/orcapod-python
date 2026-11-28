@@ -19,11 +19,27 @@ import os
 import sqlite3
 import threading
 from collections.abc import Iterator
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, cast
 
 import pyarrow as pa
 
-from orcapod.databases.utils import is_direct_projection
+from orcapod.databases._sql_store import (
+    STORE_PATH_CATALOG,
+    STORE_PATH_CATALOG_FIELDS,
+    STORE_PATH_LAYOUT_VERSION,
+    TABLE_PATH_ENTRY_KIND,
+    catalog_name_pattern,
+    require_catalog_layout,
+    require_catalog_pair,
+)
+from orcapod.databases.utils import (
+    SQL_FROM_TABLE,
+    is_direct_projection,
+    sql_table_identifier,
+    unquote_sql_identifier,
+)
+from orcapod.errors import OrcapodDatabaseError
 from orcapod.types import ColumnInfo
 
 logger = logging.getLogger(__name__)
@@ -286,6 +302,118 @@ class SQLiteConnector:
             )
             return [row["name"] for row in cursor]
 
+    def get_store_table_paths(
+        self, name: str, *, exact: bool = False, schema: str | None = None
+    ) -> list[tuple[str, str, str]]:
+        """Return registered record tables matching a physical name or prefix."""
+        assert schema in (None, "main")
+        with self._lock:
+            conn = self._require_open()
+            if (
+                conn.execute(
+                    "SELECT 1 FROM main.sqlite_schema WHERE type = 'table' AND name = ?",
+                    (STORE_PATH_CATALOG,),
+                ).fetchone()
+                is None
+            ):
+                return []
+            match = "= ?" if exact else "LIKE ? ESCAPE '!'"
+            rows = cast(
+                "Iterator[sqlite3.Row]",
+                conn.execute(
+                    f"""
+                    SELECT paths.table_name, paths.entry_value, paths.layout_version,
+                           physical.name IS NOT NULL
+                    FROM main."{STORE_PATH_CATALOG}" AS paths
+                    LEFT JOIN main.sqlite_schema AS physical
+                      ON physical.name = paths.table_name AND physical.type = 'table'
+                    WHERE paths.table_name {match}
+                      AND paths.entry_kind = ? AND paths.entry_name = ''
+                    """,
+                    (
+                        name if exact else catalog_name_pattern(name),
+                        TABLE_PATH_ENTRY_KIND,
+                    ),
+                ),
+            )
+            paths: list[tuple[str, str, str]] = []
+            for row in rows:
+                table_name = cast(str, row[0])
+                if row[3]:
+                    require_catalog_layout(table_name, cast(object, row[2]))
+                    paths.append(("main", table_name, cast(str, row[1])))
+            return paths
+
+    def get_current_store_schema(self) -> str:
+        """Return SQLite's persistent schema selected for connector stores."""
+        self._require_open()
+        return "main"
+
+    @contextmanager
+    def store_table_transaction(
+        self, table_name: str, path_json: str, *, schema: str
+    ) -> Iterator[tuple[str, bool]]:
+        """Register and write a record table, yielding whether it already exists."""
+        assert schema == "main"
+        with self._lock:
+            conn = self._require_open()
+            _ = conn.execute("BEGIN IMMEDIATE")
+            try:
+                fields = STORE_PATH_CATALOG_FIELDS.format(
+                    layout_version=STORE_PATH_LAYOUT_VERSION
+                )
+                _ = conn.execute(
+                    f'CREATE TABLE IF NOT EXISTS main."{STORE_PATH_CATALOG}" {fields}'
+                )
+                row = cast(
+                    "sqlite3.Row | None",
+                    conn.execute(
+                        f"""
+                        SELECT entry_value, layout_version FROM main."{STORE_PATH_CATALOG}"
+                        WHERE table_name = ? AND entry_kind = ? AND entry_name = ''
+                        """,
+                        (table_name, TABLE_PATH_ENTRY_KIND),
+                    ).fetchone(),
+                )
+                if row is not None:
+                    require_catalog_layout(table_name, cast(object, row[1]))
+                physical = cast(
+                    "sqlite3.Row | None",
+                    conn.execute(
+                        "SELECT name, type FROM main.sqlite_schema WHERE name = ? COLLATE NOCASE",
+                        (table_name,),
+                    ).fetchone(),
+                )
+                if physical is not None and tuple(physical) != (table_name, "table"):
+                    raise OrcapodDatabaseError(
+                        f"Object {table_name!r} is not a record table"
+                    )
+                require_catalog_pair(
+                    table_name,
+                    physical is not None,
+                    cast(str, row[0]) if row else None,
+                    path_json,
+                )
+                if row is None:
+                    _ = conn.execute(
+                        f"""
+                        INSERT INTO main."{STORE_PATH_CATALOG}"
+                            (table_name, entry_kind, entry_name, entry_value, layout_version)
+                        VALUES (?, ?, '', ?, ?)
+                        """,
+                        (
+                            table_name,
+                            TABLE_PATH_ENTRY_KIND,
+                            path_json,
+                            STORE_PATH_LAYOUT_VERSION,
+                        ),
+                    )
+                yield "main", physical is not None
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
     def get_pk_columns(self, table_name: str) -> list[str]:
         """Return primary-key column names in key-sequence order.
 
@@ -302,19 +430,31 @@ class SQLiteConnector:
             rows = [row for row in cursor if row["pk"] > 0]
             return [row["name"] for row in sorted(rows, key=lambda r: r["pk"])]
 
-    def get_column_info(self, table_name: str) -> list[ColumnInfo]:
+    def get_column_info(
+        self, table_name: str, *, schema: str | None = None
+    ) -> list[ColumnInfo]:
         """Return column metadata with Arrow-mapped types.
 
         Args:
             table_name: Name of the table to introspect.
+            schema: The verified schema when called by a connector store.
 
         Returns:
             List of ColumnInfo objects; empty list if table doesn't exist.
         """
+        self._validate_table_name(table_name)
+        return self._get_column_info(table_name, schema=schema)
+
+    def _get_column_info(
+        self, table_name: str, *, schema: str | None = None
+    ) -> list[ColumnInfo]:
+        """Read metadata for an already parsed, safely quoted table identifier."""
         with self._lock:
             conn = self._require_open()
-            self._validate_table_name(table_name)
-            cursor = conn.execute(f'PRAGMA table_info("{table_name}")')
+            namespace = "" if schema is None else sql_table_identifier(schema) + "."
+            cursor = conn.execute(
+                f"PRAGMA {namespace}table_info({sql_table_identifier(table_name)})"
+            )
             return [
                 ColumnInfo(
                     name=row["name"],
@@ -349,8 +489,6 @@ class SQLiteConnector:
         Yields:
             Arrow RecordBatch objects.
         """
-        import re as _re
-
         import pyarrow as _pa
 
         # Execute the query and resolve the schema under the lock, then fetch
@@ -372,15 +510,21 @@ class SQLiteConnector:
             # A column created NOT NULL reads back non-null (ITL-1276): the stored
             # flag, not the type alone, makes the field.
             nullable_lookup: dict[str, bool] = {}
-            table_match = _re.search(r'FROM\s+"([^"]+)"', query, _re.IGNORECASE)
-            if not table_match:
-                table_match = _re.search(r"FROM\s+(\w+)", query, _re.IGNORECASE)
+            table_match = SQL_FROM_TABLE.search(query)
             if table_match:
-                queried_table = table_match.group(1)
+                queried_table = unquote_sql_identifier(table_match["table"])
+                namespace = table_match["schema"]
+                column_info = (
+                    self._get_column_info(queried_table)
+                    if namespace is None
+                    else self._get_column_info(
+                        queried_table, schema=unquote_sql_identifier(namespace)
+                    )
+                )
                 # The stored NOT NULL holds for a column only as a direct projection
                 # of its table (an outer join can give it nulls).
                 direct = is_direct_projection(query)
-                for ci in self.get_column_info(queried_table):
+                for ci in column_info:
                     type_lookup[ci.name] = ci.arrow_type
                     nullable_lookup[ci.name] = ci.nullable or not direct
 
@@ -422,6 +566,8 @@ class SQLiteConnector:
         table_name: str,
         columns: list[ColumnInfo],
         pk_column: str,
+        *,
+        schema: str | None = None,
     ) -> None:
         """Create a table with the given columns if it does not already exist.
 
@@ -429,6 +575,7 @@ class SQLiteConnector:
             table_name: Table to create.
             columns: Column definitions with Arrow-mapped types.
             pk_column: Name of the column to use as the primary key.
+            schema: The verified schema when called by a connector store.
         """
         col_names = [col.name for col in columns]
         if pk_column not in col_names:
@@ -445,7 +592,7 @@ class SQLiteConnector:
                 pk = " PRIMARY KEY" if col.name == pk_column else ""
                 escaped = col.name.replace('"', '""')
                 col_defs.append(f'    "{escaped}" {sql_type}{not_null}{pk}')
-            ddl = f'CREATE TABLE IF NOT EXISTS "{table_name}" (\n'
+            ddl = f"CREATE TABLE IF NOT EXISTS {sql_table_identifier(table_name, schema)} (\n"
             ddl += ",\n".join(col_defs)
             ddl += "\n)"
             conn.execute(ddl)
@@ -456,6 +603,8 @@ class SQLiteConnector:
         records: pa.Table,
         id_column: str,
         skip_existing: bool = False,
+        *,
+        schema: str | None = None,
     ) -> None:
         """Write records to a table using upsert semantics.
 
@@ -467,6 +616,7 @@ class SQLiteConnector:
                 this argument is accepted for protocol compliance.
             skip_existing: If True, skip rows whose id already exists
                 (INSERT OR IGNORE). If False, overwrite (INSERT OR REPLACE).
+            schema: The verified schema when called by a connector store.
         """
         with self._lock:
             conn = self._require_open()
@@ -475,7 +625,7 @@ class SQLiteConnector:
             col_list = ", ".join('"' + c.replace('"', '""') + '"' for c in cols)
             placeholders = ", ".join("?" for _ in cols)
             verb = "INSERT OR IGNORE" if skip_existing else "INSERT OR REPLACE"
-            sql = f'{verb} INTO "{table_name}" ({col_list}) VALUES ({placeholders})'
+            sql = f"{verb} INTO {sql_table_identifier(table_name, schema)} ({col_list}) VALUES ({placeholders})"
             rows = (tuple(row[c] for c in cols) for row in records.to_pylist())
             conn.executemany(sql, rows)
 

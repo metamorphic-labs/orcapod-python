@@ -330,26 +330,48 @@ class TestDeltaOnCloudStorage:
 class TestConnector:
     """Listing behaviour specific to ``ConnectorArrowDatabase``."""
 
-    def test_components_after_the_prefix_come_back_sanitized(self, tmp_path: Path):
-        """Listed components are the sanitized names, and the sanitized path reads the
-        same table.
-        """
-        store = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "s.db")))
+    def test_original_paths_are_listed_and_read_after_reopen(self, tmp_path: Path):
+        """Keep exact paths and prefix boundaries through an independent connection."""
+        location = tmp_path / "s.db"
         path = ("job", "f", "semantic_v0.1:ab12", "v0", "python.function.v1", "rdb_v2")
-        _fill(store, [path])
-        listed = store.list_table_paths(("job", "f"))
-        assert listed == [
-            ("job", "f", "semantic_v0_1_ab12", "v0", "python_function_v1", "rdb_v2")
-        ]
-        # The sanitized path names the same table.
-        assert store.table_exists(listed[0])
-        records = store.get_all_records(listed[0])
-        assert records is not None and records.num_rows == 1
+        long_name = "name" * 30
+        long_path = (long_name + ":", "old!layout")
+        other_path = (long_name + "-", "old!layout")
+        with SQLiteConnector(location) as connector:
+            _fill(ConnectorArrowDatabase(connector), [path, long_path, other_path])
+        with SQLiteConnector(location) as connector:
+            store = ConnectorArrowDatabase(connector)
+            assert store.list_table_paths(("job", "f")) == [path]
+            assert not store.table_exists(
+                ("job", "f", "semantic_v0_1_ab12", "v0", "python_function_v1", "rdb_v2")
+            )
+            assert store.list_table_paths((long_path[0],)) == [long_path]
+            scoped = store.at("job", "f")
+            assert scoped.list_table_paths() == [path[2:]]
+            for listed in store.list_table_paths():
+                assert store.table_exists(listed)
+                records = store.get_all_records(listed)
+                assert records is not None and records.num_rows == 1
+
+    def test_stale_lookup_uses_layout_and_revision_after_a_long_name(
+        self, tmp_path: Path
+    ):
+        from orcapod.contexts.stored import tables_of_another_layout
+
+        with SQLiteConnector(tmp_path / "s.db") as connector:
+            store = ConnectorArrowDatabase(connector).at("job")
+            name = ("function" * 15 + ":",)
+            old_layout = name + ("old_hash", "rev1", "rdb_v0")
+            old_revision = name + ("old_hash", "rev0", "rdb_v1")
+            current = name + ("new_hash", "rev1", "rdb_v1")
+            other = (name[0][:-1] + "-", "old_hash", "rev0", "rdb_v0")
+            _fill(store, [old_layout, old_revision, current, other])
+            assert tables_of_another_layout(store, name, "rev1") == sorted(
+                [old_layout, old_revision]
+            )
 
     def test_the_last_component_is_the_layout(self, tmp_path: Path):
-        """The last listed component is the sanitized last component of the written
-        path.
-        """
+        """The last listed component is the original layout component."""
         store = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "s.db")))
         _fill(
             store,
@@ -360,7 +382,7 @@ class TestConnector:
         )
         assert [path[-1] for path in store.list_table_paths(("job",))] == [
             "rdb_v1",
-            "schema_semantic_v0_1_cd",
+            "schema:semantic_v0.1:cd",
         ]
 
 

@@ -209,6 +209,14 @@ your own, refuses a column whose type is or holds one, naming it (a stream's ide
 Arrow schema hash, which cannot hold them). Cast a list view to the large list of the same
 items, and expand a run-end-encoded column with `pyarrow.compute.run_end_decode`.
 
+Top-level `T` and `T | None` describe different column fields. Python declarations
+leave nested Arrow fields nullable in data context v1, so `list[int]` and
+`list[int | None]` use one Arrow type. A source can carry null items in either case
+for supported types. If you supply an Arrow schema, Orcapod keeps its nested flags.
+For example, `pa.large_list(pa.field("item", pa.int64(), nullable=False))` declares
+required items. That field has a different Arrow schema identity from the default
+nullable item. Use matching nested flags when joining sources or binding a slot.
+
 Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
 column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,
 a struct with a dictionary field), is refused with `InputValidationError` when the source or

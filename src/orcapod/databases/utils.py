@@ -65,10 +65,12 @@ def as_table_committing(database: object) -> TableCommittingDatabaseProtocol | N
     return cast("TableCommittingDatabaseProtocol", database)
 
 
-_IDENTIFIER = r'(?:"[^"]+"|\w+)'
+_IDENTIFIER = r'(?:"(?:[^"]|"")+"|\w+)'
+_RELATION = rf"(?:(?P<schema>{_IDENTIFIER})\s*\.\s*)?(?P<table>{_IDENTIFIER})"
+SQL_FROM_TABLE = re.compile(rf"\bFROM\s+{_RELATION}", re.IGNORECASE)
 _DIRECT_PROJECTION = re.compile(
     rf"^\s*SELECT\s+(?:\*|{_IDENTIFIER}(?:\s*,\s*{_IDENTIFIER})*)\s+"
-    rf"FROM\s+{_IDENTIFIER}\s*(?P<rest>.*?)\s*;?\s*$",
+    rf"FROM\s+{_RELATION}\s*(?P<rest>.*?)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 # After the table: nothing, or a clause that only chooses or orders rows.
@@ -76,6 +78,29 @@ _ROW_CLAUSE = re.compile(r"^(?:$|(?:WHERE|ORDER\s+BY|LIMIT|OFFSET)\b)", re.IGNOR
 _NOT_DIRECT = re.compile(
     r"\b(?:JOIN|UNION|INTERSECT|EXCEPT|GROUP\s+BY|HAVING|SELECT)\b", re.IGNORECASE
 )
+
+
+def sql_table_identifier(table: str, schema: str | None = None) -> str:
+    """Quote a table identifier and, if provided, its separate schema identifier."""
+    parts = (table,) if schema is None else (schema, table)
+    return ".".join('"' + part.replace('"', '""') + '"' for part in parts)
+
+
+def unquote_sql_identifier(identifier: str) -> str:
+    """Decode one identifier read by the SQL relation pattern."""
+    if identifier.startswith('"'):
+        return identifier[1:-1].replace('""', '"')
+    return identifier
+
+
+def match_direct_projection(query: str) -> re.Match[str] | None:
+    """Match a direct projection and identify its source relation."""
+    match = _DIRECT_PROJECTION.match(query)
+    if match is not None:
+        rest = match["rest"]
+        if _ROW_CLAUSE.match(rest) is not None and _NOT_DIRECT.search(rest) is None:
+            return match
+    return None
 
 
 def is_direct_projection(query: str) -> bool:
@@ -93,11 +118,7 @@ def is_direct_projection(query: str) -> bool:
     Returns:
         Whether every result column is a stored column as it is stored.
     """
-    match = _DIRECT_PROJECTION.match(query)
-    if match is None:
-        return False
-    rest = match.group("rest")
-    return _ROW_CLAUSE.match(rest) is not None and _NOT_DIRECT.search(rest) is None
+    return match_direct_projection(query) is not None
 
 
 def metadata_bytes(metadata: Mapping[Any, Any] | None) -> dict[bytes, bytes]:
