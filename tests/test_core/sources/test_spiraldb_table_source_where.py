@@ -1108,7 +1108,7 @@ class TestRunsAndSavedJobs:
         assert {"first", "second"} & job.nodes.keys() == {"first"}
 
     def test_streams_built_before_the_capture_are_checked_too(self, project, tmp_path):
-        """Streams over differently restricted sources, built outside, are refused."""
+        """The source check follows a prebuilt stream to its restricted input."""
 
         @function_pod(output_keys="a")
         def first(amplitude: float | None) -> float | None:
@@ -1121,10 +1121,10 @@ class TestRunsAndSavedJobs:
             return amplitude
 
         events = _source(source_id="events", tag_only_columns=True)
-        m1 = events.where(subject_id="m1").select_data_columns(["amplitude"])
         m2 = events.where(subject_id="m2").select_data_columns(["amplitude"])
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
+            m1 = events.where(subject_id="m1").select_data_columns(["amplitude"])
             first.pod(m1, label="first")
             with pytest.raises(
                 InconsistentSourceError, match="distinct source objects"
@@ -1147,9 +1147,7 @@ class TestRunsAndSavedJobs:
     def test_a_stream_with_the_hash_of_a_captured_output_is_checked(
         self, project, tmp_path, captured, prebuilt, prebuilt_first
     ):
-        """A stream built before the capture with the hash of a step captured inside
-        it, over another restriction, is refused in either order: compilation would
-        resolve it to the captured step and read that step's rows."""
+        """Matching a captured step still requires consistent source objects."""
 
         @function_pod(output_keys="a")
         def first(amplitude: float | None) -> float | None:
@@ -1161,24 +1159,16 @@ class TestRunsAndSavedJobs:
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
             if prebuilt_first:
-                first.pod(outside, label="first")
-                with pytest.raises(
-                    InconsistentSourceError, match="distinct source objects"
-                ):
-                    events.where(**captured).select_data_columns(
-                        ["amplitude"], label="selected"
-                    )
-            else:
-                events.where(**captured).select_data_columns(
-                    ["amplitude"], label="selected"
-                )
-                with pytest.raises(
-                    InconsistentSourceError, match="distinct source objects"
-                ):
+                with pytest.raises(ValueError, match="as a source slot"):
                     first.pod(outside, label="first")
-        assert {"first", "selected"} & job.nodes.keys() == {
-            "first" if prebuilt_first else "selected"
-        }
+            events.where(**captured).select_data_columns(
+                ["amplitude"], label="selected"
+            )
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
+                first.pod(outside, label="first")
+        assert {"first", "selected"} & job.nodes.keys() == {"selected"}
 
     @pytest.mark.parametrize(
         "prebuilt_first", [False, True], ids=["captured first", "prebuilt first"]
@@ -1186,7 +1176,7 @@ class TestRunsAndSavedJobs:
     def test_a_stream_with_the_hash_of_an_equal_captured_output_is_accepted(
         self, project, tmp_path, prebuilt_first
     ):
-        """Prebuilt and captured projections can reuse one restricted source."""
+        """A matching prebuilt projection can be used after its step is captured."""
 
         @function_pod(output_keys="a")
         def first(amplitude: float | None) -> float | None:
@@ -1200,10 +1190,10 @@ class TestRunsAndSavedJobs:
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
             if prebuilt_first:
-                first.pod(outside, label="first")
+                with pytest.raises(ValueError, match="as a source slot"):
+                    first.pod(outside, label="first")
             events.select_data_columns(["amplitude"])
-            if not prebuilt_first:
-                first.pod(outside, label="first")
+            first.pod(outside, label="first")
 
         job.run()
 

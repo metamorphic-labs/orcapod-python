@@ -18,7 +18,7 @@ from orcapod.errors import (
     InconsistentSourceError,
     SourceSlotNameCollisionError,
 )
-from orcapod.operators import SemiJoin
+from orcapod.operators import MapData, SemiJoin
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.source_consistency import require_consistent_sources
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
@@ -234,15 +234,14 @@ def test_cached_bound_proxy_uses_the_live_derived_schema(reverse: bool) -> None:
     assert first.arrow_schemas[1] == second.arrow_schemas[1]
     assert first.arrow_schemas[1].field("x").type == pa.int32()
 
-    # Prebuilt projections get their own slots, so the two sources are compared
-    # without also colliding on a direct slot name.
-    projected = {
-        "left": cached.map_data({"x": "left_x"}),
-        "right": second.map_data({"x": "right_x"}),
+    slots = {
+        "left": cached.as_slot("left_input"),
+        "right": second.as_slot("right_input"),
     }
     with Pipeline("comparison") as pipeline:
         for label in ("right", "left") if reverse else ("left", "right"):
-            projected[label].map_data({f"{label}_x": "out"}, label=label)
+            projected = MapData({"x": f"{label}_x"})(slots[label])
+            _ = MapData({f"{label}_x": "out"})(projected, label=label)
     assert {"left", "right"} <= pipeline.nodes.keys()
 
 
@@ -286,16 +285,16 @@ def test_tag_copy_uses_live_arrow_schema_after_proxy_binding(
         source_id="shared",
     )
     assert first.content_hash() != second.content_hash()
-    # Prebuilt projections separate the slot names so the guard compares the sources.
-    left = first.map_data({"x": "left_x"})
-    right = second.map_data({"x": "right_x"})
+    left = first.as_slot("left_input")
+    right = second.as_slot("right_input")
+    rename = MapData({"x": "out"})
     with Pipeline("comparison") as pipeline:
-        left.map_data({"left_x": "out"}, label="left")
+        _ = rename(left, label="left")
         if same_arrow_type:
-            right.map_data({"right_x": "out"}, label="right")
+            _ = rename(right, label="right")
         else:
             with pytest.raises(InconsistentSourceError, match="different schemas"):
-                right.map_data({"right_x": "out"}, label="right")
+                _ = rename(right, label="right")
     assert "left" in pipeline.nodes
     assert ("right" in pipeline.nodes) == same_arrow_type
     assert first.content_hash() == captured_hash

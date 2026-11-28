@@ -1189,7 +1189,7 @@ def test_capture_accepts_own_slots_and_another_jobs_stored_results(
             scale.pod(upstream.before, label="borrowed")
         scale.pod(stored_source, label="stored")
     assert "borrowed" not in receiver.nodes
-    receiver.bind(sources={stored_source.source_name: stored_source})
+    receiver.bind(sources={stored_source.label: stored_source})
     receiver.run(orchestrator=orchestrator())
     assert sorted(receiver.stored.as_table()["scaled"].to_pylist()) == [30, 70]
 
@@ -1346,7 +1346,7 @@ def test_prebuilt_stream_over_own_slot_is_refused_before_rebinding(
 
     slot = job.nodes["a"]
     prebuilt = SelectDataColumns(["x", "y"])(slot)
-    with Pipeline("also_tracking") as outer, job:
+    with job, Pipeline("also_tracking") as blueprint:
         with pytest.raises(
             InconsistentSourceError, match="'a'.*not supported yet"
         ) as error:
@@ -1354,7 +1354,7 @@ def test_prebuilt_stream_over_own_slot_is_refused_before_rebinding(
         assert "ITL-1559" in str(error.value)
         assert "inside the job" in str(error.value)
 
-    assert not outer.nodes
+    assert not blueprint.nodes
     assert set(job.nodes) == {"a", "direct"}
     slot = job.nodes["a"]
     prebuilt_twin = SelectDataColumns(["x", "y"])(slot)
