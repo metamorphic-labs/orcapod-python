@@ -292,9 +292,11 @@ def test_item_field_differences_of_a_merged_token_give_one_result_on_both_routes
     right = _keyed(("y", "v"), [[1], [2]], [["c"], ["d"]], second, order)
     sync, asynchronous = _both_routes(operator, left, right)
     assert sync[0] == asynchronous[0] == "rows", (sync, asynchronous)
-    assert len(sync[1]) == 2
+    assert len(sync[1]) == len(asynchronous[1]) == 2
     key = lambda row: repr(sorted((n, v) for n, (_, v) in row.items()))  # noqa: E731
-    for mine, theirs in zip(sorted(sync[1], key=key), sorted(asynchronous[1], key=key)):
+    for mine, theirs in zip(
+        sorted(sync[1], key=key), sorted(asynchronous[1], key=key), strict=True
+    ):
         assert mine.keys() == theirs.keys()
         for name in mine:
             assert mine[name][0].equals(theirs[name][0], check_metadata=True), name
@@ -345,6 +347,7 @@ def test_a_null_inner_list_in_a_merged_token_is_refused_naming_the_column(
     other = _keyed(("y", "v"), keys, whole, NESTED, order, key_type=key_type)
     sync, asynchronous = _both_routes(operator, full, other)
     assert sync[0] == asynchronous[0] == "rows"
+    assert len(sync[1]) == len(asynchronous[1]) == 2
     assert all(row["_source_k"][0] == NESTED for row in sync[1] + asynchronous[1])
 
 

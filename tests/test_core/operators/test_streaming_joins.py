@@ -1289,6 +1289,50 @@ def test_a_batch_that_declares_another_token_type_than_its_stream_is_refused(
     assert sum(batch.num_rows for batch in out) == 2
 
 
+@pytest.mark.parametrize("mismatch", ["item_name", "item_metadata"])
+@pytest.mark.parametrize(
+    "make_kernel",
+    [_join_kernel, _merge_kernel, _semi_kernel],
+    ids=["join", "merge_join", "semi_join"],
+)
+def test_a_first_batch_with_different_token_item_fields_is_refused(
+    mismatch: str,
+    make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
+) -> None:
+    """The first batch must match the stream's nested item name and metadata."""
+    values = [["a"], ["b"]]
+    string = pa.large_string()
+    declared = pa.large_list(pa.field("member", string, metadata={"m": "original"}))
+    wrong = (
+        pa.large_list(pa.field("other", string, metadata={"m": "original"}))
+        if mismatch == "item_name"
+        else pa.large_list(pa.field("member", string, metadata={"m": "changed"}))
+    )
+    left = _token_stream(values, declared)
+    right = ArrowTableStream(pa.table({"k": [1, 2], "y": [5, 6]}), tag_columns=["k"])
+    kernel = make_kernel((left, right))
+    sent = _sent(left).combine_chunks()
+    index = sent.schema.get_field_index("_source_x")
+    field = sent.schema.field(index)
+    assert field.type.equals(declared, check_metadata=True)
+    assert not field.type.equals(wrong, check_metadata=True)
+    batch = sent.set_column(
+        index, field.with_type(wrong), pa.array(values, type=wrong)
+    ).to_batches()[0]
+    with pytest.raises(ValueError, match="_source_x"):
+        _ = kernel.push(0, batch)
+
+    out = kernel.push(0, sent.to_batches()[0])
+    out += kernel.push(1, _sent(right).combine_chunks().to_batches()[0])
+    out += kernel.close(0) + kernel.close(1)
+    assert sum(batch.num_rows for batch in out) == 2
+    assert all(
+        batch.schema.field("_source_x").type.equals(declared, check_metadata=True)
+        for batch in out
+        if batch.num_rows
+    )
+
+
 @pytest.mark.parametrize(
     "tokens",
     [[[], []], [[[None]], [[]]], [[[None]], [["b"]]]],

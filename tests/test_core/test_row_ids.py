@@ -55,6 +55,59 @@ def _binary(value: bytes) -> "pa.Array[Any]":
     return pa.array([value], type=pa.large_binary())
 
 
+@pytest.mark.parametrize("scalar_last", [False, True])
+def test_with_source_info_uses_the_later_alias_in_every_view(scalar_last: bool) -> None:
+    """Prefixed and bare spellings update the same token in keyword order."""
+    data = Data(
+        pa.table({"x": [1], "y": [2], "_source_x": ["old"], "_source_y": ["kept"]})
+    )
+    scalar = pa.scalar(["arrow"], type=pa.large_list(pa.large_string()))
+    if scalar_last:
+        updated = data.with_source_info(x="python", _source_x=scalar)
+        expected = ["arrow"]
+        expected_type = scalar.type
+    else:
+        updated = data.with_source_info(x=scalar, _source_x="python")
+        expected = "python"
+        expected_type = pa.large_string()
+
+    assert updated.source_info() == {"x": expected, "y": "kept"}
+    entry = row_ids.entry_id(HASHER, _tag(), updated)
+    for table in (
+        updated.as_table(columns={"source": True}),
+        updated.source_info_table(),
+        row_ids.instance_id_preimage(entry, updated),
+    ):
+        assert table.column("_source_x").to_pylist() == [expected]
+        assert table.schema.field("_source_x").type.equals(
+            expected_type, check_metadata=True
+        )
+        assert table.column("_source_y").to_pylist() == ["kept"]
+
+
+def test_with_source_info_keeps_a_scalar_type_its_value_cannot_show() -> None:
+    """Replacing a typed column never infers the Arrow scalar's type."""
+    data = Data(
+        pa.table({"x": [1], "y": [2], "_source_x": ["old"], "_source_y": ["kept"]})
+    )
+    token_type = pa.large_list(pa.large_list(pa.large_list(pa.large_string())))
+    token = [[], [[]]]
+    updated = data.with_source_info(x=pa.scalar(token, type=token_type))
+
+    assert updated.source_info() == {"x": token, "y": "kept"}
+    entry = row_ids.entry_id(HASHER, _tag(), updated)
+    for table in (
+        updated.as_table(columns={"source": True}),
+        updated.source_info_table(),
+        row_ids.instance_id_preimage(entry, updated),
+    ):
+        assert table.column("_source_x").to_pylist() == [token]
+        assert table.schema.field("_source_x").type.equals(
+            token_type, check_metadata=True
+        )
+        assert table.column("_source_y").to_pylist() == ["kept"]
+
+
 class TestEntryId:
     def test_the_preimage_is_the_tags_the_system_tags_and_the_labelled_data_hash(
         self,

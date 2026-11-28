@@ -602,7 +602,11 @@ class StreamingJoinKernel(ABC):
         table = pa.Table.from_batches([batch]).select(layout.names)
         columns = list(table.columns)
         for index, (field, actual) in enumerate(zip(layout, table.schema)):
-            if field.type == actual.type:
+            # The pipeline declares token types including nested item fields.
+            if field.type.equals(
+                actual.type,
+                check_metadata=field.name.startswith(constants.SOURCE_PREFIX),
+            ):
                 continue
             if not table.num_rows and pa.types.is_null(actual.type):
                 continue
