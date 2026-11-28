@@ -33,6 +33,7 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
+from orcapod.utils.schema_utils import require_names_not_system
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -191,6 +192,11 @@ class CachedFunctionPod(WrappedFunctionPod):
         cached = self._cache.lookup(data, data_context_key=self.data_context_key)
         if cached is None:
             return None
+        return self._cache_hit_output(cached)
+
+    def _cache_hit_output(self, cached: DataProtocol) -> DataProtocol:
+        """Validate a stored output before passing it to the caller."""
+        require_names_not_system(cached.keys())
         return cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
 
     def process_data(
@@ -220,10 +226,9 @@ class CachedFunctionPod(WrappedFunctionPod):
             A ``(tag, output_data)`` tuple; output_data is ``None``
             if the inner function filters the data out.
         """
-        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
+        cached = self.lookup_cached_data(data)
         if cached is not None:
             module_logger.info("Pod-level cache hit")
-            cached = cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
             return tag, cached
 
         tag, output = self._function_pod.process_data(
@@ -251,7 +256,7 @@ class CachedFunctionPod(WrappedFunctionPod):
                 module_logger.info(
                     "A result for this input was stored meanwhile; using it"
                 )
-                output = stored.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
+                output = self._cache_hit_output(stored)
             else:
                 output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output
@@ -282,10 +287,9 @@ class CachedFunctionPod(WrappedFunctionPod):
             A ``(tag, output_data)`` tuple; output_data is ``None``
             if the inner function filters the data out.
         """
-        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
+        cached = self.lookup_cached_data(data)
         if cached is not None:
             module_logger.info("Pod-level cache hit")
-            cached = cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
             return tag, cached
 
         tag, output = await self._function_pod.async_process_data(
@@ -313,7 +317,7 @@ class CachedFunctionPod(WrappedFunctionPod):
                 module_logger.info(
                     "A result for this input was stored meanwhile; using it"
                 )
-                output = stored.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
+                output = self._cache_hit_output(stored)
             else:
                 output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output

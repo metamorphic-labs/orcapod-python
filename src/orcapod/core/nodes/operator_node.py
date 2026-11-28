@@ -94,7 +94,7 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
 import orcapod.core.row_ids as row_ids
 from orcapod.types import CacheMode, ColumnConfig, ContentHash, Schema
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, schema_utils
 
 logger = logging.getLogger(__name__)
 
@@ -1573,6 +1573,29 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         )
         if records is None:
             return None
+        try:
+            saved = self._descriptor.get("output_schema") if self._loaded else None
+            if saved is not None:
+                # A descriptor distinguishes a legacy user name from a system tag.
+                schema_utils.require_names_not_system(
+                    set(saved.get("tag", {})) | set(saved.get("data", {}))
+                )
+            schema_utils.require_stored_stream_column_names(
+                records.column_names,
+                (
+                    self.HASH_COLUMN_NAME,
+                    constants.NODE_CONTENT_HASH_COL,
+                    constants.DATA_CONTEXT_COL,
+                    *_STORED_ONLY_COLUMNS,
+                ),
+            )
+        except InputValidationError as exc:
+            location = "/".join(
+                self._pipeline_database.base_path + self._stored_table_path
+            )
+            raise InputValidationError(
+                f"{exc} Stored stream table: {location}"
+            ) from exc
         self._check_stored_data_tags(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)

@@ -62,6 +62,7 @@ from orcapod.core.sources.source_ids import joined_location, location_source_nam
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import (
     require_custom_system_tags,
+    require_source_column_names,
     require_supported_nullable_types,
     SourceStreamBuilder,
     key_column_type_allowed,
@@ -803,9 +804,9 @@ class SpiralDBTableSource(RootSource):
         # One lookup per check (ITL-1350): a table dropped and created again since
         # is found by this lookup, and its schema and version come from it.
         table = self._lookup_table()
-        schema = arrow_utils.drop_system_columns(
-            table.arrow_schema().empty_table()
-        ).schema
+        raw_schema = table.arrow_schema()
+        require_source_column_names(raw_schema.names, self._system_tag_columns)
+        schema = arrow_utils.drop_system_columns(raw_schema.empty_table()).schema
         if not schema.equals(self._table_schema, check_metadata=True):
             raise ValueError(
                 f"SpiralDB table {self._qualified!r}: "
@@ -932,6 +933,7 @@ class SpiralDBTableSource(RootSource):
         ):
             for start in range(0, max(batch.num_rows, 1), self._batch_rows):
                 raw = pa.Table.from_batches([batch.slice(start, self._batch_rows)])
+                require_source_column_names(raw.column_names, self._system_tag_columns)
                 require_supported_nullable_types(raw.schema)
                 rows = arrow_utils.drop_system_columns(raw)
                 # Metadata too: field metadata is how a column's logical type is

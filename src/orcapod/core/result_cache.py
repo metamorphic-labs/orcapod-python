@@ -37,6 +37,8 @@ from orcapod.system_constants import (
     constants,
 )
 
+from orcapod.utils.schema_utils import require_names_not_system
+
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols.datagrams import DatagramProtocol
 
@@ -171,6 +173,46 @@ def _with_declared_token_columns(
             pa.field(name, token_type, nullable=RESULT_TOKEN_COLUMN.nullable), token
         )
     return outputs
+
+
+def read_stored_result_table(
+    database: ArrowDatabaseProtocol,
+    path: tuple[str, ...],
+    *,
+    record_id_column: str | None = None,
+) -> pa.Table | None:
+    """Read a raw result table and refuse reserved user names before decoding."""
+    table = database.get_all_records(path, record_id_column=record_id_column)
+    if table is not None:
+        try:
+            _check_result_table(table, record_id_column)
+        except InputValidationError as exc:
+            location = "/".join(database.base_path + path)
+            raise InputValidationError(
+                f"{exc} Stored result table: {location}"
+            ) from exc
+    return table
+
+
+def _check_result_table(table: pa.Table, record_id_column: str | None) -> None:
+    """Refuse reserved output names using the result table's own column roles."""
+    names = set(table.column_names)
+    bookkeeping = {column.name for column in COMMON_RESULT_COLUMNS}
+    if record_id_column is not None:
+        bookkeeping.add(record_id_column)
+    bookkeeping.update(
+        name
+        for name in names
+        if name.startswith(
+            (constants.PF_VARIATION_PREFIX, constants.PF_EXECUTION_PREFIX)
+        )
+    )
+    source_info = {
+        f"{constants.SOURCE_PREFIX}{name}"
+        for name in names
+        if not name.startswith(constants.DATAGRAM_PREFIX)
+    }
+    require_names_not_system(names - bookkeeping - source_info)
 
 
 class ResultCache:
@@ -369,6 +411,16 @@ class ResultCache:
 
         if result_table is None or result_table.num_rows == 0:
             return None
+
+        try:
+            _check_result_table(result_table, RECORD_ID_COL)
+        except InputValidationError as exc:
+            location = "/".join(
+                self._result_database.base_path + self._versioned_record_path
+            )
+            raise InputValidationError(
+                f"{exc} Stored result table: {location}"
+            ) from exc
 
         if result_table.num_rows > 1:
             logger.info(
@@ -585,8 +637,10 @@ class ResultCache:
         self._account_for_stale_tables(data_context_key)
 
         record_id_column = constants.DATA_RECORD_ID if include_system_columns else None
-        result_table = self._result_database.get_all_records(
-            self._versioned_record_path, record_id_column=record_id_column
+        result_table = read_stored_result_table(
+            self._result_database,
+            self._versioned_record_path,
+            record_id_column=record_id_column,
         )
         if result_table is None:
             return None

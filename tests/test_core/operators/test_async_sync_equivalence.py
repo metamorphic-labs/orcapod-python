@@ -923,6 +923,11 @@ CASES = [
         lambda: (source_a(with_data_tags=True),),
     ),
     Case(
+        "ref_pick",
+        lambda: Pick("d", "q", out="picked"),
+        lambda: (source_a(with_data_tags=True),),
+    ),
+    Case(
         "ref_drop_nulls_all",
         lambda: DropNulls(),
         lambda: (source_a(with_data_tags=True),),
@@ -2251,8 +2256,8 @@ def test_a_stream_refuses_a_tag_named_with_the_meta_prefix() -> None:
 
 
 def test_a_source_refuses_a_tag_named_with_the_meta_prefix() -> None:
-    """Not "tag column not found": the source would drop the meta column first."""
-    with pytest.raises(InputValidationError, match="'__g'.*reserved for meta"):
+    """The source reports the reserved name even when it was requested as a tag."""
+    with pytest.raises(InputValidationError, match="'__g'.*drop them first"):
         _ = ArrowTableSource(
             _table_with_meta_named_column(),
             tag_columns=["k", "__g"],

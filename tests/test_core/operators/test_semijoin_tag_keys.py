@@ -271,7 +271,7 @@ def test_filter_without_the_warning() -> None:
     """Reduce the right input to its tags plus one renamed data column: no warning."""
     source = left_source()
     subset = PolarsFilter(constraints={"id": 2})(left_source())
-    keys_only = subset.select_data_columns(["x"]).map_data({"x": "_x"})
+    keys_only = subset.select_data_columns(["x"]).map_data({"x": "right_x"})
     with warnings.catch_warnings():
         warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
         result = SemiJoin()(source, keys_only)

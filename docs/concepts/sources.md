@@ -218,6 +218,16 @@ categorical column) is not a dictionary column: it is a library value, stored an
 (see [Arrays and other library values](arrays.md)), and is accepted. Supporting
 dictionary-encoded columns themselves is future work (ITL-1277).
 
+`DataFrameSource` uses Polars to infer the columns of Python inputs and checks the
+resulting column names for reserved names.
+
+Named Python rows returned to `PollingSource` must supply the same fields.
+For sparse mappings, include every key and use `None` for missing values. A namedtuple
+can supply the column names for positional rows of the same width. Different model or
+dataclass classes can share a batch when conversion keeps each field in its named
+column and preserves its value. If conversion would lose a value, the error identifies
+the column. Use a common type that can represent all its values exactly.
+
 ### A CSV file's types: `schema=`
 
 A CSV file holds text only, so `CSVSource` infers each column's type from the file, and

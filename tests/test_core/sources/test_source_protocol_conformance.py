@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import pyarrow as pa
 import pytest
+
+from orcapod.errors import InputValidationError
 import polars as pl
 
 from orcapod.core.sources import (
@@ -460,16 +462,14 @@ class TestEdgeCases:
         with pytest.raises(ValueError, match="not found"):
             DataFrameSource(data=df, tag_columns="nonexistent", tag_only_columns=True)
 
-    def test_arrow_source_strips_system_columns_from_input(self):
-        """System columns in the input table are silently dropped."""
+    def test_arrow_source_refuses_system_columns_in_input(self):
         table = pa.table(
             {
                 "x": pa.array([1, 2], type=pa.int64()),
                 "_tag_something": pa.array(["a", "b"], type=pa.large_string()),
             }
         )
-        src = ArrowTableSource(table=table, infer_nullable=True)
-        # system columns should not appear in data keys
-        tag_keys, data_keys = src.keys()
-        assert "_tag_something" not in tag_keys
-        assert "_tag_something" not in data_keys
+        with pytest.raises(
+            InputValidationError, match="'_tag_something'.*drop them first"
+        ):
+            ArrowTableSource(table=table, infer_nullable=True)

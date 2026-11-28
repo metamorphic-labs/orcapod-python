@@ -9,7 +9,7 @@ import pytest
 
 from orcapod.core.sources.stream_builder import SourceStreamBuilder, SourceStreamResult
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
-from orcapod.errors import RowIdentifierError
+from orcapod.errors import InputValidationError, RowIdentifierError
 
 
 class TestSourceStreamBuilder:
@@ -96,7 +96,7 @@ class TestSourceStreamBuilder:
         )
         assert result.stream.as_table().num_rows == 2
 
-    def test_build_drops_system_columns_from_input(self, builder):
+    def test_build_refuses_system_columns_in_input(self, builder):
         table = pa.table(
             {
                 "id": pa.array([1]),
@@ -104,9 +104,10 @@ class TestSourceStreamBuilder:
                 "__system_col": pa.array(["sys"]),
             }
         )
-        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
-        tag_schema, data_schema = result.stream.output_schema()
-        assert "__system_col" not in data_schema
+        with pytest.raises(
+            InputValidationError, match="'__system_col'.*drop them first"
+        ):
+            builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
 
 
 class TestSourceStreamBuilderRespectsSchema:

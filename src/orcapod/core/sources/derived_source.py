@@ -610,6 +610,10 @@ class DerivedSource(RootSource):
             table: Rows of the origin.
             tags_as_data: Maps a tag column of the origin to the name of its copy.
         """
+        # A job node's stored records can include the context of their own rows.
+        # The builder attaches this source's context when it enriches the user columns.
+        if constants.CONTEXT_KEY in table.column_names:
+            table = table.drop([constants.CONTEXT_KEY])
         for tag, name in tags_as_data.items():
             # The copy is the tag's own Arrow column under a renamed field, so its
             # type, nullability and field metadata are the tag's exactly.

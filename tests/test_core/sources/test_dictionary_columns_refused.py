@@ -281,23 +281,18 @@ def test_a_raw_stream_refuses_a_dictionary_in_orcapods_own_columns(
     assert f"- {role} column {column!r} has type dictionary<" in str(info.value)
 
 
-OWN_COLUMNS = {
-    "__note": "meta",
-    "_source_v": "source-info",
-    "_tag_source_id::abc": "system-tag",
-}
+OWN_COLUMNS = ("__note", "_source_v", "_tag_source_id::abc")
 
 
 @pytest.mark.parametrize(
-    "own", [("__note",), ("_source_v",), ("_tag_source_id::abc",), tuple(OWN_COLUMNS)]
+    "own", [("__note",), ("_source_v",), ("_tag_source_id::abc",), OWN_COLUMNS]
 )
 @pytest.mark.parametrize("with_user_column", [False, True], ids=["alone", "beside-v"])
 @pytest.mark.parametrize("own_first", [False, True], ids=["user-first", "own-first"])
-def test_a_source_refuses_a_dictionary_in_hand_built_system_columns(
+def test_a_source_reports_reserved_names_before_dictionary_types(
     own: tuple[str, ...], with_user_column: bool, own_first: bool
 ) -> None:
-    """The builder checks before it drops system columns (CodeRabbit on PR 455): a
-    dictionary-free system column is still stripped, a dictionary one is refused."""
+    """A reserved raw name is refused before the dictionary diagnostic."""
     user: dict[str, pa.Array[Any]] = {
         "a": pa.array(["x", "y"]),
         "b": pa.array(["p", "q"]),
@@ -313,11 +308,11 @@ def test_a_source_refuses_a_dictionary_in_hand_built_system_columns(
         ArrowTableSource(table, tag_columns=["a", "b"], tag_only_columns=True)
     message = str(info.value)
     for name in own:
-        assert f"- {OWN_COLUMNS[name]} column {name!r} has type dictionary<" in message
-    assert ("- data column 'v'" in message) == with_user_column
+        assert repr(name) in message
+    assert "drop them first" in message
 
 
-def test_a_dictionary_free_system_column_is_still_stripped() -> None:
+def test_a_dictionary_free_system_column_is_also_refused() -> None:
     table = pa.table(
         {
             "a": ["x", "y"],
@@ -326,8 +321,10 @@ def test_a_dictionary_free_system_column_is_still_stripped() -> None:
             "v": [1, 2],
         }
     )
-    source = ArrowTableSource(table, tag_columns=["a"], tag_only_columns=True)
-    assert source.keys() == (("a",), ("v",))
+    with pytest.raises(
+        InputValidationError, match="'__note'.*'_source_v'.*drop them first"
+    ):
+        ArrowTableSource(table, tag_columns=["a"], tag_only_columns=True)
 
 
 def test_an_opaque_type_over_a_dictionary_is_refused() -> None:

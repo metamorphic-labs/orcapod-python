@@ -23,11 +23,13 @@ import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.data_frame_source import source_dataframe
 from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
+    require_source_column_names,
     require_supported_nullable_types,
 )
 from orcapod.core.streams.view import (
@@ -330,6 +332,7 @@ class PollingSource(RootSource, Generic[T]):
         self._declared_arrow: pa.Schema | None = None
         unified_schema = self._impl.schema()
         if isinstance(unified_schema, pa.Schema):
+            require_source_column_names(unified_schema.names)
             require_supported_nullable_types(unified_schema)
             # Logical types in one form first: a field declared with its identifier
             # in ARROW:extension:* metadata is that logical type (ITL-640).
@@ -350,6 +353,7 @@ class PollingSource(RootSource, Generic[T]):
                 )
             )
         if unified_schema is not None:
+            require_source_column_names(unified_schema.keys())
             tag_cols_set = set(self._tag_columns)
             missing = tag_cols_set - set(unified_schema.keys())
             if missing:
@@ -874,7 +878,7 @@ class PollingSource(RootSource, Generic[T]):
         Returns:
             ``ArrowTableStream`` if data has rows and columns, ``None`` otherwise.
         """
-        df = pl.DataFrame(data)
+        df = source_dataframe(data)
         if len(df.columns) == 0:
             logger.debug(
                 "PollingSource %r: fetch returned data with no columns — skipping stream build",
@@ -891,6 +895,8 @@ class PollingSource(RootSource, Generic[T]):
         skipped so that a spurious all-non-nullable schema is never recorded.
         """
 
+        require_source_column_names(df.columns)
+
         # Handle Object-dtype columns (same pattern as DataFrameSource)
         object_columns = [c for c in df.columns if df[c].dtype == pl.Object]
         if object_columns:
@@ -899,9 +905,8 @@ class PollingSource(RootSource, Generic[T]):
             )
             df = df.with_columns([pl.from_arrow(c) for c in sub_table])
 
-        raw = df.to_arrow()
-        require_supported_nullable_types(raw.schema)
-        arrow_table = arrow_utils.drop_system_columns(raw)
+        arrow_table = df.to_arrow()
+        require_supported_nullable_types(arrow_table.schema)
 
         # Establish canonical schema on first call; apply it on every call.
         if self._canonical_arrow_schema is None:

@@ -831,6 +831,9 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             output_keys = [output_keys]
         # A copy taken once: a later change to the caller's list changes nothing.
         output_keys = tuple(output_keys)
+        # Refuse reserved names at definition time, before inspecting the return
+        # annotation or executing the function.
+        schema_utils.require_names_not_system(output_keys)
         self._output_keys = output_keys
         if function_name is None:
             if hasattr(self._function, "__name__"):
@@ -1602,7 +1605,8 @@ class CachedDataFunction(DataFunctionWrapper):
         Raises:
             InputValidationError: If ``data`` is of another data context than this
                 function's; the wrapped function has not been called then, whatever
-                ``skip_cache_lookup`` and ``skip_cache_insert`` are.
+                ``skip_cache_lookup`` and ``skip_cache_insert`` are. Also raised if
+                the wrapped function returns a data column with a reserved name.
         """
         # Checked before anything else: with ``skip_cache_lookup`` the lookup, which
         # checks it too, does not run, and the function must not be called.
@@ -1618,6 +1622,7 @@ class CachedDataFunction(DataFunctionWrapper):
                 return output_data
         output_data = self._data_function.call(data, logger=logger, **kwargs)
         if output_data is not None:
+            schema_utils.require_names_not_system(output_data.keys())
             if not skip_cache_insert:
                 var_dg, exec_dg = self._build_metadata_datagrams()
                 self._cache.store(
@@ -1645,7 +1650,8 @@ class CachedDataFunction(DataFunctionWrapper):
 
         Raises:
             InputValidationError: If ``data`` is of another data context than this
-                function's; the wrapped function has not been called then.
+                function's; the wrapped function has not been called then. Also raised
+                if the wrapped function returns a data column with a reserved name.
         """
         # Checked before anything else: with ``skip_cache_lookup`` the lookup, which
         # checks it too, does not run, and the function must not be called.
@@ -1663,6 +1669,7 @@ class CachedDataFunction(DataFunctionWrapper):
             data, logger=logger, **kwargs
         )
         if output_data is not None:
+            schema_utils.require_names_not_system(output_data.keys())
             if not skip_cache_insert:
                 var_dg, exec_dg = self._build_metadata_datagrams()
                 self._cache.store(

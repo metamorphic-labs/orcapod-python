@@ -985,6 +985,12 @@ of its identity (GroupBy's `member_order`), never the input's column order.
 
 ### Column naming conventions
 
+All column names beginning with `_` are reserved for Orcapod (ITL-1165). Sources refuse
+raw input with these names and tell callers to rename the columns or drop them first.
+The source's `system_tag_columns` option retains its custom system-tag validation.
+Operators and function pods validate new user column names with
+`schema_utils.require_names_not_system`.
+
 | Prefix | Meaning | Example | Controlled by |
 |--------|---------|---------|---------------|
 | `__` | System metadata | `__data_id`, `__pod_version` | `ColumnConfig(meta=True)` |

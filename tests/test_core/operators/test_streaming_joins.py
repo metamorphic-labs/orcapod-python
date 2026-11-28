@@ -1123,7 +1123,7 @@ def test_an_empty_run_ends_with_the_types_of_the_sync_result(
 
 
 @pytest.mark.parametrize("row_count", [0, 2])
-@pytest.mark.parametrize("column", ["k", "x", "__unused"])
+@pytest.mark.parametrize("column", ["k", "x", "unused", "__unused"])
 @pytest.mark.parametrize(
     "bad_type",
     [
@@ -1152,10 +1152,12 @@ def test_a_source_refuses_a_null_typed_column(
             [arrays[name] for name in order],
             schema=pa.schema([fields[name] for name in order]),
         )
-        with pytest.raises(
-            InputValidationError,
-            match=rf"{column!r}.*declare a supported nullable type",
-        ):
+        message = (
+            rf"{column!r}.*drop them first"
+            if column == "__unused"
+            else rf"{column!r}.*declare a supported nullable type"
+        )
+        with pytest.raises(InputValidationError, match=message):
             ArrowTableSource(
                 table, tag_columns=["k", "g"], tag_only_columns=True, source_id="s"
             )

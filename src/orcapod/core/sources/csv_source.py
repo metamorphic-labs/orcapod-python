@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import io
 import math
 import os
 import re
@@ -19,6 +20,7 @@ from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     SourceStreamResult,
     require_custom_system_tags,
+    require_source_column_names,
     require_supported_nullable_types,
 )
 from orcapod.utils import arrow_utils
@@ -27,6 +29,57 @@ from orcapod.utils.schema_utils import _normalize_column_list
 _INFINITY = re.compile(r"\s*[+-]?inf(inity)?\s*", re.IGNORECASE)
 """The texts pyarrow's CSV reader reads as an infinity: ``inf`` or ``infinity``, any
 case, with an optional sign and surrounding spaces."""
+
+_CSV_UNQUOTED = re.compile(r"[^,\r\n]*")
+_CSV_QUOTED = re.compile(r'(?:[^"]++|"")*+')
+
+
+def _csv_header_names(text: io.TextIOBase) -> list[str]:
+    """Read the first nonempty CSV record without a field size limit."""
+    line = next((line for line in text if line not in ("\n", "\r", "\r\n")), "")
+    if not line:
+        return []
+
+    names: list[str] = []
+    pos = 0
+    while True:
+        quoted: list[str] = []
+        if line[pos : pos + 1] == '"':
+            pos += 1
+            while True:
+                field = _CSV_QUOTED.match(line, pos)
+                assert field is not None
+                quoted.append(field[0])
+                pos = field.end()
+                if pos < len(line):
+                    pos += 1  # Closing quote. Doubled quotes belong to the field.
+                    break
+                line = text.readline()
+                if not line:
+                    return names  # Leave the unfinished field for Arrow to diagnose.
+                pos = 0
+
+        field = _CSV_UNQUOTED.match(line, pos)
+        assert field is not None
+        names.append("".join(quoted).replace('""', '"') + field[0])
+        pos = field.end()
+        if line[pos : pos + 1] != ",":
+            return names
+        pos += 1
+
+
+def _require_csv_header_names(
+    stream: pa.NativeFile, system_tag_columns: Collection[str]
+) -> None:
+    """Check the first nonempty CSV record before Arrow parses any values."""
+    with io.TextIOWrapper(
+        stream,  # pyright: ignore[reportArgumentType]  # NativeFile implements the buffer methods TextIOWrapper uses.
+        encoding="utf-8-sig",
+        errors="surrogateescape",
+        newline="",
+    ) as text:
+        names = _csv_header_names(text)
+    require_source_column_names(names, system_tag_columns)
 
 
 def _storage_type(declared: pa.DataType) -> pa.DataType:
@@ -158,6 +211,10 @@ def _read_declared(
     import pyarrow.compute as pc
     import pyarrow.csv as pa_csv
 
+    # Check the same snapshot the typed parser will receive.
+    with pa.input_stream(path) as stream:
+        data = stream.read()
+    _require_csv_header_names(pa.BufferReader(data), system_tag_columns)
     reader_types: dict[str, pa.DataType] = {}
     for field in schema:
         try:
@@ -167,8 +224,6 @@ def _read_declared(
             raise
     text_like = [f.name for f in schema if _is_text_like(f.type)]
     # One snapshot of the file, and one set of read and parse options, for every parse.
-    with pa.input_stream(path) as stream:
-        data = stream.read()
     read_options = pa_csv.ReadOptions()
     parse_options = pa_csv.ParseOptions()
     # pyarrow's default null markers, which the reader applies to other columns.
@@ -198,6 +253,7 @@ def _read_declared(
         table = parse(as_text(text_like, []))  # text-like columns only: one parse
     else:
         table = parse(pa_csv.ConvertOptions(column_types=reader_types))
+    require_source_column_names(table.column_names, system_tag_columns)
     if table.column_names != schema.names:
         raise ValueError(
             f"the file's columns {table.column_names} are not the schema's fields "
@@ -347,9 +403,14 @@ class CSVSource(RootSource):
         import pyarrow.csv as pa_csv
 
         if self._schema is None:
+            _require_csv_header_names(
+                pa.input_stream(self._access_path), self._system_tag_columns
+            )
             table: pa.Table = pa_csv.read_csv(self._access_path)
+            require_source_column_names(table.column_names, self._system_tag_columns)
             require_supported_nullable_types(table.schema)
             return table.cast(arrow_utils.infer_schema_nullable(table))
+        require_source_column_names(self._schema.names, self._system_tag_columns)
         require_supported_nullable_types(self._schema)
         try:
             return _read_declared(

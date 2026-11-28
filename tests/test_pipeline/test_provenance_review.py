@@ -19,15 +19,19 @@ together they also cover the review's list of missing coverage. The rules they h
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
+from typing_extensions import override
 
-from orcapod import PipelineJob, function_pod
+from orcapod import FunctionPod, PipelineJob, function_pod
+from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import ProvenanceInconsistencyError
+from orcapod.errors import InputValidationError, ProvenanceInconsistencyError
+from orcapod.protocols.core_protocols import DataFunctionProtocol
+from orcapod.types import Schema
 from orcapod.operators import (
     Batch,
     DropTagColumns,
@@ -1005,18 +1009,71 @@ def test_an_inner_list_of_nested_folds_traces_its_members() -> None:
     ]
 
 
-@function_pod(output_keys="_total")
-def underscored(x: int, y: int) -> int:
+@function_pod(output_keys="total")
+def total(x: int, y: int) -> int:
     return x + y
 
 
-def test_an_underscore_data_column_of_an_empty_run_is_a_data_column() -> None:
+@pytest.mark.parametrize("name", ["_total", "_content_hash", "__delta_rs_source"])
+def test_a_function_refuses_a_reserved_output_name_at_definition(name: str) -> None:
+    with pytest.raises(InputValidationError, match=repr(name)):
+        function_pod(output_keys=name)(total_for_reserved_output)
+
+
+def total_for_reserved_output(x: int, y: int) -> int:
+    return x + y
+
+
+def _pair_for_reserved_outputs(x: int, y: int) -> tuple[int, int]:
+    return x, y
+
+
+@pytest.mark.parametrize(
+    "outputs", [("_foo", "_content_hash"), ("_content_hash", "_foo")]
+)
+def test_public_function_pod_validates_custom_declared_outputs(
+    outputs: tuple[str, str],
+) -> None:
+    class CustomFunction(PythonDataFunction):
+        @property
+        @override
+        def output_data_schema(self) -> Schema:
+            return Schema(dict.fromkeys(outputs, int))
+
+    custom = cast(
+        object,
+        CustomFunction(_pair_for_reserved_outputs, output_keys=["left", "right"]),
+    )
+    assert isinstance(custom, DataFunctionProtocol)
+    with pytest.raises(InputValidationError, match="'_content_hash'.*'_foo'"):
+        _ = FunctionPod(data_function=custom)
+
+
+@pytest.mark.parametrize("missing_callable", [False, True], ids=["importable", "proxy"])
+def test_saved_function_pod_refuses_reserved_outputs(missing_callable: bool) -> None:
+    config = FunctionPod.from_fn(
+        _pair_for_reserved_outputs, ["left", "right"]
+    ).to_config()
+    function_config = config["data_function"]["config"]
+    function_config["output_keys"] = ["_foo", "_content_hash"]
+    output_schema = function_config["output_data_schema"]
+    function_config["output_data_schema"] = {
+        "_foo": output_schema["left"],
+        "_content_hash": output_schema["right"],
+    }
+    if missing_callable:
+        function_config["callable_name"] = "unavailable_function"
+    with pytest.raises(InputValidationError, match="'_content_hash'.*'_foo'"):
+        FunctionPod.from_config(config, fallback_to_proxy=missing_callable)
+
+
+def test_a_data_column_of_an_empty_run_is_a_data_column() -> None:
     source = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "src")
     job = PipelineJob(name="under", database=InMemoryArrowDatabase())
     with job:
-        underscored.pod(Filter({"x": 999})(source), label="sums")
+        total.pod(Filter({"x": 999})(source), label="sums")
     job.run()
-    empty = job.nodes["sums"].trace({"k": "a", "g": "1"}, "_total")
+    empty = job.nodes["sums"].trace({"k": "a", "g": "1"}, "total")
     assert (empty.status, empty.matched) == ("no_match", 0)
     with pytest.raises(ValueError, match="not a data column"):
         job.nodes["sums"].trace({"k": "a", "g": "1"}, "k")

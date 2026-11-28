@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import sqlite3
-from collections.abc import Collection
+from array import array
+from collections import UserList, deque
+from re import escape
+from collections.abc import Collection, Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypedDict
 
 import deltalake
 import polars as pl
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pytest
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    computed_field,
+    model_serializer,
+)
 
 from orcapod import PipelineJob
 from orcapod.contexts.stored import with_data_context
@@ -40,6 +54,9 @@ from orcapod.types import CacheMode, ColumnInfo, Cursor
 from tests.test_core.sources.test_db_table_source import MockDBConnector
 from tests.test_databases import fake_spiral_sdk
 
+if TYPE_CHECKING:
+    from polars._typing import FrameInitTypes
+
 TAGS = ("g", "k")
 SOURCE_KINDS = (
     "arrow",
@@ -58,7 +75,7 @@ class _SourceOptions(TypedDict):
     """Keyword arguments supported by the sources in the validation matrix."""
 
     tag_columns: Collection[str]
-    tag_only_columns: bool
+    tag_only_columns: bool | Collection[str]
     source_id: str
     system_tag_columns: Collection[str]
 
@@ -97,11 +114,13 @@ def _source(
     monkeypatch: pytest.MonkeyPatch,
     *,
     system_tag_columns: Collection[str] = (),
+    tag_columns: Collection[str] = TAGS,
+    tag_only_columns: bool | Collection[str] = True,
 ) -> StreamProtocol:
     """Build the named source over the same columns using its regular reader."""
     options: _SourceOptions = {
-        "tag_columns": TAGS,
-        "tag_only_columns": True,
+        "tag_columns": tag_columns,
+        "tag_only_columns": tag_only_columns,
         "source_id": "rows",
         "system_tag_columns": system_tag_columns,
     }
@@ -122,7 +141,7 @@ def _source(
         file = path / "rows.db"
         types = {pa.string(): "TEXT", pa.int64(): "INTEGER"}
         cols = ", ".join(
-            f"{f.name} {types[f.type]}" + ("" if f.nullable else " NOT NULL")
+            f'"{f.name}" {types[f.type]}' + ("" if f.nullable else " NOT NULL")
             for f in table.schema
         )
         with sqlite3.connect(file) as conn:
@@ -150,6 +169,758 @@ def _source(
         return PostgreSQLTableSource("postgresql://localhost/test", "rows", **options)
     assert kind == "db"
     return DBTableSource(connector, "rows", **options)
+
+
+@pytest.mark.parametrize("kind", SOURCE_KINDS)
+@pytest.mark.parametrize("role", ["data", "tag", "data-tag"])
+@pytest.mark.parametrize("first", [False, True])
+def test_raw_sources_refuse_all_reserved_columns(
+    kind: str, role: str, first: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    table = pa.table(
+        {
+            "g": ["a", "b"],
+            "k": [1, 2],
+            "x": [3, 4],
+            "y": [5, 6],
+            "_foo": ["a", "b"],
+            "_content_hash": ["c", "d"],
+        }
+    )
+    if first:
+        table = table.select(["_content_hash", "g", "_foo", "k", "y", "x"])
+    tags = TAGS if role == "data" else (*TAGS, "_foo")
+    with pytest.raises(InputValidationError, match="drop them first") as info:
+        _source(
+            kind,
+            table,
+            tmp_path,
+            monkeypatch,
+            tag_columns=tags,
+            tag_only_columns=TAGS if role == "data-tag" else True,
+        )
+    assert "'_foo'" in str(info.value)
+    assert "'_content_hash'" in str(info.value)
+
+
+@pytest.mark.parametrize("arrow_schema", [False, True], ids=["python", "arrow"])
+def test_dict_source_refuses_reserved_fields_omitted_from_schema(
+    arrow_schema: bool,
+) -> None:
+    schema = (
+        pa.schema(
+            [
+                ("g", pa.string()),
+                ("k", pa.int64()),
+                ("x", pa.int64()),
+                ("y", pa.int64()),
+            ]
+        )
+        if arrow_schema
+        else {"g": str, "k": int, "x": int, "y": int}
+    )
+    rows = [
+        {"g": "a", "k": 1, "x": 2, "y": 3, "_foo": 4},
+        {"g": "b", "k": 2, "x": 3, "y": 4, "_source_x": 5},
+    ]
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        DictSource(rows, tag_columns=TAGS, tag_only_columns=True, data_schema=schema)
+
+
+class _UnreadableRows(Collection[dict[str, int]]):
+    def __init__(self, first: dict[str, int] | None = None) -> None:
+        self.first = first
+
+    def __contains__(self, value: object) -> bool:
+        return value == self.first
+
+    def __len__(self) -> int:
+        return 2 if self.first is not None else 1
+
+    def __iter__(self) -> Iterator[dict[str, int]]:
+        if self.first is not None:
+            yield self.first
+        raise AssertionError("the source read past a reserved name")
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        None,
+        {"_raw": int, "_also_raw": int},
+        pa.schema([("_raw", pa.int64()), ("_also_raw", pa.int64())]),
+    ],
+    ids=["row", "python-schema", "arrow-schema"],
+)
+def test_dict_source_reports_known_reserved_names_before_reading_further(
+    schema: dict[str, type] | pa.Schema | None,
+) -> None:
+    first = {"x": 1, "_raw": 2, "_also_raw": 3} if schema is None else None
+    with pytest.raises(
+        InputValidationError, match="'_also_raw'.*'_raw'.*rename.*drop them first"
+    ):
+        DictSource(_UnreadableRows(first), data_schema=schema)
+
+
+def test_csv_refuses_reserved_declared_columns_before_parsing_values(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rows.csv"
+    path.write_text("g,k,x,y,_foo,_source_x\na,1,2,3,invalid,token\n")
+    schema = pa.schema(
+        [
+            ("g", pa.string()),
+            ("k", pa.int64()),
+            ("x", pa.int64()),
+            ("y", pa.int64()),
+            ("_foo", pa.int64()),
+            ("_source_x", pa.string()),
+        ]
+    )
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        CSVSource(str(path), tag_columns=TAGS, tag_only_columns=True, schema=schema)
+
+
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "inferred"])
+@pytest.mark.parametrize("header_kind", ["short", "long-quoted", "long-unquoted"])
+@pytest.mark.parametrize("refresh", [False, True], ids=["construction", "refresh"])
+def test_csv_refuses_reserved_header_before_parsing_bad_rows(
+    tmp_path: Path, declared: bool, header_kind: str, refresh: bool
+) -> None:
+    path = tmp_path / "rows.csv"
+    schema = pa.schema([("k", pa.int64()), ("x", pa.int64())]) if declared else None
+
+    def build() -> CSVSource:
+        return CSVSource(
+            str(path), tag_columns=["k"], tag_only_columns=True, schema=schema
+        )
+
+    source = None
+    if refresh:
+        path.write_text("k,x\n1,2\n3,4\n")
+        source = build()
+    # Cross the csv module's default size limit with a quoted field and an escaped quote.
+    first = (
+        '"' + "x" * 131073 + '\r\n,""name"'
+        if header_kind == "long-quoted"
+        else "x" * 131073
+        if header_kind == "long-unquoted"
+        else "k"
+    )
+    path.write_text(
+        f'\ufeff\r\n{first},x,"_foo","_source_x"\r\n1,invalid,token,source,extra\r\n'
+    )
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        if source is not None:
+            source.check_for_new_data()
+        else:
+            build()
+
+
+def test_polling_stops_at_first_reserved_series_in_iterator() -> None:
+    def columns() -> Iterator[pl.Series]:
+        yield pl.Series("k", [1, 2])
+        yield pl.Series("_foo", [3, 4])
+        pytest.fail("reserved columns must stop iteration")
+
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        PollingSource(
+            _Poll(None, columns()), ["k"], source_id="poll", record_id_columns="k"
+        ).as_table()
+
+
+@pytest.mark.parametrize("as_iterator", [False, True], ids=["sequence", "iterator"])
+def test_dataframe_source_uses_inferred_positional_column_names(
+    as_iterator: bool,
+) -> None:
+    from collections import namedtuple
+
+    row = namedtuple("ReservedRecord", ["k", "_hidden"], rename=True)
+    rows: list[Any] = [(1, 2), row(3, 4)]
+    expected = pl.DataFrame(iter(rows) if as_iterator else rows)
+    source = DataFrameSource(iter(rows) if as_iterator else rows)
+    assert source.as_table().to_pylist() == expected.to_dicts()
+
+
+@pytest.mark.parametrize("as_iterator", [False, True], ids=["sequence", "iterator"])
+def test_polling_adds_row_context_to_field_name_error(
+    as_iterator: bool,
+) -> None:
+    rows: list[Any] = [{"k": 1, "g": "a", "x": 3, "y": 5}, {1: 2}]
+    with pytest.raises(
+        InputValidationError, match=r"Source row 1.*needs string field names"
+    ) as info:
+        PollingSource(
+            _Poll(None, iter(rows) if as_iterator else rows),
+            TAGS,
+            source_id="poll",
+            record_id_columns="k",
+        ).as_table()
+    cause = info.value.__cause__
+    assert isinstance(cause, InputValidationError)
+    assert str(cause) == "needs string field names."
+
+
+def _late_reserved_rows(reverse: bool) -> list[dict[str, int]]:
+    rows = [{"g": 0, "k": i, "x": i + 1, "y": i + 2} for i in range(1002)]
+    names = ("_foo", "_source_x")
+    if reverse:
+        names = names[::-1]
+    rows[-2][names[0]] = 3
+    rows[-1][names[1]] = 4
+    return rows
+
+
+@pytest.mark.parametrize("iterable", [list, iter], ids=["sequence", "iterator"])
+def test_dataframe_source_checks_inferred_column_names(iterable) -> None:
+    rows = [{"k": 1, "x": 2, "_foo": 3, "_source_x": 4}]
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        DataFrameSource(iterable(rows), tag_columns=["k"], tag_only_columns=True)
+
+
+@pytest.mark.parametrize("iterable", [list, iter], ids=["sequence", "iterator"])
+def test_dataframe_source_preserves_polars_inference_window(iterable) -> None:
+    rows = _late_reserved_rows(False)
+    expected = pl.DataFrame(iterable(rows))
+    source = DataFrameSource(iterable(rows), tag_columns=TAGS, tag_only_columns=True)
+    assert source.as_table().to_pylist() == expected.select(*TAGS, "x", "y").to_dicts()
+
+
+def test_dataframe_source_preserves_inference_for_single_pass_rows() -> None:
+    def rows() -> Iterator[dict[str, int]]:
+        row = {"g": 0, "k": 0, "x": 1, "y": 2}
+        for i in range(1002):
+            row["k"] = i
+            yield row
+
+    expected = DataFrameSource(
+        pl.DataFrame(rows()), tag_columns=TAGS, tag_only_columns=True
+    )
+    source = DataFrameSource(rows(), tag_columns=TAGS, tag_only_columns=True)
+    assert source.as_table().equals(expected.as_table())
+    assert source.source_id == expected.source_id
+
+
+def test_polling_stops_after_the_first_invalid_iterator_row() -> None:
+    def rows() -> Iterator[dict[str, int]]:
+        yield {"k": 1, "x": 2, "_foo": 3, "_source_x": 4}
+        pytest.fail("reserved fields must stop iteration")
+
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        PollingSource(
+            _Poll(None, rows()), ["k"], source_id="poll", record_id_columns="k"
+        ).as_table()
+
+
+@dataclass
+class _FrameRow:
+    k: int
+    x: int
+
+
+@dataclass
+class _EquivalentFrameRow:
+    k: int
+    x: int
+
+
+@dataclass
+class _ReservedFrameRow:
+    k: int
+    _foo: int
+
+
+@dataclass
+class _ExtendedFrameRow(_FrameRow):
+    _foo: int
+
+
+@dataclass
+class _RenamedFrameRow:
+    k: int
+    y: int
+
+
+@dataclass
+class _ReorderedFrameRow:
+    x: int
+    k: int
+
+
+@dataclass
+class _NestedFrameValue:
+    value: int
+
+
+@dataclass
+class _NestedFrameRow:
+    k: int
+    x: _NestedFrameValue
+
+
+@dataclass
+class _ReorderedNestedFrameRow:
+    x: _NestedFrameValue
+    k: int
+
+
+@dataclass
+class _TypedFrameRow:
+    k: int
+    g: str
+    x: float
+    y: int
+
+
+@dataclass
+class _ReorderedTypedFrameRow:
+    y: int
+    g: str
+    x: float
+    k: int
+
+
+class _TypedFrameModel(BaseModel):
+    k: int
+    g: str
+    x: list[int]
+    y: int
+
+
+class _ReorderedTypedFrameModel(BaseModel):
+    y: int
+    g: str
+    x: list[int]
+    k: int
+
+
+class _FrameModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    k: int
+    x: int
+
+
+class _PlainFrameModel(BaseModel):
+    k: int
+    x: int
+
+
+class _EquivalentFrameModel(_PlainFrameModel):
+    pass
+
+
+class _AliasedFrameModel(_PlainFrameModel):
+    model_config = ConfigDict(serialize_by_alias=True)
+    x: int = Field(serialization_alias="value")
+
+
+class _ReservedComputedFrameModel(_PlainFrameModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def _foo(self) -> int:
+        return 12345
+
+
+class _ComputedFrameModel(_PlainFrameModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total(self) -> int:
+        raise AssertionError(
+            "checking the row layout must not evaluate computed fields"
+        )
+
+
+class _SerializedFrameModel(BaseModel):
+    k: int
+    x: _PlainFrameModel
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        fields = handler(self)
+        if self.k > 100:
+            fields["_foo"] = 12345
+        return fields
+
+
+class _NestedComputedFrameModel(_SerializedFrameModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total(self) -> int:
+        return self.k + self.x.x
+
+
+def _model_with_explicit_attribute() -> _PlainFrameModel:
+    row = _PlainFrameModel(k=2, x=4)
+    object.__setattr__(row, "_raw", 12345)
+    return row
+
+
+FRAME_ROW_CASES = [
+    pytest.param(
+        [None]
+        + [{"k": i, "x": i + 2} for i in range(101)]
+        + [{"k": 101, "x": 102, "_foo": 12345}],
+        "'_foo'.*drop them first",
+        id="leading-null",
+    ),
+    pytest.param(
+        [_FrameRow(i, i + 2) for i in range(101)] + [_ReservedFrameRow(101, 12345)],
+        "'_foo'.*drop them first",
+        id="dataclass-replacement",
+    ),
+    pytest.param(
+        [_FrameRow(i, i + 2) for i in range(101)]
+        + [_ExtendedFrameRow(101, 102, 12345)],
+        "'_foo'.*drop them first",
+        id="dataclass-extension",
+    ),
+    pytest.param(
+        [_FrameModel(k=i, x=i + 2) for i in range(101)]
+        + [_FrameModel.model_validate({"k": 101, "x": 102, "_foo": 12345})],
+        "'_foo'.*drop them first",
+        id="pydantic-extra",
+    ),
+    pytest.param(
+        [_ReservedComputedFrameModel(k=1, x=2)],
+        r"row 0.*'_foo'.*drop them first",
+        id="pydantic-reserved-computed",
+    ),
+    pytest.param(
+        [
+            _PlainFrameModel(k=1, x=2),
+            _PlainFrameModel(k=2, x=4).model_copy(update={"_foo": 3}),
+        ],
+        r"row 1.*'_foo'.*drop them first",
+        id="pydantic-reserved-undeclared",
+    ),
+    pytest.param(
+        [_PlainFrameModel(k=1, x=2), _model_with_explicit_attribute()],
+        r"row 1.*'_raw'.*drop them first",
+        id="pydantic-explicit-instance-attribute",
+    ),
+    pytest.param(
+        [_ComputedFrameModel(k=1, x=2)],
+        r"row 0.*'total'.*mapping",
+        id="pydantic-ordinary-computed",
+    ),
+    pytest.param(
+        [_PlainFrameModel(k=1, x=2).model_copy(update={"total": 3})],
+        r"row 0.*'total'.*mapping",
+        id="pydantic-ordinary-undeclared",
+    ),
+    pytest.param(
+        [_AliasedFrameModel(k=1, x=2)],
+        r"row 0.*'value'.*mapping",
+        id="pydantic-discarded-alias",
+    ),
+    pytest.param(
+        [
+            _SerializedFrameModel(k=i, x=_PlainFrameModel(k=i, x=i + 2))
+            for i in range(102)
+        ],
+        r"'_foo'.*drop them first",
+        id="pydantic-dynamic-serialization",
+    ),
+    pytest.param(
+        [_FrameRow(i, i + 2) for i in range(101)] + [_RenamedFrameRow(101, 12345)],
+        r"row 101.*field names.*'x'.*'y'.*same field names",
+        id="different-legal-fields",
+    ),
+    pytest.param(
+        [{"k": 1, "g": 2, "x": 3, "y": 4}, {"g": 5, "k": 6, "y": 7, "z": 8}],
+        r"row 1.*Missing \['x'\], extra \['z'\].*same field names.*None",
+        id="sparse-mapping",
+    ),
+    pytest.param(
+        [_FrameRow(1, 2), _ReorderedFrameRow(4, 3)],
+        r"row 1.*layout.*'k'.*'x'",
+        id="reordered-typed-fields",
+    ),
+    pytest.param(
+        [_FrameModel.model_validate({"k": 1, "x": 2, "extra": 3})],
+        r"row 0.*'extra'.*mapping",
+        id="legal-model-extra",
+    ),
+    pytest.param(
+        [{"k": 1, "x": 2}, (3, 4)],
+        r"row 1.*field names.*'k'.*'x'",
+        id="mixed-named-and-positional-input",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("row_type", "x_values", "arrow_type"),
+    [
+        (_TypedFrameRow, (2, 4.5), pa.float64()),
+        (_ReorderedTypedFrameRow, (2, 4.5), pa.float64()),
+        (_TypedFrameModel, ([], [4, 5]), pa.large_list(pa.int64())),
+        (_ReorderedTypedFrameModel, ([], [4, 5]), pa.large_list(pa.int64())),
+    ],
+    ids=["dataclass", "dataclass-reordered", "pydantic", "pydantic-reordered"],
+)
+@pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize("tag_order", [TAGS, TAGS[::-1]], ids=["g-k", "k-g"])
+def test_homogeneous_typed_rows_keep_schema_and_identity(
+    row_type: type,
+    x_values: tuple[Any, Any],
+    arrow_type: pa.DataType,
+    use_iterator: bool,
+    tag_order: tuple[str, ...],
+) -> None:
+    rows = [
+        row_type(k=1, g="a", x=x_values[0], y=3),
+        row_type(k=2, g="b", x=x_values[1], y=5),
+    ]
+    frame = pl.DataFrame(rows)
+    expected = DataFrameSource(frame, tag_columns=tag_order, tag_only_columns=True)
+    canonical = DataFrameSource(
+        frame.select("k", "g", "x", "y"), tag_columns=TAGS, tag_only_columns=True
+    )
+    source = DataFrameSource(
+        iter(rows) if use_iterator else rows,
+        tag_columns=tag_order,
+        tag_only_columns=True,
+    )
+    assert source.as_table().schema.field("x").type == arrow_type
+    assert source.as_table().schema == expected.as_table().schema
+    assert source.as_table().equals(expected.as_table())
+    assert (
+        source.as_table()
+        .select(["k", "g", "x", "y"])
+        .equals(canonical.as_table().select(["k", "g", "x", "y"]))
+    )
+    assert source.source_id == expected.source_id == canonical.source_id
+    assert source.content_hash() == expected.content_hash() == canonical.content_hash()
+    assert (
+        source.pipeline_hash() == expected.pipeline_hash() == canonical.pipeline_hash()
+    )
+
+
+@pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
+def test_frame_rows_keep_null_positions_and_match_mapping_fields_by_name(
+    use_iterator: bool,
+) -> None:
+    rows = [None, {"k": 1, "x": 2}, None, {"x": 4, "k": 3}]
+    source = DataFrameSource(
+        iter(rows) if use_iterator else rows, tag_columns=["k"], tag_only_columns=True
+    )
+    assert source.as_table().to_pylist() == [
+        {"k": None, "x": None},
+        {"k": 1, "x": 2},
+        {"k": None, "x": None},
+        {"k": 3, "x": 4},
+    ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_",
+        "_foo",
+        "_tag_y",
+        "_tag::y",
+        "_source_y",
+        "_content_hash",
+        "_context_key",
+        "__meta",
+    ],
+)
+def test_list_source_refuses_reserved_value_column(name: str) -> None:
+    with pytest.raises(InputValidationError, match=escape(repr(name))):
+        ListSource(name, [10, 20])
+
+
+@pytest.mark.parametrize("data", [[], [10, 20]], ids=["empty", "projected"])
+def test_list_source_refuses_reserved_value_name_even_without_arrow_field(
+    data: list[int],
+) -> None:
+    schema = {"element_index": int} if data else None
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        ListSource("_foo", data, data_schema=schema)
+
+
+def test_list_source_refuses_reserved_tags_omitted_from_schema() -> None:
+    def tags(value: int, index: int) -> dict[str, int]:
+        return {"k": index, "g": value, "_foo": value, "_source_x": value}
+
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        ListSource(
+            "x",
+            [10, 20],
+            tag_function=tags,
+            expected_tag_keys=TAGS,
+            data_schema={"k": int, "g": int, "x": int},
+        )
+
+
+def test_list_source_refuses_reserved_tags() -> None:
+    def tags(value: int, index: int) -> dict[str, int]:
+        return {"k": index, "g": value, "_foo": value, "_content_hash": index}
+
+    with pytest.raises(
+        InputValidationError, match="'_content_hash'.*'_foo'.*drop them first"
+    ):
+        ListSource("value", [10, 20], tag_function=tags)
+
+
+def test_list_source_reports_reserved_dict_tags_before_next_callback() -> None:
+    def tags(value: int, index: int) -> dict[str, int]:
+        assert index == 0, "the source called another callback after a reserved name"
+        return {"_raw": value, "_also_raw": value}
+
+    with pytest.raises(
+        InputValidationError, match="'_also_raw'.*'_raw'.*rename.*drop them first"
+    ):
+        ListSource("value", [10, 20], tag_function=tags)
+
+
+def test_rereading_an_orcapod_table_requires_dropping_system_columns() -> None:
+    source = DictSource(
+        [
+            {"g": "a", "k": 1, "x": 3, "y": 4},
+            {"g": "b", "k": 2, "x": 5, "y": 6},
+        ],
+        tag_columns=TAGS,
+        tag_only_columns=True,
+    )
+    raw = source.as_table(all_info=True)
+    system_columns = [name for name in raw.column_names if name.startswith("_")]
+    with pytest.raises(InputValidationError, match="drop them first") as info:
+        ArrowTableSource(raw, tag_columns=TAGS, tag_only_columns=True)
+    assert system_columns
+    assert all(repr(name) in str(info.value) for name in system_columns)
+    rebuilt = ArrowTableSource(
+        raw.drop(system_columns), tag_columns=TAGS, tag_only_columns=True
+    )
+    assert rebuilt.as_table().equals(source.as_table())
+
+
+def test_arrow_source_documents_reserved_column_refusal() -> None:
+    table = pa.table({"k": [1, 2], "g": ["a", "b"], "x": [3, 4], "_foo": [5, 6]})
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        _ = ArrowTableSource(table, tag_columns=TAGS, tag_only_columns=True)
+    assert "refuses reserved column names" in (ArrowTableSource.__doc__ or "")
+
+
+def test_database_refuses_reserved_columns_before_reading_rows() -> None:
+    class SchemaOnlyConnector(_Connector):
+        def iter_batches(self, query, params=None, batch_size=1000):
+            pytest.fail("a reserved database column must prevent reading rows")
+
+    table = _table(pa.field("_foo", pa.string()), ["a", "b"])
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        DBTableSource(
+            SchemaOnlyConnector(table),
+            "rows",
+            tag_columns=TAGS,
+            tag_only_columns=True,
+            source_id="rows",
+        )
+
+
+@pytest.mark.parametrize("metadata", ["absent", "partial"])
+@pytest.mark.parametrize("refresh", [False, True], ids=["construction", "refresh"])
+def test_database_refuses_reserved_batch_names_with_incomplete_metadata(
+    metadata: str, refresh: bool
+) -> None:
+    class Connector(_Connector):
+        def get_column_info(self, table_name: str) -> list[ColumnInfo]:
+            if metadata == "absent":
+                return []
+            return [
+                ColumnInfo(field.name, field.type, field.nullable)
+                for field in list(self.table.schema)[:2]
+            ]
+
+        def iter_batches(
+            self, query: str, params: Any = None, batch_size: int = 1000
+        ) -> Iterator[pa.RecordBatch]:
+            yield from self.table.to_batches(max_chunksize=1)
+            if "_foo" in self.table.column_names:
+                pytest.fail("a reserved name in a batch must prevent further fetches")
+
+    reserved = _table(pa.field("_foo", pa.string()), ["a", "b"]).append_column(
+        "_source_x", pa.array(["c", "d"])
+    )
+    connector = Connector(reserved.drop(["_foo", "_source_x"]) if refresh else reserved)
+
+    def build() -> DBTableSource:
+        return DBTableSource(
+            connector, "rows", tag_columns=TAGS, tag_only_columns=True, source_id="rows"
+        )
+
+    if refresh:
+        source = build()
+        old = source.as_table()
+        connector.table = reserved
+        with pytest.raises(
+            InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+        ):
+            source.check_for_new_data()
+        assert source.as_table().equals(old)
+    else:
+        with pytest.raises(
+            InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+        ):
+            build()
+
+
+@pytest.mark.parametrize("refresh", [False, True], ids=["construction", "refresh"])
+def test_delta_refuses_reserved_names_before_scanning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refresh: bool
+) -> None:
+    path = tmp_path / "delta"
+    reserved = _table(pa.field("_foo", pa.string()), ["a", "b"]).append_column(
+        "_source_x", pa.array(["c", "d"])
+    )
+
+    def fail_scan(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("the Delta log already declares the reserved columns")
+
+    def build() -> DeltaTableSource:
+        return DeltaTableSource(path, tag_columns=TAGS, tag_only_columns=True)
+
+    if refresh:
+        deltalake.write_deltalake(path, reserved.drop(["_foo", "_source_x"]))
+        source = build()
+        old = source.as_table()
+        deltalake.write_deltalake(path, reserved, mode="append", schema_mode="merge")
+        monkeypatch.setattr(deltalake.DeltaTable, "to_pyarrow_dataset", fail_scan)
+        with pytest.raises(
+            InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+        ):
+            source.check_for_new_data()
+        assert source.as_table().equals(old)
+    else:
+        deltalake.write_deltalake(path, reserved)
+        monkeypatch.setattr(deltalake.DeltaTable, "to_pyarrow_dataset", fail_scan)
+        with pytest.raises(
+            InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+        ):
+            build()
+
+
+def test_source_accepts_underscores_after_the_first_character() -> None:
+    source = DictSource(
+        [{"foo_": "a", "a_b": 1, "tag_x": 2, "other": 3}],
+        tag_columns=["foo_", "a_b"],
+        tag_only_columns=True,
+    )
+    assert source.keys() == (("foo_", "a_b"), ("tag_x", "other"))
 
 
 def _table(field: pa.Field[Any], values: list[Any]) -> pa.Table:
@@ -234,7 +1005,7 @@ def test_refuses_arrow_null_from_readers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    column = "unused" if kind == "spiral" else "__unused"
+    column = "unused"
     table = _table(pa.field(column, pa.null()), [None, None])
     with pytest.raises(
         InputValidationError, match=rf"{column!r}.*declare a supported nullable type"
@@ -298,7 +1069,7 @@ def test_no_declared_type_for_python_none_still_infers_a_string() -> None:
 class _Poll:
     """Minimal impl for testing schema validation before the first fetch."""
 
-    def __init__(self, schema: pa.Schema | None, batch: pl.DataFrame) -> None:
+    def __init__(self, schema: pa.Schema | None, batch: FrameInitTypes) -> None:
         self._schema = schema
         self._batch = batch
 
@@ -320,16 +1091,115 @@ class _Poll:
 
     async def fetch(
         self, cursor: Cursor[int] | None = None
-    ) -> tuple[Cursor[int], pl.DataFrame]:
+    ) -> tuple[Cursor[int], FrameInitTypes]:
         """Return the prepared batch on the initial fetch."""
         return Cursor(value=0), self._batch
 
     async def poll(self, cursor: Cursor[int] | None = None) -> bool:
         """There are no rows after the initial fetch."""
-        return False
+        return cursor is None
 
     async def close(self) -> None:
         """There is no connection to close."""
+
+
+@pytest.mark.parametrize("rows, message", FRAME_ROW_CASES)
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
+def test_polling_checks_named_row_shapes(
+    rows: list[Any], message: str, use_async: bool, use_iterator: bool
+) -> None:
+    source = PollingSource(
+        _Poll(None, iter(rows) if use_iterator else rows),
+        ["k"],
+        source_id="poll",
+        record_id_columns="k",
+    )
+
+    async def read_first() -> None:
+        async with contextlib.aclosing(source.async_iter_data()) as records:
+            await anext(records, None)
+
+    with pytest.raises(InputValidationError, match=message):
+        if use_async:
+            asyncio.run(read_first())
+        else:
+            source.as_table()
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_polling_refuses_reserved_frame_names_before_preprocessing(
+    use_async: bool,
+) -> None:
+    batch = pl.DataFrame({"k": [1, 2], "x": [None, None], "_foo": [3, 4]})
+    source = PollingSource(
+        _Poll(None, batch), ["k"], source_id="poll", record_id_columns="k"
+    )
+
+    async def read_first() -> None:
+        async with contextlib.aclosing(source.async_iter_data()) as rows:
+            await anext(rows)
+
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        if use_async:
+            asyncio.run(read_first())
+        else:
+            source.as_table()
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["foo-first", "source-first"])
+@pytest.mark.parametrize("as_tag", [False, True], ids=["data", "tag"])
+def test_polling_checks_raw_fields_beyond_polars_inference(
+    use_async: bool, reverse: bool, as_tag: bool
+) -> None:
+    tags = (*TAGS, "_foo") if as_tag else TAGS
+    source = PollingSource(
+        _Poll(None, _late_reserved_rows(reverse)),
+        tags,
+        source_id="poll",
+        record_id_columns="k",
+    )
+
+    async def read_first() -> None:
+        async with contextlib.aclosing(source.async_iter_data()) as rows:
+            await anext(rows)
+
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        if use_async:
+            asyncio.run(read_first())
+        else:
+            source.check_for_new_data()
+
+
+@pytest.mark.parametrize("declare", [True, False], ids=["schema", "batch"])
+@pytest.mark.parametrize("as_tag", [True, False], ids=["tag", "data"])
+def test_polling_refuses_reserved_schema_and_batch_columns(
+    declare: bool, as_tag: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    table = _table(pa.field("_foo", pa.string()), ["a", "b"])
+    table = table.append_column("_source_x", pa.array(["p", "q"]))
+    batch = pl.from_arrow(table)
+    assert isinstance(batch, pl.DataFrame)
+    tags = (*TAGS, "_foo") if as_tag else TAGS
+    if declare:
+
+        async def unexpected_fetch(*args: Any, **kwargs: Any) -> None:
+            pytest.fail("a reserved declared column must prevent polling")
+
+        monkeypatch.setattr(_Poll, "fetch", unexpected_fetch)
+    with pytest.raises(InputValidationError, match="drop them first") as info:
+        source = PollingSource(
+            _Poll(table.schema if declare else None, batch),
+            tags,
+            source_id="poll",
+            record_id_columns="k",
+        )
+        source.check_for_new_data()
+    assert "'_foo'" in str(info.value)
+    assert "'_source_x'" in str(info.value)
 
 
 @pytest.mark.parametrize("values", [[], [[None], []]])
@@ -337,17 +1207,23 @@ def test_polling_refuses_null_in_declaration_and_batch(values: list[Any]) -> Non
     table = _table(pa.field("__unused", pa.large_list(pa.null())), values)
     batch = pl.from_arrow(table)
     assert isinstance(batch, pl.DataFrame)
-    with pytest.raises(
-        InputValidationError, match=r"'__unused'.*declare a supported nullable type"
-    ):
+    with pytest.raises(InputValidationError, match=r"'__unused'.*drop them first"):
         PollingSource(
             _Poll(table.schema, batch), TAGS, source_id="poll", record_id_columns="k"
         )
+    # A polled batch checks names first, as DataFrameSource does.
     poll = PollingSource(
         _Poll(None, batch), TAGS, source_id="poll", record_id_columns="k"
     )
+    with pytest.raises(InputValidationError, match=r"'__unused'.*drop them first"):
+        poll.check_for_new_data()
+    legal = pl.from_arrow(_table(pa.field("unused", pa.large_list(pa.null())), values))
+    assert isinstance(legal, pl.DataFrame)
+    poll = PollingSource(
+        _Poll(None, legal), TAGS, source_id="poll", record_id_columns="k"
+    )
     with pytest.raises(
-        InputValidationError, match=r"'__unused'.*declare a supported nullable type"
+        InputValidationError, match=r"'unused'.*declare a supported nullable type"
     ):
         poll.check_for_new_data()
 
@@ -377,7 +1253,7 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
     database = InMemoryArrowDatabase()
     cached = CachedSource(proxy, cache_database=database)
     raw = source.as_table(columns={"source": True, "system_tags": True})
-    raw = raw.append_column("__unused", pa.nulls(2))
+    raw = raw.append_column("unused", pa.nulls(2))
     raw = raw.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
     database.add_records(
         cached.cache_path,
@@ -386,7 +1262,7 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
         flush=True,
     )
     with pytest.raises(
-        InputValidationError, match=r"'__unused'.*declare a supported nullable type"
+        InputValidationError, match=r"'unused'.*declare a supported nullable type"
     ):
         cached.as_table()
 
@@ -453,7 +1329,7 @@ def test_derived_source_checks_reserved_columns_before_filtering_storage(
     )
     with pytest.raises(
         InputValidationError,
-        match=r"'__raw_missing'.*declare a supported nullable type",
+        match=r"'__raw_missing'.*reserved.*odb_v2",
     ):
         derived.as_table()
 
@@ -511,7 +1387,492 @@ def test_spiral_validates_reserved_null_in_an_empty_scan_batch(
         )
         monkeypatch.setattr(source, "_lookup_table", lambda: handle)
         monkeypatch.setattr(handle, "scan_batches", lambda **kwargs: iter([batch]))
-        with pytest.raises(
-            InputValidationError, match=r"'__unused'.*declare a supported nullable type"
-        ):
+        with pytest.raises(InputValidationError, match=r"'__unused'.*drop them first"):
             source.as_table()
+
+
+@pytest.mark.parametrize(
+    "kind", ["arrow", "arrow-infer", "dict-schema", "frame-schema", "poll-declaration"]
+)
+def test_raw_reserved_names_precede_arrow_type_validation(kind: str) -> None:
+    table = pa.table({"k": [1, 2], "x": [3, 4], "_one": [None, None], "_two": [4, 5]})
+    with pytest.raises(
+        InputValidationError, match="'_one'.*'_two'.*rename.*drop them first"
+    ):
+        if kind == "poll-declaration":
+            PollingSource(
+                _Poll(table.schema, []), ["k"], source_id="poll", record_id_columns="k"
+            )
+        else:
+            ArrowTableSource(table, ["k"], infer_nullable=kind == "arrow-infer")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "pandas-series",
+        "pandas-index",
+        "namedtuple",
+        "namedtuple-iterator",
+        "numpy",
+        "positional",
+        "positional-iterator",
+        "scalar",
+        "scalar-iterator",
+        "series-iterator",
+        "mixed-dataclasses",
+        "mixed-models",
+        "model-serializer",
+        "model-dump-override",
+        "model-computed-column",
+    ],
+)
+@pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
+def test_named_frame_inputs_keep_polars_conversion(kind: str, path: str) -> None:
+    from collections import namedtuple
+
+    import numpy as np
+    import pandas as pd
+
+    class DumpOverride(_SerializedFrameModel):
+        calls: ClassVar[list[int]] = []
+
+        def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(self.k)
+            return {**super().model_dump(**kwargs), "k": self.k + 10}
+
+    batch: list[Any]
+    if kind == "pandas-series":
+        batch = [pd.Series([1, 2], name="k"), pd.Series([3, 4], name="x")]
+    elif kind == "pandas-index":
+        batch = [pd.Index([1, 2], name="k"), pd.Index([3, 4], name="x")]
+    elif kind.startswith("namedtuple"):
+        row = namedtuple("FrameRecord", ["k", "x"])
+        batch = [row(1, 3), row(2, 4)]
+    elif kind.startswith("positional"):
+        batch = [(1, 3), (2, 4)]
+    elif kind.startswith("scalar"):
+        batch = [1, 2]
+    elif kind == "series-iterator":
+        batch = [pl.Series("k", [1, 2]), pl.Series("x", [3, 4])]
+    elif kind == "mixed-dataclasses":
+        batch = [_FrameRow(1, 3), _EquivalentFrameRow(2, 4)]
+    elif kind == "mixed-models":
+        batch = [_PlainFrameModel(k=1, x=3), _EquivalentFrameModel(k=2, x=4)]
+    elif kind in {"model-serializer", "model-dump-override", "model-computed-column"}:
+        model = {
+            "model-serializer": _SerializedFrameModel,
+            "model-dump-override": DumpOverride,
+            "model-computed-column": _NestedComputedFrameModel,
+        }[kind]
+        batch = [model(k=i, x=_PlainFrameModel(k=i, x=i + 2)) for i in (1, 2)]
+    else:
+        batch = [np.array([1, 2]), np.array([3, 4])]
+
+    use_iterator = kind.endswith("-iterator")
+    data = iter(batch) if use_iterator else batch
+    # Both sources passed the original input straight to Polars on main.
+    frame = pl.DataFrame(iter(batch) if use_iterator else batch)
+    key = frame.columns[0]
+    tags = [key] if frame.width > 1 else []
+    expected = frame.to_dicts()
+    expected_dump_calls = DumpOverride.calls.copy()
+    DumpOverride.calls.clear()
+    if path == "frame":
+        source = DataFrameSource(data, tags, tag_only_columns=True)
+        control = DataFrameSource(frame, tags, tag_only_columns=True)
+        assert source.as_table().equals(control.as_table(), check_metadata=True)
+        assert source.source_id == control.source_id
+        assert source.content_hash() == control.content_hash()
+        assert source.pipeline_hash() == control.pipeline_hash()
+    else:
+        source = PollingSource(
+            _Poll(None, data), tags, source_id="poll", record_id_columns=key
+        )
+        if path == "poll-sync":
+            assert source.as_table().to_pylist() == expected
+        else:
+
+            async def read() -> list[dict[str, Any]]:
+                async with contextlib.aclosing(source.async_iter_data()) as rows:
+                    return [
+                        {**tag.as_dict(), **data.as_dict()}
+                        for tag, data in [await anext(rows) for _ in expected]
+                    ]
+
+            assert asyncio.run(read()) == expected
+    assert DumpOverride.calls == expected_dump_calls
+
+
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize(
+    "tail",
+    [
+        range(3, 5),
+        deque([3, 4]),
+        array("q", [3, 4]),
+        UserList([3, 4]),
+        memoryview(bytes([3, 4])),
+        bytes([3, 4]),
+        bytearray([3, 4]),
+    ],
+    ids=lambda tail: type(tail).__name__,
+)
+def test_dataframe_source_accepts_polars_positional_tails(
+    tail: object, iterator: bool
+) -> None:
+    class Reading(NamedTuple):
+        k: int
+        x: int
+
+    rows: list[Any] = [Reading(1, 2), tail]
+    source = DataFrameSource(
+        iter(rows) if iterator else rows, ["k"], tag_only_columns=True
+    )
+    assert source.as_table().to_pylist() == [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
+
+
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize("alias", ["k", "other"], ids=["overlapping", "distinct"])
+def test_dataframe_source_preserves_flat_model_columns(
+    alias: str, iterator: bool
+) -> None:
+    class Reading(_PlainFrameModel):
+        model_config = ConfigDict(serialize_by_alias=True)
+        x: int = Field(serialization_alias=alias)
+
+    rows = [Reading(k=1, x=2), Reading(k=3, x=4)]
+    source = DataFrameSource(
+        iter(rows) if iterator else rows, ["k"], tag_only_columns=True
+    )
+    assert source.as_table().to_pylist() == [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
+
+
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize(
+    "mixed_classes", [False, True], ids=["same-class", "mixed-class"]
+)
+def test_dataframe_source_preserves_polars_numeric_inference(
+    mixed_classes: bool, iterator: bool
+) -> None:
+    class Reading(NamedTuple):
+        k: int
+        x: int | float
+
+    class OtherReading(NamedTuple):
+        k: int
+        x: int | float
+
+    second = OtherReading if mixed_classes else Reading
+    rows = [Reading(1, 9_007_199_254_740_993), second(2, 1.5)]
+    source = DataFrameSource(
+        iter(rows) if iterator else rows, ["k"], tag_only_columns=True
+    )
+    table = source.as_table()
+    assert table.schema.field("x").type == pa.float64()
+    assert table.to_pylist() == [
+        {"k": 1, "x": 9_007_199_254_740_992.0},
+        {"k": 2, "x": 1.5},
+    ]
+
+
+@pytest.mark.parametrize(
+    "kind", ["tuple", "list", "numpy", "reordered-model", "reordered-nested-dataclass"]
+)
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
+def test_frame_preserves_mixed_rows_with_the_same_columns(
+    kind: str, iterator: bool, path: str
+) -> None:
+    from collections import namedtuple
+
+    import numpy as np
+
+    class ReverseModel(BaseModel):
+        x: int
+        k: int
+
+    rows: list[Any]
+    if kind == "reordered-model":
+        rows = [_PlainFrameModel(k=1, x=2), ReverseModel(k=3, x=4)]
+    elif kind == "reordered-nested-dataclass":
+        rows = [
+            _NestedFrameRow(1, _NestedFrameValue(2)),
+            _ReorderedNestedFrameRow(_NestedFrameValue(4), 3),
+        ]
+    else:
+        record = namedtuple("Record", ["k", "x"])
+        rows = [
+            record(1, 2),
+            {"tuple": tuple, "list": list, "numpy": np.array}[kind]((3, 4)),
+        ]
+    frame = pl.DataFrame(iter(rows) if iterator else rows)
+    expected = [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
+    if kind == "reordered-nested-dataclass":
+        expected = [{"k": 1, "x": {"value": 2}}, {"k": 3, "x": {"value": 4}}]
+    assert frame.to_dicts() == expected
+    data = iter(rows) if iterator else rows
+    if path == "frame":
+        source = DataFrameSource(data, ["k"], tag_only_columns=True)
+        control = DataFrameSource(frame, ["k"], tag_only_columns=True)
+        assert source.as_table().equals(control.as_table(), check_metadata=True)
+        assert source.source_id == control.source_id
+        assert source.content_hash() == control.content_hash()
+        assert source.pipeline_hash() == control.pipeline_hash()
+    else:
+        poll = PollingSource(
+            _Poll(None, data), ["k"], source_id="poll", record_id_columns="k"
+        )
+        assert _read_frame_poll(poll, path, 2) == expected
+
+
+def _read_frame_poll(
+    poll: PollingSource[int], path: str, count: int
+) -> list[dict[str, Any]]:
+    if path == "poll-sync":
+        return poll.as_table().to_pylist()
+
+    async def read() -> list[dict[str, Any]]:
+        async with contextlib.aclosing(poll.async_iter_data()) as rows:
+            return [
+                {**tag.as_dict(), **data.as_dict()}
+                for tag, data in [await anext(rows) for _ in range(count)]
+            ]
+
+    return asyncio.run(read())
+
+
+@pytest.mark.parametrize("kind", ["dataclass", "model"])
+@pytest.mark.parametrize("value", [4.9, 4.0], ids=["lossy", "exact"])
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize("path", ["poll-sync", "poll-async"])
+def test_polling_refuses_lossy_mixed_typed_values(
+    kind: str, value: float, iterator: bool, path: str
+) -> None:
+    @dataclass
+    class FloatRow:
+        k: int
+        x: float
+
+    class FloatModel(BaseModel):
+        k: int
+        x: float
+
+    rows = (
+        [_FrameRow(1, 2), FloatRow(3, value)]
+        if kind == "dataclass"
+        else [_PlainFrameModel(k=1, x=2), FloatModel(k=3, x=value)]
+    )
+    data = iter(rows) if iterator else rows
+    expected = [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
+
+    def read() -> list[dict[str, Any]]:
+        poll = PollingSource(
+            _Poll(None, data), ["k"], source_id="poll", record_id_columns="k"
+        )
+        return _read_frame_poll(poll, path, 2)
+
+    if value == 4.0:
+        assert read() == expected
+    else:
+        with pytest.raises(InputValidationError, match=r"column 'x'.*without losing"):
+            read()
+
+
+@pytest.mark.parametrize("view", ["operator-replay", "operator-records", "derived"])
+def test_operator_storage_refuses_reserved_user_columns(
+    view: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        source_id="rows",
+    )
+    store = InMemoryArrowDatabase()
+    job = PipelineJob(name="stored", database=store)
+    with job:
+        DropNulls(["x", "y"])(source, label="origin")
+    node = job.nodes["origin"]
+    assert isinstance(node, OperatorJobNode)
+    node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
+    job.run()
+    read = store.get_all_records
+
+    def read_legacy_rows(path: tuple[str, ...], *args: Any, **kwargs: Any):
+        table = read(path, *args, **kwargs)
+        if table is not None and path[-1] == "odb_v2":
+            return table.append_column("_foo", pa.array([4] * table.num_rows))
+        return table
+
+    monkeypatch.setattr(store, "get_all_records", read_legacy_rows)
+    with pytest.raises(InputValidationError, match="'_foo'.*reserved.*odb_v2"):
+        if view == "operator-records":
+            node.get_all_records()
+        elif view == "derived":
+            node.as_source().as_table()
+        else:
+            node.attach_databases(pipeline_database=store, cache_mode=CacheMode.REPLAY)
+            node.run(load_only=True)
+
+
+def test_cached_source_refuses_reserved_stored_user_columns() -> None:
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        source_id="rows",
+    )
+    tag_schema, data_schema = source.output_schema()
+    proxy = SourceProxy(
+        source_id=source.source_id,
+        content_hash_str=source.content_hash().to_string(),
+        pipeline_hash_str=source.pipeline_hash().to_string(),
+        tag_schema=tag_schema,
+        data_schema=data_schema,
+    )
+    store = InMemoryArrowDatabase()
+    cached = CachedSource(proxy, cache_database=store)
+    raw = source.as_table(columns={"source": True, "system_tags": True})
+    raw = raw.append_column("_foo", pa.array([4, 5]))
+    raw = raw.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
+    store.add_records(
+        cached.cache_path,
+        with_data_context(raw, source.data_context_key),
+        record_id_column=CachedSource.HASH_COLUMN_NAME,
+        flush=True,
+    )
+    with pytest.raises(InputValidationError, match="'_foo'.*reserved.*sdb_v1"):
+        cached.as_table()
+
+
+@pytest.mark.parametrize("path", ["poll-sync", "poll-async"])
+@pytest.mark.parametrize(
+    ("kind", "field"),
+    [("namedtuple", "_1"), ("namedtuple", "label"), ("series", "_hidden")],
+)
+def test_polling_numpy_first_batch_refuses_names_that_would_be_lost(
+    path: str, kind: str, field: str
+) -> None:
+    from collections import namedtuple
+
+    import numpy as np
+
+    column: Any
+    if kind == "series":
+        column = pl.Series(field, [3, 4])
+    elif field == "_1":
+        row = namedtuple("ReservedRecord", ["label", "_hidden"], rename=True)
+        column = row(3, 4)
+    else:
+        row = namedtuple("OrdinaryRecord", ["label", "value"])
+        column = row(3, 4)
+    batch = [np.array([1, 2]), column]
+
+    with pytest.raises(InputValidationError, match=escape(repr(field))):
+        source = PollingSource(
+            _Poll(None, batch),
+            ["column_0"],
+            source_id="poll",
+            record_id_columns="column_0",
+        )
+        _read_frame_poll(source, path, 2)
+
+
+@pytest.mark.parametrize("system_field", ["_tag_fake", "_tag::fake"])
+def test_list_source_checks_callback_tag_before_projection(system_field: str) -> None:
+    from orcapod.core.datagrams import Tag
+
+    def tag(value: int, index: int) -> Tag:
+        return Tag({"label": index, system_field: value, "__meta": value})
+
+    with pytest.raises(InputValidationError) as exc:
+        ListSource("value", [1, 2], tag_function=tag, expected_tag_keys=["label"])
+    assert repr(system_field) in str(exc.value)
+    assert "'__meta'" in str(exc.value)
+    assert "drop them first" in str(exc.value)
+
+    valid = ListSource(
+        "value", [3], tag_function=lambda _, index: Tag({"label": index})
+    )
+    assert valid.as_table().to_pylist() == [{"label": 0, "value": 3}]
+
+
+def test_dataframe_source_checks_declared_names_before_reading_input() -> None:
+    def unreadable() -> Iterator[dict[str, int]]:
+        yield from ()
+        raise AssertionError("should reject the declared name before reading rows")
+
+    with pytest.raises(InputValidationError, match="'_schema'.*drop them first"):
+        DataFrameSource(unreadable(), schema=pa.schema([("_schema", pa.int64())]))
+
+
+@pytest.mark.parametrize("kind", ["pandas", "arrow"])
+@pytest.mark.parametrize("path", ["frame", "poll-sync"])
+def test_frame_checks_raw_names_before_duplicate_column_error(
+    kind: str, path: str
+) -> None:
+    import pandas as pd
+
+    names = ["x", "x", "_one", "_two"]
+    batch = (
+        pd.DataFrame([[1, 2, 3, 4]], columns=pd.Index(names))
+        if kind == "pandas"
+        else pa.Table.from_arrays([pa.array([i]) for i in range(4)], names=names)
+    )
+    with pytest.raises(InputValidationError, match="'_one'.*'_two'.*drop them first"):
+        if path == "frame":
+            DataFrameSource(batch)
+        else:
+            PollingSource(
+                _Poll(None, batch), ["x"], source_id="poll", record_id_columns="x"
+            ).as_table()
+
+
+def test_stored_column_validators_use_only_column_roles() -> None:
+    from orcapod.core.result_cache import _check_result_table
+    from orcapod.utils.schema_utils import require_stored_stream_column_names
+
+    with pytest.raises(InputValidationError, match="'_tag_fake'.*reserved"):
+        _check_result_table(pa.table({"_tag_fake": [1]}), None)
+    with pytest.raises(InputValidationError, match="'_foo'.*reserved"):
+        require_stored_stream_column_names(["_foo"], ())
+
+
+def test_stored_operator_checks_user_names_from_descriptor() -> None:
+    source = ArrowTableSource(
+        pa.table({"k": [1, 2], "x": [3, 4]}), tag_columns=["k"], tag_only_columns=True
+    )
+    store = InMemoryArrowDatabase()
+    job = PipelineJob(name="stored", database=store)
+    with job:
+        DropNulls(["x"])(source, label="origin")
+    node = job.nodes["origin"]
+    assert isinstance(node, OperatorJobNode)
+    node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
+    job.run()
+
+    legacy_name = "_tag_legacy"
+    path = (*node.node_identity_path, "odb_v2")
+    records = store.get_all_records(path, record_id_column=node.HASH_COLUMN_NAME)
+    assert records is not None
+    legacy_records = records.append_column(legacy_name, pa.array([4, 5]))
+    legacy_store = InMemoryArrowDatabase()
+    legacy_store.add_records(
+        path, legacy_records, record_id_column=node.HASH_COLUMN_NAME, flush=True
+    )
+    loaded = OperatorJobNode.from_descriptor(
+        {
+            "label": "origin",
+            "output_schema": {"data": {legacy_name: "int"}},
+            "table_scope": "pipeline_hash",
+            "cache_mode": "log",
+            "pipeline_path": node.node_identity_path,
+        },
+        operator=None,
+        input_streams=(),
+        databases={"pipeline": legacy_store},
+        job_content_hash=node.content_hash().to_string(),
+    )
+    with pytest.raises(InputValidationError, match="'_tag_legacy'.*reserved.*odb_v2"):
+        loaded.get_all_records(all_info=True)
