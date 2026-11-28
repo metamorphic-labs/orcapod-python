@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import TYPE_CHECKING, Any, get_args
 
+import pyarrow as pa
+
 
 from orcapod.core.operators.meta_columns import (
     without_input_meta,
@@ -27,8 +29,6 @@ from orcapod.types import ColumnConfig, ContentHash, DataType, Schema
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 
 
@@ -109,11 +109,26 @@ def _require_matching_nested_flags(
     paths = arrow_utils.nested_nullability_differences(left_type, right_type)
     if paths:
         fields = ", ".join(repr(f"{column}.{path}") for path in paths)
+        left_description = _describe_with_storage(left_type)
+        right_description = _describe_with_storage(right_type)
         raise InputValidationError(
-            f"{operator} inputs disagree on the Arrow type of column {column!r}. "
+            f"{operator} inputs disagree on the Arrow type of column {column!r}: "
+            f"{left_description} in one input and {right_description} in the other. "
             f"The types differ in the nullability of nested field {fields}. Declare the same "
             "nested flags on both inputs or drop the explicit non-null declaration."
         )
+
+
+def _describe_with_storage(arrow_type: pa.DataType) -> str:
+    """Describe a type so that its nested flags can be read.
+
+    An extension type's text does not show its storage, where its nested flags
+    are, so the storage type is added.
+    """
+    description = arrow_utils.describe_arrow_type(arrow_type)
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return f"{description} stored as {arrow_type.storage_type}"
+    return description
 
 
 def explain_nested_join_conflict(

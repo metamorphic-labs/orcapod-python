@@ -94,6 +94,20 @@ def _assert_remedy(message: str, field: str) -> None:
     assert "drop the explicit non-null declaration" in message
 
 
+def _assert_names_both_types(message: str, shape: str) -> None:
+    """The error names the column and both input types, each with its flags."""
+    child = "struct<code: int64{}>" if shape == "struct-item" else "int64{}"
+    nullable = f"large_list<item: {child.format('')}>"
+    non_null = f"large_list<item: {child.format(' not null')}>"
+    assert "column 'k'" in message
+    if shape == "extension-list":
+        # An extension type's own text hides its storage, where the flag is.
+        nullable, non_null = f"stored as {nullable}", f"stored as {non_null}"
+    assert f"{nullable} in " in message
+    assert f"{non_null} in " in message
+    assert " in one input and " in message
+
+
 @pytest.mark.parametrize("operator_class", [Join, MergeJoin, SemiJoin])
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("shape", ["list", "struct-item", "extension-list"])
@@ -112,6 +126,7 @@ def test_joins_name_the_nested_flag(operator_class, asynchronous, shape):
         [value] = value.exceptions
     assert isinstance(value, InputValidationError)
     _assert_remedy(str(value), "k.item.code" if shape == "struct-item" else "k.item")
+    _assert_names_both_types(str(value), shape)
 
 
 def test_another_type_difference_keeps_the_generic_message():
@@ -130,6 +145,7 @@ def test_join_names_nested_flag_in_shared_data_tag():
     with pytest.raises(InputValidationError) as error:
         Join()(left, right).as_table()
     _assert_remedy(str(error.value), "k.item.code")
+    _assert_names_both_types(str(error.value), "struct-item")
 
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
@@ -189,6 +205,7 @@ def test_join_names_nested_flag_in_any_data_tag_pair(
         else:
             _ = operator(*streams).as_table()
     _assert_remedy(str(error.value), "k.item.code")
+    _assert_names_both_types(str(error.value), "struct-item")
 
 
 def test_a_flag_and_a_logical_identifier_are_two_differences():
