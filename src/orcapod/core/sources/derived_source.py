@@ -14,6 +14,7 @@ from orcapod.core.data_tags import (
 )
 from typing_extensions import override
 
+from orcapod.core.identity_chains import require_bound_identity_origin
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
@@ -322,6 +323,7 @@ class DerivedSource(RootSource):
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         if self._tags_as_data is None:
             # Tied precisely to the specific node's data identity
+            require_bound_identity_origin(self._origin)
             return (self._origin.content_hash(),)
         return (
             *super().identity_structure(),

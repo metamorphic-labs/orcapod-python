@@ -36,6 +36,7 @@ from orcapod.core.data_tags import (
     stream_data_tags,
 )
 from orcapod.core.function_pod import FunctionPodStream
+from orcapod.core.identity_chains import refuse_identity_io
 from orcapod.core.operators.provisional import (
     provisional_operator_name,
     warn_provisional_operator,
@@ -1589,6 +1590,7 @@ class RowsOnRead:
     def built(self) -> StreamProtocol:
         """The stream, built from the rows on the first call (``main``'s row path)."""
         if self._stream is None:
+            refuse_identity_io("this stream requires materializing rows")
             self._stream = StaticOutputOperatorPod._materialize_upstream(
                 self._rows, self._node
             )

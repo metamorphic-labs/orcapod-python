@@ -324,6 +324,12 @@ supplies the schema, the node hash combines the pipeline hash with the same name
 chain. The chain-based content hash requires the schema. Downstream identities that
 need the pipeline hash report that it is undefined until the schema is known.
 
+A plain derived source, including one wrapped in a cache, has no source chain while
+a contributing slot of its origin is unbound. Chain accessors report an undefined
+identity when they would have to build a lazy upstream from rows or hash a raw
+Arrow stream's rows. A raw Arrow stream itself can report its node hash from its
+schema and anonymous name.
+
 ## Hash site inventory
 
 Every place Orcapod produces a digest, and every place it reads one, with its class

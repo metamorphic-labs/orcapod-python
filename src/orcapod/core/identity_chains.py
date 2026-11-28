@@ -37,7 +37,7 @@ _reading_chains: ContextVar[bool] = ContextVar("reading_identity_chains", defaul
 
 @contextmanager
 def _identity_read() -> Iterator[None]:
-    """Keep recursive schema reads from inferring identity from fetched rows."""
+    """Guard recursive identity evaluation against fetching or reading rows."""
     token = _reading_chains.set(True)
     try:
         yield
@@ -45,12 +45,10 @@ def _identity_read() -> Iterator[None]:
         _reading_chains.reset(token)
 
 
-def refuse_identity_io() -> None:
-    """Report an unavailable schema when identity would have to read a source."""
+def refuse_identity_io(reason: str = "this source requires a schema") -> None:
+    """Report why the identity cannot be evaluated without reading rows."""
     if _reading_chains.get():
-        raise ValueError(
-            "Pipeline identity is undefined: this source requires a schema."
-        )
+        raise ValueError(f"Pipeline identity is undefined: {reason}.")
 
 
 _binding_hash_walk: ContextVar[IdentityWalk | None] = ContextVar(
@@ -63,6 +61,13 @@ def track_binding_dependency(slot: IdentityChainsMixin) -> None:
     walk = _binding_hash_walk.get()
     if walk is not None:
         walk.depend_on(slot)
+
+
+def require_bound_identity_origin(origin: IdentityChainProtocol) -> None:
+    """Check a plain derived origin when resolving a new source chain."""
+    walk = _binding_hash_walk.get()
+    if walk is not None and walk.visit(origin).sources is None:
+        raise UnboundSourceError("The derived source has an unbound origin.")
 
 
 def _hash(label: str, preimage: tuple[object, ...]) -> ContentHash:
@@ -92,7 +97,7 @@ class IdentityWalk:
             element._identity_dependents[id(consumer)] = consumer
             consumer._identity_dependencies[id(element)] = element
 
-    def binding_hash(self, stream: ContentIdentifiableProtocol) -> ContentHash:
+    def binding_hash(self, stream: ContentIdentifiableProtocol) -> ContentHash | None:
         """Resolve the legacy preimage with live slot bindings and a transient cache."""
         from orcapod.core.base import live_content_hashes
 
@@ -100,6 +105,8 @@ class IdentityWalk:
         try:
             with live_content_hashes():
                 return stream.content_hash()
+        except UnboundSourceError:
+            return None
         finally:
             _binding_hash_walk.reset(token)
 

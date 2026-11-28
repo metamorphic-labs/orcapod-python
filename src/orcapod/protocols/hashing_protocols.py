@@ -38,8 +38,8 @@ class IdentityWalkProtocol(Protocol):
         """Compute the element's chains or reuse them from this walk."""
         ...
 
-    def binding_hash(self, stream: ContentIdentifiableProtocol) -> ContentHash:
-        """Read a binding's live content identity without using legacy caches."""
+    def binding_hash(self, stream: ContentIdentifiableProtocol) -> ContentHash | None:
+        """Read a binding's live content identity, or None for an unbound origin."""
         ...
 
 

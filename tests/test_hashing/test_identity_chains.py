@@ -592,7 +592,103 @@ def test_raw_stream_label_never_enters_chains(downstream: bool) -> None:
     left = before.select_data_columns(["x"]) if downstream else before
     right = after.select_data_columns(["x"]) if downstream else after
     assert left.name_chain() == right.name_chain()
-    assert _hashes(left) == _hashes(right)
+    assert left.node_hash() == right.node_hash()
+
+
+def test_wrapped_batch_identity_does_not_build_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch identity refuses the row build needed by a lazy upstream."""
+    from orcapod.core.operators.static_output_pod import (
+        StaticOutputOperatorPod,
+        rows_on_read,
+    )
+    from orcapod.operators import Batch
+
+    source = _source("wrapped", False)
+    wrapped = rows_on_read(source, source)
+    result = Batch(2)(wrapped)
+    assert isinstance(result, StreamProtocol)
+
+    def unexpected_build(*args: object, **kwargs: object) -> None:
+        pytest.fail("identity must not rebuild rows")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(StaticOutputOperatorPod, "_rows_to_table", unexpected_build)
+        assert wrapped.node_hash() == source.node_hash()
+        for accessor in (result.node_hash, result._chain_content_hash):
+            with pytest.raises(ValueError, match="undefined.*materializing rows"):
+                _ = accessor()
+    assert result.pipeline_hash()
+
+
+def test_raw_arrow_identities_do_not_hash_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw stream can describe its node without hashing the table's rows."""
+    import pyarrow as pa
+
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+    left = ArrowTableStream(pa.table({"k": [1], "x": [2]}), tag_columns=["k"])
+    right = ArrowTableStream(pa.table({"k": [1], "y": [3]}), tag_columns=["k"])
+    joined = Join()(left, right)
+    assert isinstance(joined, StreamProtocol)
+
+    def unexpected_row_hash(*args: object) -> None:
+        pytest.fail("identity must not hash Arrow rows")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(ArrowTableStream, "_identity_table", unexpected_row_hash)
+        assert left.node_hash()
+        for accessor in (
+            joined.node_hash,
+            joined._chain_content_hash,
+            left.source_chain,
+            left._chain_content_hash,
+        ):
+            with pytest.raises(ValueError, match="undefined.*hashing Arrow rows"):
+                _ = accessor()
+    assert joined.pipeline_hash()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_plain_derived_binding_has_no_content_when_origin_is_unbound(
+    cached: bool,
+) -> None:
+    """A warmed root binding follows the origin through unbind and rebind."""
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.sources import CachedSource, DerivedSource
+
+    database = InMemoryArrowDatabase()
+    source = _source("inner_input", False)
+    inner = PipelineJob(name="inner", database=database)
+    with inner:
+        _ = source.select_data_columns(["x"], label="projection")
+    origin = inner.nodes["projection"]
+    slot = inner.nodes["inner_input"]
+    assert isinstance(origin, OperatorJobNode)
+    assert isinstance(slot, SourceJobNode)
+    derived = DerivedSource(origin, source_id="derived")
+    binding = CachedSource(derived, database) if cached else derived
+    outer = PipelineJob(name="outer", database=database)
+    with outer:
+        _ = binding.select_data_columns(["x"], label="result")
+    result = outer.nodes["result"]
+    assert isinstance(result, OperatorJobNode)
+    before = result.source_chain(), *_hashes(result)
+
+    slot.bound_source = None
+    assert origin.source_chain() is None
+    assert binding.source_chain() is None
+    assert result.source_chain() is None
+    with pytest.raises(UnboundSourceError, match="Content identity is undefined"):
+        _ = result._chain_content_hash()
+    assert result.node_hash() == before[2]
+
+    inner.bind(sources={"inner_input": source})
+    assert (result.source_chain(), *_hashes(result)) == before
 
 
 def test_chain_hashes_are_memoized_through_a_long_chain(
