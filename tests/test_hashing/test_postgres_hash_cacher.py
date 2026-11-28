@@ -9,8 +9,7 @@ When ``PGHOST`` is set, the fixture uses the configured PostgreSQL server and
 needs permission to create schemas. Otherwise it uses Docker to start a
 ``postgres:16`` container. Each test puts its own schema first in the search
 path, followed by ``pg_catalog``.
-Tests in ``TestPostgresReprRedaction`` do **not** carry the postgres marker and
-run unconditionally because they test the pure ``_redact_conninfo()`` helper.
+Tests without the postgres marker run without a server.
 """
 
 from __future__ import annotations
@@ -20,7 +19,9 @@ import os
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from typing import cast
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -30,6 +31,7 @@ from upath import UPath
 psycopg = pytest.importorskip("psycopg")
 
 from psycopg import Connection, connect, sql  # noqa: E402
+from psycopg.conninfo import make_conninfo  # noqa: E402
 from testcontainers.postgres import PostgresContainer  # noqa: E402
 
 from orcapod.hashing.file_hashers import FileHashKey  # noqa: E402
@@ -51,6 +53,26 @@ def make_key(
 
 def make_hash(digest: bytes = b"\xab" * 32) -> ContentHash:
     return ContentHash(method="sha256", digest=digest)
+
+
+def test_identical_put_accepts_bytes_from_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept a stored TEXT label returned as bytes by the driver."""
+    value = make_hash()
+    insert = Mock(rowcount=0)
+    select = Mock(fetchone=Mock(return_value=(b"sha256", value.to_prefixed_digest())))
+    execute = Mock(side_effect=[insert, select])
+    conn = Mock(execute=execute, transaction=Mock(return_value=nullcontext()))
+    monkeypatch.setattr(
+        "orcapod.hashing.postgres_hash_cacher.psycopg.connect",
+        Mock(side_effect=[nullcontext(Mock()), conn]),
+    )
+
+    with PostgresHashCacher("") as cacher:
+        cacher.put(make_key(), value)
+
+    assert execute.call_count == 2
 
 
 class _VersionedContentHash(ContentHash):
@@ -140,14 +162,17 @@ def pg_schema_conninfo(pg_server_conninfo: str) -> Iterator[str]:
 
 
 @pytest.fixture()
-def pg_conninfo(pg_schema_conninfo: str) -> str:
+def pg_conninfo(pg_schema_conninfo: str, request: pytest.FixtureRequest) -> str:
     """Initialize and verify the cache tables before a test can write to them."""
-    PostgresHashCacher(pg_schema_conninfo).close()
-    with psycopg.connect(pg_schema_conninfo) as conn:
+    conninfo = pg_schema_conninfo
+    if hasattr(request, "param"):
+        conninfo = make_conninfo(conninfo, client_encoding=cast(str, request.param))
+    PostgresHashCacher(conninfo).close()
+    with connect(conninfo) as conn:
         _assert_resolved_table_schema(
             conn, "file_hash_cache_v2", "file_hash_cache_v2_meta"
         )
-    return pg_schema_conninfo
+    return conninfo
 
 
 @pytest.fixture()
@@ -381,6 +406,7 @@ class TestPostgresHashCacherConcurrency:
             ).fetchone() == (original, 1)
         assert not caplog.records
 
+    @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
     @pytest.mark.parametrize("same_hash", [True, False])
     @pytest.mark.parametrize("malformed_existing", [False, True])
     def test_concurrent_puts(
@@ -425,6 +451,7 @@ class TestPostgresHashCacherConcurrency:
             ).fetchone() == (1,)
         assert len(caplog.records) == int(malformed_existing)
 
+    @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
     def test_conflicting_hash_is_refused_and_identical_hash_is_a_noop(
         self, pg_conninfo: str, cacher: PostgresHashCacher
     ):
@@ -853,6 +880,7 @@ _CRAFTED_BLOBS = [
 
 @pytest.mark.postgres
 class TestPostgresHashCacherStrictStore:
+    @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
     @pytest.mark.parametrize("match_mtime", [True, False])
     def test_rejects_a_conflict_from_another_label(
         self, pg_conninfo: str, match_mtime: bool, caplog: pytest.LogCaptureFixture
@@ -877,8 +905,8 @@ class TestPostgresHashCacherStrictStore:
             assert cache.get(key) == original
         with connect(pg_conninfo) as conn:
             assert conn.execute(
-                "SELECT algorithm, hash, cached_at FROM file_hash_cache_v2"
-            ).fetchall() == [("sha256", blob, 1)]
+                "SELECT convert_to(algorithm, 'UTF8'), hash, cached_at FROM file_hash_cache_v2"
+            ).fetchall() == [(b"sha256", blob, 1)]
         assert not caplog.records
 
     @pytest.mark.parametrize("match_mtime", [True, False])
@@ -960,6 +988,7 @@ class TestPostgresHashCacherStrictStore:
             )
         assert cacher.get(_key_for_algorithm("sha256")) is None
 
+    @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
     @pytest.mark.parametrize("match_mtime", [True, False])
     @pytest.mark.parametrize("blob", _CRAFTED_BLOBS)
     def test_repairs_a_malformed_stored_hash(

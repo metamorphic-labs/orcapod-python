@@ -255,7 +255,13 @@ class PostgresHashCacher:
                 if existing is None:
                     continue
                 stored_algorithm, blob = existing
-                if str.__eq__(algorithm, stored_algorithm) is not True:
+                # psycopg returns TEXT as bytes under SQL_ASCII.
+                stored_label = (
+                    str.encode(stored_algorithm)
+                    if isinstance(stored_algorithm, str)
+                    else stored_algorithm
+                )
+                if bytes.__eq__(prefix[:-1], stored_label) is not True:
                     raise ValueError(
                         f"Cache matched a row with algorithm label {stored_algorithm!r} "
                         f"for key label {algorithm!r}"
