@@ -123,3 +123,12 @@ class PythonFunctionExecutorProtocol(DataFunctionExecutorProtocol, Protocol):
             The raw return value of *fn*.
         """
         ...
+
+
+@runtime_checkable
+class PythonFunctionReturnCheckProtocol(Protocol):
+    """Optional executor capability for checking returns before serialization."""
+
+    def return_container_options(self, container: type) -> dict[str, object]:
+        """Return per-call options that request a check against the given type."""
+        ...
