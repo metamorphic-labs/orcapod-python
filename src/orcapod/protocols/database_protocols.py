@@ -85,7 +85,9 @@ class ArrowDatabaseProtocol(Protocol):
         record: pa.Table,
         skip_duplicates: bool = False,
         flush: bool = False,
-    ) -> None: ...
+    ) -> None:
+        """Add one record using the duplicate policy of ``add_records``."""
+        ...
 
     def add_records(
         self,
@@ -94,7 +96,15 @@ class ArrowDatabaseProtocol(Protocol):
         record_id_column: str | None = None,
         skip_duplicates: bool = False,
         flush: bool = False,
-    ) -> None: ...
+    ) -> None:
+        """Add records, retaining the last row per ID within this input table.
+
+        With ``skip_duplicates=False``, raise ``ValueError`` if an ID is already
+        pending or visible in storage when the rows are added. With
+        ``skip_duplicates=True``, skip those IDs. In either mode a key committed
+        by another writer after the add-time check is skipped at commit.
+        """
+        ...
 
     def get_record_by_id(
         self,

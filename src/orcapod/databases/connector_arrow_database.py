@@ -3,7 +3,7 @@
 Implements the full ArrowDatabaseProtocol on top of any DBConnectorProtocol,
 owning all record-management logic: record_path → table name mapping,
 ``__record_id`` column convention, in-memory pending-batch management,
-deduplication, upsert, and flush.
+deduplication and flush.
 
 Connector implementations (SQLiteConnector, PostgreSQLConnector, SpiralDBConnector)
 need only satisfy DBConnectorProtocol; they do not implement ArrowDatabaseProtocol.
@@ -159,9 +159,8 @@ class ConnectorArrowDatabase:
         # The schema each stored table was read with, for the append check
         # (``_refuse_changed_columns``).
         self._stored_schemas: dict[tuple[str | None, str], pa.Schema] = {}
-        # Per-batch flag: True when the batch was added with skip_duplicates=True,
-        # so flush() can pass skip_existing=True to the connector and let it use
-        # native INSERT-OR-IGNORE semantics rather than Python-side prefiltering.
+        # Keep the SQL store's existing write-if-missing policy for a batch that
+        # includes those writes. Strict-only batches skip ID conflicts at commit.
         self._pending_skip_existing: dict[str, bool] = (
             _shared_pending_skip_existing
             if _shared_pending_skip_existing is not None
@@ -185,11 +184,11 @@ class ConnectorArrowDatabase:
                 self.RECORD_ID_COLUMN,
                 self._pending_batches,
                 self._pending_record_ids,
-                on_empty=self._discard_pending_duplicate_policy,
+                on_empty=self._discard_pending_state,
             )
         )
 
-    def _discard_pending_duplicate_policy(self, key: str) -> None:
+    def _discard_pending_state(self, key: str) -> None:
         """Forget indexes when an entire queued batch is discarded."""
         self._pending_skip_existing.pop(key, None)
         owner_key = self._pending_owner_keys.pop(key, None)
@@ -349,6 +348,23 @@ class ConnectorArrowDatabase:
         if not batches:
             return None
         return pa.Table.from_batches(batches)
+
+    def _stored_conflicts(
+        self, table: tuple[str | None, str], input_ids: set[bytes]
+    ) -> set[bytes]:
+        """Return input IDs found in the committed table."""
+        schema, name = table
+        column = self.RECORD_ID_COLUMN
+        if self._sql_store is not None:
+            assert schema is not None
+            return self._sql_store.existing_store_ids(
+                name, column, input_ids, schema=schema
+            )
+        query = f"SELECT * FROM {sql_table_identifier(name, schema)}"
+        conflicts: set[bytes] = set()
+        for batch in self._connector.iter_batches(query):
+            conflicts.update(input_ids.intersection(batch[column].to_pylist()))
+        return conflicts
 
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """List the paths of the tables stored under ``prefix``.
@@ -606,11 +622,14 @@ class ConnectorArrowDatabase:
         self._connector.validate_records(records)
 
         record_key = self._get_record_key(record_path)
+        committed_table = None
         pending_owner_key: tuple[str, str] | None = None
         if self._sql_store is not None:
             schema = self._schema_from_record_key(record_key)
             assert schema is not None
-            _ = self._find_committed_table(table_name, full_path, schema=schema)
+            committed_table = self._find_committed_table(
+                table_name, full_path, schema=schema
+            )
             pending_owner_key = (schema, table_name)
             queued = self._pending_table_owners.get(pending_owner_key)
             if queued is not None and queued[0] != record_key:
@@ -647,15 +666,26 @@ class ConnectorArrowDatabase:
                 records = records.filter(mask)
             if records.num_rows == 0:
                 return
-            # Mark this pending slot so flush() uses skip_existing=True.
-            self._pending_skip_existing[record_key] = True
         else:
-            conflicts = input_ids & self._pending_record_ids[record_key]
+            conflicts = input_ids.intersection(
+                self._pending_record_ids.get(record_key, ())
+            )
             if conflicts:
                 raise ValueError(
                     f"Records with IDs {conflicts} already exist in the pending batch. "
                     "Use skip_duplicates=True to skip them."
                 )
+            if self._sql_store is None:
+                committed_table = self._find_committed_table(
+                    table_name, full_path, schema=None
+                )
+            if committed_table is not None:
+                conflicts = self._stored_conflicts(committed_table, input_ids)
+                if conflicts:
+                    raise ValueError(
+                        f"Records with IDs {conflicts} already exist in the stored "
+                        "table. Use skip_duplicates=True to skip them."
+                    )
 
         # Buffer in pending batch
         existing_pending = self._pending_batches.get(record_key)
@@ -674,6 +704,8 @@ class ConnectorArrowDatabase:
         self._pending_record_ids[record_key].update(
             cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
         )
+        if skip_duplicates:
+            self._pending_skip_existing[record_key] = True
 
         if flush:
             self.flush()
@@ -874,7 +906,7 @@ class ConnectorArrowDatabase:
         )
 
     def flush(self) -> None:
-        """Commit all pending batches to the connector via upsert."""
+        """Insert all ready batches into the connector."""
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
 
@@ -906,9 +938,9 @@ class ConnectorArrowDatabase:
         if ready is None:
             return
         pending, ids = ready
-        skip_existing = self._pending_skip_existing.get(record_key, False)
+        skip_duplicates = self._pending_skip_existing.get(record_key, False)
         if record_key not in self._pending_batches:
-            self._discard_pending_duplicate_policy(record_key)
+            self._discard_pending_state(record_key)
         record_path = self._record_path_from_key(record_key)
         table_name = self._path_to_table_name(record_path)
 
@@ -927,7 +959,12 @@ class ConnectorArrowDatabase:
                 )
             with transaction as (schema, table_exists):
                 self._write_ready_batch(
-                    record_key, table_name, pending, skip_existing, table_exists, schema
+                    record_key,
+                    table_name,
+                    pending,
+                    skip_duplicates,
+                    table_exists,
+                    schema,
                 )
         except BaseException:
             self._pending_commits.finish(record_key, committed=False)
@@ -942,7 +979,7 @@ class ConnectorArrowDatabase:
         record_key: str,
         table_name: str,
         pending: pa.Table,
-        skip_existing: bool,
+        skip_duplicates: bool,
         table_exists: bool,
         schema: str | None,
     ) -> None:
@@ -954,6 +991,14 @@ class ConnectorArrowDatabase:
         if check is not None:
             check(pending.schema if existing is None else pa.schema(existing))
         if existing is not None:
+            if self.keeps_field_metadata:
+                # A different handle may have created the table after this batch
+                # was queued. The connector's ColumnInfo omits field metadata.
+                held = self._read_stored_schema(table_name, schema)
+                if held is not None:
+                    self._refuse_changed_columns(
+                        self._record_path_from_key(record_key), pending, [held]
+                    )
             # A connector reads text and binary back in their large variants,
             # which are the same types (ITL-1162).
             existing_cols = {f.name: cast(pa.DataType, f.type) for f in existing}
@@ -978,6 +1023,8 @@ class ConnectorArrowDatabase:
                 )
             pending = in_held_column_order(pending, existing)
 
+        # Another writer can commit an ID after it was checked at add time.
+        # Use the connector's atomic insert-if-missing for both modes.
         if self._sql_store is None:
             self._connector.create_table_if_not_exists(
                 table_name, columns, pk_column=self.RECORD_ID_COLUMN
@@ -986,17 +1033,18 @@ class ConnectorArrowDatabase:
                 table_name,
                 pending,
                 id_column=self.RECORD_ID_COLUMN,
-                skip_existing=skip_existing,
+                skip_existing=True,
             )
         else:
+            assert schema is not None
             self._sql_store.create_table_if_not_exists(
                 table_name, columns, pk_column=self.RECORD_ID_COLUMN, schema=schema
             )
-            self._sql_store.upsert_records(
+            self._sql_store.insert_store_records(
                 table_name,
                 pending,
                 id_column=self.RECORD_ID_COLUMN,
-                skip_existing=skip_existing,
+                skip_duplicates=skip_duplicates,
                 schema=schema,
             )
 

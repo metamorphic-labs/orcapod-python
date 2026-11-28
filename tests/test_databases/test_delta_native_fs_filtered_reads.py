@@ -75,10 +75,12 @@ FILTERED: dict[str, tuple[Read, pc.Expression]] = {
 
 
 def _stored_and_pending(store: Path) -> DeltaTableDatabase:
-    """Store ``a`` and ``c``, then queue ``b``, ``d`` and a ``c`` that repeats a stored id."""
+    """Queue rows while another handle commits the overlapping ID ``c``."""
     db = DeltaTableDatabase(store)
-    db.add_records(PATH, _rows(["a", "c"], [1, 3], [1, 0]), flush=True)
+    db.add_records(PATH, _rows(["a"], [1], [1]), flush=True)
     db.add_records(PATH, _rows(["b", "c", "d"], [2, 30, 4], [1, 1, 1]))
+    DeltaTableDatabase(store).add_records(PATH, _rows(["c"], [3], [0]), flush=True)
+    db.refresh_table(PATH)
     return db
 
 

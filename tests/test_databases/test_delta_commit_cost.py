@@ -143,7 +143,9 @@ def test_append_commit_loads_once_and_reads_only_its_files(
         files_before = set(_data_files(table_dir))
         counts["table_loads"] = counts["datasets"] = 0
         files_read.clear()
-        db.add_records(PATH, _rows([f"r{commit}_{k}" for k in range(3)]))
+        db.add_records(
+            PATH, _rows([f"r{commit}_{k}" for k in range(3)]), skip_duplicates=True
+        )
         db.flush()
         # Lookups between commits are answered from the extended rows.
         assert db.get_record_by_id(PATH, f"r{commit}_1".encode()) is not None

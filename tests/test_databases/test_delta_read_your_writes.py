@@ -184,8 +184,11 @@ def test_pending_row_with_stored_id_reads_as_flush_keeps_it(
 ) -> None:
     """A pending row whose id is already stored is never returned; the stored row is."""
     db = DeltaTableDatabase(tmp_path).at(SCOPE)
-    db.add_records(PATH, _rows(["a"], [1]), flush=True)
     db.add_records(PATH, _rows(["a", "d"], [10, 4]), skip_duplicates=skip_duplicates)
+    DeltaTableDatabase(tmp_path).at(SCOPE).add_records(
+        PATH, _rows(["a"], [1]), flush=True
+    )
+    db.refresh_table(PATH)
 
     for when in ("before flush", "after flush"):
         assert _values(db.get_all_records(PATH)) == [1, 4], when
@@ -223,13 +226,13 @@ def test_failed_id_refresh_is_retried_by_the_next_read(
     tmp_path: Path, method: str
 ) -> None:
     """After a failed stored-ID refresh, a pending row with a stored id is still not returned."""
-    # Another root stores ``b``: this handle has to read the stored ids. (A handle's
-    # own commit tells it which ids it stored, so it reads none afterwards, ITL-919.)
+    # Another root commits ``b`` after this handle queues it.
+    db = DeltaTableDatabase(tmp_path).at(SCOPE)
+    db.add_records(PATH, _rows(["a", "b"], [1, 20]))
     DeltaTableDatabase(tmp_path).at(SCOPE).add_records(
         PATH, _rows(["b"], [2]), flush=True
     )
-    db = DeltaTableDatabase(tmp_path).at(SCOPE)
-    db.add_records(PATH, _rows(["a", "b"], [1, 20]))
+    db.refresh_table(PATH)
 
     # The failed refresh is a failed stored read (ITL-884): never "no stored ids".
     with pytest.raises(OrcapodDatabaseReadError) as info:
@@ -243,11 +246,12 @@ def test_failed_id_refresh_is_retried_by_the_next_read(
 def test_get_records_by_ids_raises_on_failed_id_refresh(tmp_path: Path) -> None:
     """A failed stored-ID refresh raises ``OrcapodDatabaseReadError``, never "no records" (ITL-884)."""
     # Another root stores ``a`` and ``b``: this handle has to read the stored ids (ITL-919).
+    db = DeltaTableDatabase(tmp_path).at(SCOPE)
+    db.add_records(PATH, _rows(["c"], [3], [1]))
     DeltaTableDatabase(tmp_path).at(SCOPE).add_records(
         PATH, _rows(["a", "b"], [1, 2], [0, 1]), flush=True
     )
-    db = DeltaTableDatabase(tmp_path).at(SCOPE)
-    db.add_records(PATH, _rows(["c"], [3], [1]))
+    db.refresh_table(PATH)
 
     with pytest.raises(OrcapodDatabaseReadError) as info:
         _ = db.get_records_by_ids(PATH, [b"a", b"c"])
@@ -267,16 +271,16 @@ def test_unreadable_table_with_sibling_pending_rows_raises_and_drops_nothing(
     rather than returning only the pending rows (ITL-864); once it is readable again
     the same read returns both rows, so nothing was dropped from the pending batch.
     """
+    root = DeltaTableDatabase(tmp_path)
+    reader, writer = root.at(SCOPE), root.at(SCOPE)
+    writer.add_records(PATH, _rows(["a"], [1]))
     DeltaTableDatabase(tmp_path).at(SCOPE).add_records(
         PATH, _rows(["b"], [2]), flush=True
     )
-    root = DeltaTableDatabase(tmp_path)
-    reader, writer = root.at(SCOPE), root.at(SCOPE)
+    reader.refresh_table(PATH)
     if cache == "warm":
-        # The family has loaded the table and its stored ids before the failure.
-        assert _values(reader.get_all_records(PATH)) == [2]
-        assert reader.get_record_by_id(PATH, b"a") is None
-    writer.add_records(PATH, _rows(["a"], [1]))
+        # The family holds the stored rows, while the ID projection is unread.
+        assert reader.get_record_by_id(PATH, b"b") is not None
 
     def unreadable(*_args: object, **_kwargs: object) -> pa.Table:
         """Fail as a storage outage would."""
@@ -305,11 +309,10 @@ def test_fresh_handle_drops_pending_rows_with_stored_ids(
     tmp_path: Path, method: str
 ) -> None:
     """A handle that loaded a table written by another root still drops pending rows with stored ids."""
-    DeltaTableDatabase(tmp_path).add_records(PATH, _rows(["b"], [2]), flush=True)
     db = DeltaTableDatabase(tmp_path)
-    assert _values(db.get_all_records(PATH)) == [2]  # loads the table, no ids yet
-
     db.add_records(PATH, _rows(["a", "b"], [1, 20]))
+    DeltaTableDatabase(tmp_path).add_records(PATH, _rows(["b"], [2]), flush=True)
+    db.refresh_table(PATH)
 
     assert _values(READS[method](db, PATH)) == EXPECTED[method]
 

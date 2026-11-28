@@ -18,7 +18,9 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from orcapod.databases import ConnectorArrowDatabase
 from orcapod.errors import InputValidationError, UnstorableColumnError
+from tests.test_databases.test_connector_arrow_database import MockDBConnector
 from tests.test_databases.type_matrix import (
     expected_field,
     field_difference,
@@ -250,3 +252,74 @@ def test_delta_compares_attributes_before_schema_handling_casts(
         assert back is not None
         assert _values(back) == _values(written)
         _assert_kept_field(first, back)
+
+
+class _StructExtension(pa.ExtensionType):
+    """An extension whose struct storage carries field metadata."""
+
+    def __init__(self, storage_type: pa.DataType) -> None:
+        super().__init__(storage_type, "itl1415.struct")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return b""
+
+    @classmethod
+    def __arrow_ext_deserialize__(
+        cls, storage_type: pa.DataType, serialized: bytes
+    ) -> _StructExtension:
+        return cls(storage_type)
+
+
+def _extension_rows(rid: bytes, value: int, extension: _StructExtension) -> pa.Table:
+    """Build a row with the extension's struct storage and field metadata."""
+    storage = pa.array([{"a": value}], type=extension.storage_type)
+    return pa.table(
+        {"id": [rid], "x": pa.ExtensionArray.from_storage(extension, storage)}
+    )
+
+
+class _MetadataConnector(MockDBConnector):
+    """An Arrow connector that stores fields and their metadata."""
+
+    keeps_field_metadata = True
+
+    def validate_records(self, records: pa.Table) -> None:
+        """Accept Arrow metadata."""
+
+
+def test_connector_refuses_extension_storage_metadata_committed_after_add() -> None:
+    """A connector rechecks the storage metadata in the table found at flush."""
+    connector = _MetadataConnector()
+    first, second = ConnectorArrowDatabase(connector), ConnectorArrowDatabase(connector)
+    metres, seconds = (_StructExtension(_struct_child(u).type) for u in ("m", "s"))
+    first.add_records(PATH, _extension_rows(b"a", 1, metres))
+    second.add_records(PATH, _extension_rows(b"b", 2, seconds), flush=True)
+    with pytest.raises(InputValidationError, match=r"x\.a has other field metadata"):
+        first.flush()
+    rows = second.get_all_records(PATH, record_id_column="id")
+    assert rows is not None and rows["id"].to_pylist() == [b"b"]
+
+
+@pytest.mark.parametrize("database", DATABASES)
+@pytest.mark.parametrize("pending", [False, True], ids=["stored", "pending"])
+@pytest.mark.parametrize("units", [("m", "s"), ("s", "m")])
+def test_metadata_inside_extension_storage_must_match(
+    tmp_path: Path, database: str, pending: bool, units: tuple[str, str]
+) -> None:
+    """The struct field's metadata is checked even inside an extension type."""
+    first, second = (_StructExtension(_struct_child(u).type) for u in units)
+
+    pa.register_extension_type(first)  # pyright: ignore[reportArgumentType]  # Arrow accepts ExtensionType
+    try:
+        with open_database(database, tmp_path) as db:
+            db.add_records(PATH, _extension_rows(b"a", 1, first), flush=not pending)
+            with pytest.raises(
+                InputValidationError, match=r"x\.a has other field metadata"
+            ):
+                db.add_records(PATH, _extension_rows(b"b", 2, second))
+            db.add_records(PATH, _extension_rows(b"c", 3, first), flush=True)
+            stored = db.get_all_records(PATH, record_id_column="id")
+            assert stored is not None
+            assert sorted(stored["id"].to_pylist()) == [b"a", b"c"]
+    finally:
+        pa.unregister_extension_type(first.extension_name)

@@ -1594,8 +1594,8 @@ def test_a_map_and_a_struct_do_not_pair_their_places() -> None:
 
 
 def test_delta_merge_source_keeps_the_held_identifier_bytes(tmp_path: Path) -> None:
-    """A list-typed extension column appended to a stored table goes to the MERGE (a
-    batch with an id already stored) in the stored layout with its identifier: the bytes Arrow holds (the ones the
+    """A list-typed extension column appended to a stored table goes to the MERGE
+    in the stored layout with its identifier: the bytes Arrow holds (the ones the
     identity rule compared), not its serializer asked again, which may answer
     otherwise. The stored identifier stays the one written."""
     import deltalake
@@ -1621,7 +1621,7 @@ def test_delta_merge_source_keeps_the_held_identifier_bytes(tmp_path: Path) -> N
     db = DeltaTableDatabase(tmp_path / "delta")
     db.add_records(PATH, rows(ListExt(b"m"), [b"1"]), record_id_column="id", flush=True)
     second = ListExt(b"m")
-    given = rows(second, [b"1", b"22"])
+    given = rows(second, [b"22"])
     second.payload = b"changed"  # the serializer now answers otherwise
     db.add_records(PATH, given, record_id_column="id", flush=True)
     stored = deltalake.DeltaTable(str(tmp_path / "delta" / "t")).schema().fields[1]
@@ -1876,16 +1876,15 @@ def test_delta_refusals_are_decided_on_the_table_stored_now(tmp_path: Path) -> N
         record_id_column="id",
         skip_duplicates=True,
     )
-    # A fresh id of ``n`` on a stale handle that accepts it: refused at flush.
+    # A fresh id of ``m`` queued before replacement is refused at flush.
     other_stale = DeltaTableDatabase(root)
-    other_stale.get_all_records(PATH, record_id_column="id")
+    other_stale.add_records(PATH, _annotated_top(b"m", [b"333"]), record_id_column="id")
     deltalake.write_deltalake(
         str(root / "t"),
         _annotated_top(b"n", [b"1", b"22"]).rename_columns(["__record_id", "x"]),
         mode="overwrite",
         schema_mode="overwrite",
     )
-    other_stale.add_records(PATH, _annotated_top(b"m", [b"333"]), record_id_column="id")
     with pytest.raises(
         InputValidationError, match="the stored column's 'itl1371.a;6e'"
     ):
@@ -2064,7 +2063,7 @@ def test_delta_merge_source_with_a_changed_or_raising_serializer(
     db = DeltaTableDatabase(tmp_path / "delta", allow_schema_evolution=schema_evolution)
     db.add_records(PATH, rows(ListExt(b"m"), [b"1"]), record_id_column="id", flush=True)
     second = ListExt(b"m")
-    given = rows(second, [b"1", b"22"])
+    given = rows(second, [b"22"])
     second.payload = b"changed" if serializer == "changed" else None
     db.add_records(PATH, given, record_id_column="id", flush=True)
     stored = deltalake.DeltaTable(str(tmp_path / "delta" / "t")).schema().fields[1]

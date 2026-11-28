@@ -5,8 +5,7 @@ When rows are added, only what Orcapod can tell for certain is refused; everythi
 is left to the commit, whose refusal the flush raises once, without keeping the rows
 queued. This file is the review of PR 504's sweep, as a test: every stored type (same
 schema, as written), every record change, struct evolution, null and layout case and
-logical-type case, with schema evolution on and off, and with the commit an append
-(every id new) or a MERGE (a stored id among the rows). For each:
+logical-type case, with schema evolution on and off, and with every ID new or a stored ID among the input rows. For each:
 
 - what Orcapod refuses when the rows are added, Delta refuses too: the same rows given
   to the database with Orcapod's add-time checks switched off are not stored (the one
@@ -138,7 +137,12 @@ def _stored_ids(root: Path) -> list[bytes]:
 
 
 def _run(
-    root: Path, initial: pa.Table, incoming: pa.Table, evolve: bool
+    root: Path,
+    initial: pa.Table,
+    incoming: pa.Table,
+    evolve: bool,
+    *,
+    skip_duplicates: bool = False,
 ) -> tuple[str, bool, BaseException | None]:
     """``(outcome, rows still queued, the error)``: ``stored``, ``refused when added``,
     or ``refused at flush``. ``stored`` is read back through a fresh handle: every
@@ -147,7 +151,9 @@ def _run(
     db.add_records(PATH, initial, record_id_column="rid", flush=True)
     queued = lambda: bool(db._pending_batches)  # noqa: E731  # pyright: ignore[reportPrivateUsage]
     try:
-        db.add_records(PATH, incoming, record_id_column="rid")
+        db.add_records(
+            PATH, incoming, record_id_column="rid", skip_duplicates=skip_duplicates
+        )
     except Exception as error:  # noqa: BLE001  # the outcome is the subject
         return "refused when added", queued(), error
     try:
@@ -203,7 +209,9 @@ unit_type = refused.unit_type
 
 
 @pytest.mark.parametrize(
-    "seen", [False, True], ids=["append (every id new)", "MERGE (a stored id)"]
+    "seen",
+    [False, True],
+    ids=["strict (every id new)", "skip duplicates (a stored id)"],
 )
 @pytest.mark.parametrize("evolve", [False, True], ids=["evolution off", "evolution on"])
 @pytest.mark.parametrize("label", sorted(VARIANTS))
@@ -218,7 +226,9 @@ def test_orcapod_refuses_nothing_delta_stores(
     initial = _rows(a, [b"1"], field_a)
     incoming = _rows(b, [b"1", b"2"] if seen else [b"2"], field_b)
 
-    live, queued, refusal = _run(tmp_path / "live", initial, incoming, evolve)
+    live, queued, refusal = _run(
+        tmp_path / "live", initial, incoming, evolve, skip_duplicates=seen
+    )
     assert not queued, f"{label}: rows still queued after the flush ({live})"
 
     if live == "refused when added" and label in LOGICAL_RULE:
@@ -227,7 +237,9 @@ def test_orcapod_refuses_nothing_delta_stores(
         # Delta's own verdict: the same rows with every Orcapod check off reach the
         # commit, and Delta refuses it.
         _without_orcapod_checks(monkeypatch)
-        raw, _, error = _run(tmp_path / "raw", initial, incoming, evolve)
+        raw, _, error = _run(
+            tmp_path / "raw", initial, incoming, evolve, skip_duplicates=seen
+        )
         assert raw == "refused at flush" and _refused_by_delta(error), (
             f"{label}: Orcapod refused rows Delta does not refuse ({raw}: {error!r})"
         )

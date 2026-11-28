@@ -30,7 +30,7 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     SpiralDBConnector,
 )
-from orcapod.errors import UnrecordedTableSchemaWarning
+from orcapod.errors import OrcapodDatabaseWriteError, UnrecordedTableSchemaWarning
 from orcapod.protocols.core_protocols.datagrams import DataProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.semantic_types import UniversalTypeConverter
@@ -89,6 +89,43 @@ def _compute_and_store(cache: ResultCache, pf: PythonDataFunction, input_data: D
 
 
 TIE_ORDERS = [(0, 1), (1, 0), (0, 2, 1), (2, 1, 0)]
+
+
+@pytest.mark.parametrize("backend", ["memory", "delta"])
+def test_store_refuses_a_reused_output_uuid(tmp_path: Path, backend: str) -> None:
+    """A real duplicate is reported as a cache write error, with the cause."""
+    db = (
+        InMemoryArrowDatabase() if backend == "memory" else DeltaTableDatabase(tmp_path)
+    )
+    cache = ResultCache(result_database=db, record_path=("test",), revision="rev1")
+    input_data = Data({"x": 10})
+    output = _make_pf().direct_call(input_data)
+    assert output is not None
+    variation, execution = (
+        Datagram({"function_name": "double"}),
+        Datagram({"executor": "test"}),
+    )
+
+    def store(*, skip_duplicates: bool = False) -> None:
+        cache.store(
+            input_data,
+            output,
+            variation,
+            execution,
+            skip_duplicates=skip_duplicates,
+            data_context_key=CONTEXT_KEY,
+        )
+
+    store()
+    db.flush()
+    with pytest.raises(OrcapodDatabaseWriteError) as info:
+        store()
+    assert isinstance(info.value.__cause__, ValueError)
+    assert "already exist in the stored table" in str(info.value.__cause__)
+    store(skip_duplicates=True)
+    db.flush()
+    rows = db.get_all_records(cache.record_path, record_id_column="id")
+    assert rows is not None and rows["id"].to_pylist() == [output.datagram_uuid.bytes]
 
 
 def check_result_lookup_timestamp_tie(

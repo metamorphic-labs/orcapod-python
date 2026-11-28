@@ -11,7 +11,9 @@ table property, ``delta.dataSkippingStatsColumns``, set by ``statistics_configur
 the one rule for that list. A column is listed when it is a top-level column whose type,
 or the storage type of its extension type, is one delta-rs makes statistics for: an
 integer, ``float32`` or ``float64``, a boolean, a string, ``date32``, a timestamp or
-``decimal128``. Every other column is left out: binary of any kind, lists, maps,
+``decimal128``. The record ID is excluded regardless of its type so that concurrent
+MERGEs cannot skip files when checking for a conflicting write (ITL-1444). Every other
+unsupported type is left out: binary of any kind, lists, maps,
 structs, ``null`` and the rest. A column whose name holds a comma or a backtick is left
 out too: delta-rs splits the property on commas before it reads quoting, and it cannot
 MERGE into a table with a backtick in a column name whether or not the column is listed
@@ -34,8 +36,8 @@ instead.
 The property is set once, when the table is created, and Orcapod never changes it. A
 column added later by schema evolution is not in the list: delta-rs makes no statistics
 for it and logs nothing for it, unless it has a nested binary field named like a listed
-column (then delta-rs warns for that field). A table created before this change has no property and is
-read and appended to as before, unaltered; delta-rs keeps logging its warnings (see
+column (then delta-rs warns for that field). Tables created before this change retain
+their configuration. Tables without the property still log their warnings (see
 ``docs/troubleshooting.md``). The property is Delta table metadata only: it changes no
 stored value, column, hash, path or layout.
 
@@ -116,7 +118,8 @@ def statistics_columns(schema: pa.Schema) -> list[str]:
         schema: The schema of the rows that create the table, as written to Delta.
 
     Returns:
-        The top-level columns whose type delta-rs makes statistics for, whose name holds
+        The top-level columns other than the record ID whose type delta-rs makes
+        statistics for, whose name holds
         no comma and no backtick, and whose name is no nested part's name
         (``_nested_names``) in any column of ``schema``.
     """
@@ -126,7 +129,8 @@ def statistics_columns(schema: pa.Schema) -> list[str]:
     return [
         field.name
         for field in schema
-        if _has_statistics(field.type)
+        if field.name != "__record_id"
+        and _has_statistics(field.type)
         and "," not in field.name
         and "`" not in field.name
         and field.name not in nested

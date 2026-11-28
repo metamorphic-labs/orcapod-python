@@ -372,7 +372,7 @@ def test_a_record_that_decodes_to_the_stored_type_is_not_a_change(
             }
         ),
         record_id_column="rid",
-        skip_duplicates=len(ids) == 1,
+        skip_duplicates=b"1" in ids,
         flush=True,
     )
     back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
@@ -404,7 +404,7 @@ def test_a_real_record_change_is_refused_at_flush_only_where_delta_refuses_it(
     )
 
     db.add_records(
-        PATH, rows, record_id_column="rid", skip_duplicates=len(ids) == 1
+        PATH, rows, record_id_column="rid", skip_duplicates=b"1" in ids
     )  # accepted when added, on every route
     if evolution:
         _refused_once_at_flush(db)
@@ -466,13 +466,11 @@ def test_a_null_column_is_checked_like_any_column(
         # rows are added, on every route, whatever schema evolution says.
         with pytest.raises(InputValidationError, match="logical type"):
             db.add_records(
-                PATH, rows, record_id_column="rid", skip_duplicates=len(ids) == 1
+                PATH, rows, record_id_column="rid", skip_duplicates=b"1" in ids
             )
         assert _stored_ids(tmp_path) == [b"1"]
     else:
-        db.add_records(
-            PATH, rows, record_id_column="rid", skip_duplicates=len(ids) == 1
-        )
+        db.add_records(PATH, rows, record_id_column="rid", skip_duplicates=b"1" in ids)
         db.flush()
         back = DeltaTableDatabase(tmp_path).get_all_records(
             PATH, record_id_column="rid"
@@ -593,7 +591,7 @@ def test_what_changes_between_add_and_flush_is_decided_at_the_flush(
     MERGE that keeps the stored schema stores them. When schema evolution is turned on
     before the flush, the commit sends the changed record and Delta refuses it: the
     flush raises once, nothing stays queued. When another writer deletes a stored row,
-    the commit is still decided at the flush, and the rows are stored."""
+    the new row still commits. The skipped row is not queued and stays deleted."""
     stored = pa.large_list(pa.field("item", pa.uint8(), nullable=False))
     wider = pa.large_list(pa.field("item", pa.uint8(), nullable=True))
     db = DeltaTableDatabase(tmp_path, allow_schema_evolution=False)
@@ -604,11 +602,11 @@ def test_what_changes_between_add_and_flush_is_decided_at_the_flush(
             "x": pa.array([[1], [2]], wider),
         }
     )
-    db.add_records(PATH, rows, record_id_column="rid")  # accepted when added
+    db.add_records(PATH, rows, record_id_column="rid", skip_duplicates=True)
     if change == "another writer deletes a stored row":
         deltalake.DeltaTable(str(tmp_path / "t")).delete("__record_id = X'31'")
         db.flush()
-        assert _stored_ids(tmp_path) == [b"1", b"2"]
+        assert _stored_ids(tmp_path) == [b"2"]
         assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     else:
         db.allow_schema_evolution = True

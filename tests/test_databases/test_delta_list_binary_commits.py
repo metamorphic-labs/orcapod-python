@@ -136,6 +136,7 @@ def test_list_bytes_batch_holding_a_stored_id(tmp_path: Path) -> None:
     db.add_records(
         path,
         _bytes_rows([b"r1", b"r2", b"r3", b"r4"], [[b"X"], [b"c"], None, [None, b"d"]]),
+        skip_duplicates=True,
         flush=True,
     )
 
@@ -144,7 +145,7 @@ def test_list_bytes_batch_holding_a_stored_id(tmp_path: Path) -> None:
     )  # reopened
     assert table is not None
     got = dict(zip(table["__record_id"].to_pylist(), table["v"].to_pylist()))
-    # the stored id keeps its stored row (skipped, as when_not_matched_insert_all does)
+    # the stored id keeps its stored row (skipped at add time)
     assert got == {
         b"r0": [b"a"],
         b"r1": [b"b"],

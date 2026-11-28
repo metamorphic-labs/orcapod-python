@@ -108,6 +108,27 @@ def _make_table(ids: list[str], values: list[float | None]) -> pa.Table:
 
 
 @pytest.mark.postgres
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+def test_connector_database_rejects_stored_ids_and_skips_lost_commit_races(
+    connector: PostgreSQLConnector, skip_duplicates: bool
+) -> None:
+    """PostgreSQL preserves the winning row even when the other writer flushes last."""
+    path = ("write_conflict",)
+    first = ConnectorArrowDatabase(connector)
+    with PostgreSQLConnector(connector._dsn) as second_connector:
+        second = ConnectorArrowDatabase(second_connector)
+        first.add_record(
+            path, b"x", pa.table({"value": [1]}), skip_duplicates=skip_duplicates
+        )
+        second.add_record(path, b"x", pa.table({"value": [2]}), flush=True)
+        first.flush()
+        with pytest.raises(ValueError, match="already exist.*stored"):
+            first.add_record(path, b"x", pa.table({"value": [3]}))
+        rows = second.get_all_records(path)
+        assert rows is not None and rows.to_pylist() == [{"value": 2}]
+
+
+@pytest.mark.postgres
 @pytest.mark.parametrize("order", TIE_ORDERS)
 def test_postgresql_result_lookup_timestamp_tie(
     connector: PostgreSQLConnector,
@@ -789,7 +810,7 @@ def test_unsupported_catalog_layout_is_refused(
     one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
     db.add_record(path, b"id", one, flush=True)
     if operation in ("flush", "pending_point"):
-        db.add_record(path, b"id", two)
+        db.add_record(path, b"pending", two)
         connector._require_open().commit()
     catalog = sql.Identifier(STORE_PATH_CATALOG)
     with psycopg.connect(connector._dsn) as conn:
@@ -1081,13 +1102,13 @@ def test_store_writes_to_the_verified_schema_when_a_temp_table_shadows_its_name(
     )
     temp = sql.Identifier("pg_temp", name)
     _ = conn.execute(
-        sql.SQL("INSERT INTO {} VALUES (%s, %s)").format(temp), (b"id", 99)
+        sql.SQL("INSERT INTO {} VALUES (%s, %s)").format(temp), (b"new", 99)
     )
-    db.add_record(path, b"id", pa.table({"value": [2]}), flush=True)
+    db.add_record(path, b"new", pa.table({"value": [2]}), flush=True)
     assert conn.execute(sql.SQL("SELECT value FROM {}").format(temp)).fetchone() == (
         99,
     )
-    rows = db.get_all_records(path)
+    rows = db.get_record_by_id(path, b"new")
     assert rows is not None and rows.to_pylist() == [{"value": 2}]
 
 

@@ -544,8 +544,15 @@ class TestForeignCompletionsAfterTheFirstRun:
                 schema_mode="overwrite",
             )
         else:
-            holder.add_records(path, foreign, record_id_column="__rid")
-            holder.flush()
+            assert isinstance(holder, InMemoryArrowDatabase)
+            key = "/".join(path)
+            stored_id = holder.RECORD_ID_COLUMN
+            holder._tables[key] = foreign.rename_columns(  # pyright: ignore[reportPrivateUsage]  # inject a foreign completion
+                [
+                    stored_id if name == "__rid" else name
+                    for name in foreign.column_names
+                ]
+            )
 
         job.bind(sources={"s": make_source([1.0, 2.0, 3.0], "new")})
         with pytest.raises(SideEffectLogDataContextError):

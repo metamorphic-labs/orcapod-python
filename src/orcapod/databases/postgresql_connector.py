@@ -542,6 +542,36 @@ class PostgreSQLConnector:
             _require_persistent_store_schema(schema, row[1])
             return schema
 
+    def existing_store_ids(
+        self, table_name: str, id_column: str, ids: set[bytes], *, schema: str
+    ) -> set[bytes]:
+        """Look up existing record IDs using the table's primary key."""
+        from psycopg import sql
+
+        table = sql.Identifier(schema.replace("%", "%%"), table_name.replace("%", "%%"))
+        column = sql.Identifier(id_column.replace("%", "%%"))
+        conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
+        with self._lock, conn.transaction(force_rollback=True), conn.cursor() as cur:
+            _ = cur.execute(
+                sql.SQL(
+                    "SELECT {id} FROM {table} WHERE {id} = ANY(%s::bytea[])"
+                ).format(id=column, table=table),
+                (list(ids),),
+            )
+            return {cast(bytes, row[0]) for row in cur}
+
+    def insert_store_records(
+        self,
+        table_name: str,
+        records: pa.Table,
+        id_column: str,
+        *,
+        skip_duplicates: bool,
+        schema: str,
+    ) -> None:
+        """Insert rows, skipping only ID conflicts at commit in either mode."""
+        self.upsert_records(table_name, records, id_column, True, schema=schema)
+
     @contextmanager
     def store_table_transaction(
         self, table_name: str, path_json: str, *, schema: str

@@ -536,9 +536,13 @@ def test_a_reordered_append_is_stored_once_across_writers(
         PATH, _race_rows(1, 10, ("rid", "a", "b")), record_id_column="rid", flush=True
     )
     snapshot = stale._snapshot_for_commit
+    winner_committed: list[bool] = []
 
     def interleave(*args: Any) -> Any:
         taken = snapshot(*args)
+        if winner_committed:
+            return taken
+        winner_committed.append(True)
         other.add_records(
             PATH,
             _race_rows(2, 20, other_order),
@@ -804,12 +808,15 @@ def test_a_refused_reordered_append_leaves_the_next_batch_committed(
         db.add_records(PATH, bad, **kwargs)
     if race:
         snapshot = db._snapshot_for_commit
+        winner_committed: list[bool] = []
 
         def interleave(*args: Any) -> Any:
             taken = snapshot(*args)
-            DeltaTableDatabase(tmp_path).add_records(
-                PATH, _abc(3), flush=True, **kwargs
-            )
+            if not winner_committed:
+                winner_committed.append(True)
+                DeltaTableDatabase(tmp_path).add_records(
+                    PATH, _abc(3), flush=True, **kwargs
+                )
             return taken
 
         with patch.object(db, "_snapshot_for_commit", side_effect=interleave):
@@ -934,12 +941,15 @@ def test_a_delta_table_created_again_in_another_order_takes_the_batch(
     write_deltalake(tmp_path / "t", rows(1), mode="overwrite")
     db.add_records(PATH, rows(2), record_id_column="__record_id")
     snapshot = db._snapshot_for_commit
+    winner_committed: list[bool] = []
 
     def interleave(*args: Any) -> Any:
         taken = snapshot(*args)
-        DeltaTableDatabase(tmp_path).add_records(
-            PATH, rows(3), flush=True, record_id_column="__record_id"
-        )
+        if not winner_committed:
+            winner_committed.append(True)
+            DeltaTableDatabase(tmp_path).add_records(
+                PATH, rows(3), flush=True, record_id_column="__record_id"
+            )
         return taken
 
     with patch.object(db, "_snapshot_for_commit", side_effect=interleave):
