@@ -141,6 +141,30 @@ Every result table has, besides its type's record:
 The database keeps the row's record id, a UUIDv7 of 16 bytes, as its record id column.
 The result cache compares those bytes to break timestamp ties.
 
+The type of a token column is declared, once and for every function
+(`RESULT_TOKEN_COLUMN` in `orcapod.core.result_cache`): a nullable `large_string`. It is
+never taken from the values of a write, and a missing token is a `large_string` null. A
+function result's source-info token is one string: a result whose token column has any
+other type (a hand-built output given to `CachedDataFunction.record_data` with a list
+token) is refused with `InputValidationError`, naming the column and both types, before
+anything is written. A token type of your own cannot be declared.
+
+Every stored row has the token column of every output. A hand-built output that gives no
+token for an output (its row has no `_source_<key>` column) is stored with a null token
+there, on every database, in either order of the writes. A token column that names no
+output of the result is refused the same way, before anything is written.
+
+The stored field is the declared one whatever the written row's own field says: a row
+whose token field is non-nullable is stored under the nullable field, with its values
+unchanged. The cache checks the type in both the serialized row and its
+`DataProtocol.source_info_table`. A list, dictionary-encoded, or binary token
+column is refused even when its value is null.
+
+A result table that already holds a list token column, written before this rule by a
+custom `record_data`, is not rewritten: its path and column type stay, and every later
+write to it fails as a database write error. Remove that table, or use a new result
+database, and store the results again.
+
 ```python
 stored = types_store.get_all_records(next(p for p in types_store.list_sources() if "_result" in p))
 print([name for name in stored.column_names if not name.startswith("__pf_")])
@@ -226,7 +250,8 @@ rules above and its record, one `StoredColumn` per column (name, Python type, Ar
 nullability, meaning, and for a hash its label constant and what it covers). The data
 function builds its stored columns from it, the result cache takes the revision from it,
 and a loaded job finds it by the type id its saved uri names. The common columns are
-declared once, as `COMMON_RESULT_COLUMNS` in `orcapod.core.result_cache`.
+declared once, as `COMMON_RESULT_COLUMNS` in `orcapod.core.result_cache`, and the token
+column of an output beside them, as `RESULT_TOKEN_COLUMN`.
 
 Each declaration is also written out as a snapshot, `orcapod/data_function_types/<type
 name>/v<major>-rev<revision>.json` (`python.function/v1-rev1.json`), listed with its sha256
