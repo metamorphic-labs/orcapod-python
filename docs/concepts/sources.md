@@ -140,17 +140,18 @@ For example, `pa.large_list(pa.field("item", pa.int64(), nullable=False))` decla
 required items. That field has a different Arrow schema identity from the default
 nullable item. Use matching nested flags when joining sources or binding a slot.
 
-A Python `float` supplied for a column declared `numpy.float32` in a Python schema
-is converted as Arrow converts it. A value that `float32` cannot hold exactly is
-stored changed. For example, `0.1` becomes `0.10000000149011612` and `1e-50`
-becomes `0.0`. Orcapod issues one `ValueConversionWarning` per process, based
-on the input type and the declaration. Pass `numpy.float32` values to control
-the conversion, or declare the column `float` to keep Python float precision.
-The warning also applies to nested fields and values. A datagram built from a
-dict can warn while ordering dict keys or when building its Arrow table for
-`as_table()` or hashing. Values supplied as `numpy.float32` and values already
-stored as float32 in Arrow are quiet. Plain-value conversions driven by an Arrow
-schema, including updates to materialized datagrams, can still narrow silently.
+When a Python source or datagram receives a Python `float` for a top-level
+column declared `numpy.float32`, Orcapod issues a `ValueConversionWarning`.
+Python shows the warning once per location by default. Arrow
+can round values such as `0.1` to `0.10000000149011612` or `1e-50` to `0.0`.
+Pass `numpy.float32` values to control the conversion, or declare the column
+`float` to retain Python float precision. A `ListSource` that reuses an
+Arrow-backed float32 tag passes its values on as Python floats, so it can warn
+even when the stored values are already representable as float32. Float32
+positions inside a list, dict value, or struct do not warn. Updates to
+dict-backed datagrams and columns added with an explicit `numpy.float32`
+declaration can warn. Conversions driven by an Arrow schema, including updates
+to materialized datagrams, can narrow silently.
 
 Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
 column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,

@@ -7,8 +7,6 @@ import sys
 import warnings
 from types import FrameType
 
-WarningRegistry = dict[str | tuple[str, type[Warning], int], int]
-
 
 def outside_orcapod_stacklevel() -> int:
     """Return the stacklevel of the first frame outside Orcapod, as seen from the caller.
@@ -31,42 +29,14 @@ def outside_orcapod_stacklevel() -> int:
     return 2
 
 
-def error_filter_active(
-    message: str, category: type[Warning], frame: FrameType
-) -> bool:
-    """Return whether the first warning filter matching this warning makes it an error."""
-    return warning_filter_action(message, category, frame) == "error"
-
-
-def warning_filter_action(
-    message: str, category: type[Warning], frame: FrameType
-) -> str | None:
-    """Find the action of the first explicit filter matching a warning at a frame."""
-    module = str(frame.f_globals.get("__name__", "<string>"))
-    for action, text, filter_category, module_pattern, line in warnings.filters:
-        if (
-            issubclass(category, filter_category)
-            and (text is None or text.match(message))
-            and (module_pattern is None or module_pattern.match(module))
-            and line in (0, frame.f_lineno)
-        ):
-            return action
-    return None
-
-
-def warn_at_frame(
-    message: str,
-    category: type[Warning],
-    frame: FrameType,
-    *,
-    registry: WarningRegistry | None = None,
-) -> None:
-    """Issue a warning shown at ``frame``'s line through Python's warning filters.
+def warn_at_frame(message: str, category: type[Warning], frame: FrameType) -> None:
+    """Issue a warning shown at ``frame``'s line, at every call.
 
     The one place Orcapod issues a warning at a frame it names (ITL-1344), for the
-    warnings of a run, which are shown at the user's line that started it. With no
-    site registry, Python's once-per-text-and-line rule cannot hide the same warning
-    of the next run (a notebook cell run again).
+    warnings of a run, which are shown at the user's line that started it. Each call
+    has a fresh registry, so Python's once-per-text-and-line rule cannot hide the same
+    warning of the next run (a notebook cell run again); the user's filters (``ignore``,
+    ``error``) still apply.
 
     The frame's globals are never given to ``warnings.warn_explicit`` as
     ``module_globals``. Python uses them only to find the line's source text, and that
@@ -94,7 +64,6 @@ def warn_at_frame(
         message: The warning's text.
         category: The warning's class.
         frame: The frame whose file, line and module name the warning is shown at.
-        registry: Optional caller-owned registry populated by Python's warning filters.
     """
     filename = frame.f_code.co_filename
     _ = linecache.lazycache(filename, frame.f_globals)
@@ -104,5 +73,5 @@ def warn_at_frame(
         filename,
         frame.f_lineno,
         module=frame.f_globals.get("__name__"),
-        registry=registry,
+        registry=None,
     )

@@ -23,7 +23,6 @@ from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, TypedDict, get_args, get_origin
 
 import pyarrow as pa
-from numpy import float32
 
 from orcapod.contexts import DataContext, resolve_context
 from orcapod.errors import (
@@ -37,13 +36,6 @@ from orcapod.errors import (
 from orcapod.semantic_types.canonical_order import (
     sort_dict_entries,
     sort_set_elements,
-)
-from orcapod.semantic_types.float_narrowing import (
-    checked_float_columns,
-    checking_input_floats,
-    skip_float_checks,
-    stored_float_columns_by_row,
-    warn_on_python_float,
 )
 from orcapod.semantic_types.nested_none import (
     NestedNoneNotRestorableError,
@@ -1295,28 +1287,13 @@ class UniversalTypeConverter:
             for field_name, python_type in python_schema.items()
         }
 
-        checked = (
-            checked_float_columns(converters)
-            if checking_input_floats()
-            else frozenset()
-        )
-        stored_by_row = stored_float_columns_by_row.get()
         converted_data = []
         for record in python_dicts:
-            excluded = checked
-            if stored_by_row and (stored := stored_by_row.get(id(record))):
-                excluded = checked | stored
             converted_record = {}
             for field_name, converter in converters.items():
                 if field_name in record:
                     try:
-                        if field_name in excluded:
-                            with skip_float_checks():
-                                converted_record[field_name] = converter(
-                                    record[field_name]
-                                )
-                        else:
-                            converted_record[field_name] = converter(record[field_name])
+                        converted_record[field_name] = converter(record[field_name])
                     except CanonicalOrderError as exc:
                         # The ordering rule cannot say which column it was in.
                         raise CanonicalOrderError(
@@ -1417,14 +1394,10 @@ class UniversalTypeConverter:
                 "Arrow schema should not be None if reaching here"
             )
             python_schema = self.arrow_schema_to_python_schema(arrow_schema)
-            with skip_float_checks():
-                struct_dicts = self.python_dicts_to_struct_dicts(
-                    python_dicts, python_schema=python_schema
-                )
-        else:
-            struct_dicts = self.python_dicts_to_struct_dicts(
-                python_dicts, python_schema=python_schema
-            )
+
+        struct_dicts = self.python_dicts_to_struct_dicts(
+            python_dicts, python_schema=python_schema
+        )
 
         # TODO: add more helpful message here
         return pa.Table.from_pylist(struct_dicts, schema=arrow_schema)
@@ -1926,9 +1899,6 @@ class UniversalTypeConverter:
             # bool is an int subclass, but Arrow refuses it for an integer field.
             # Preserve the Python object in memory; encode its declared base here.
             return lambda value: int(value) if isinstance(value, bool) else value
-
-        if python_type is float32:
-            return warn_on_python_float
 
         if python_type in {int, float, str, bool, bytes} or origin is None:
             # Basic types - no conversion needed

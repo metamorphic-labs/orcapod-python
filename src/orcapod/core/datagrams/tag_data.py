@@ -26,7 +26,6 @@ import pyarrow as pa
 from orcapod import contexts
 from orcapod.core.datagrams.datagram import Datagram, context_key_field
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
-from orcapod.semantic_types.float_narrowing import skip_float_checks
 from orcapod.system_constants import constants
 from orcapod.types import (
     ColumnConfig,
@@ -280,10 +279,12 @@ class Tag(Datagram):
     ) -> Datagram:
         data = self.as_dict(columns=columns, all_info=all_info)
         python_schema = self.schema(columns=columns, all_info=all_info)
-        with skip_float_checks(self._stored_float_columns()):
-            return Datagram(
-                data, python_schema=python_schema, data_context=self._data_context
-            )
+        return Datagram(
+            data,
+            python_schema=python_schema,
+            data_context=self._data_context,
+            _warn_on_float_narrowing=False,
+        )
 
     def copy(self, include_cache: bool = True, preserve_id: bool = False) -> Self:
         new_tag = super().copy(include_cache=include_cache, preserve_id=preserve_id)
@@ -849,10 +850,12 @@ class Data(Datagram):
     ) -> Datagram:
         data = self.as_dict(columns=columns, all_info=all_info)
         python_schema = self.schema(columns=columns, all_info=all_info)
-        with skip_float_checks(self._stored_float_columns()):
-            return Datagram(
-                data=data, python_schema=python_schema, data_context=self._data_context
-            )
+        return Datagram(
+            data=data,
+            python_schema=python_schema,
+            data_context=self._data_context,
+            _warn_on_float_narrowing=False,
+        )
 
     def with_columns_of(self, other: "DataProtocol", names: "Sequence[str]") -> Self:
         """Return a copy with ``other``'s columns ``names`` placed first (ITL-1023).

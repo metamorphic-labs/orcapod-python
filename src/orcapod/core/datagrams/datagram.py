@@ -37,10 +37,7 @@ from orcapod.errors import CanonicalOrderError
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.semantic_types.canonical_order import canonical_python_value
-from orcapod.semantic_types.float_narrowing import (
-    checked_float_columns,
-    skip_float_checks,
-)
+from orcapod.semantic_types.float_narrowing import warn_float32_narrowing
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -143,6 +140,8 @@ class Datagram(ContentIdentifiableBase):
         record_uuid: uuid.UUID | None = None,
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
+        *,
+        _warn_on_float_narrowing: bool = True,
     ) -> None:
         if isinstance(data, pa.RecordBatch):
             data = pa.Table.from_batches([data])
@@ -153,6 +152,9 @@ class Datagram(ContentIdentifiableBase):
             self._init_from_dict(
                 data, python_schema, meta_info, data_context, record_uuid
             )
+            if _warn_on_float_narrowing and python_schema is not None:
+                assert self._data_dict is not None
+                warn_float32_narrowing((self._data_dict,), python_schema)
 
     def _init_from_dict(
         self,
@@ -192,7 +194,6 @@ class Datagram(ContentIdentifiableBase):
             if python_schema
             else inferred
         )
-        self._checked_float_columns = checked_float_columns(data_columns)
         self._data_dict = self._canonical_dict_values(
             data_columns, self._data_python_schema
         )
@@ -218,15 +219,13 @@ class Datagram(ContentIdentifiableBase):
         (dataclass or pydantic fields) are left as given.
         """
         out: dict[str, DataValue] = {}
-        checked = checked_float_columns(columns)
         for name, value in columns.items():
             try:
-                with skip_float_checks(None if name in checked else frozenset()):
-                    out[name] = canonical_python_value(
-                        value,
-                        schema.get(name),
-                        self.converter.get_python_to_arrow_converter,
-                    )
+                out[name] = canonical_python_value(
+                    value,
+                    schema.get(name),
+                    self.converter.get_python_to_arrow_converter,
+                )
             except CanonicalOrderError as exc:
                 raise CanonicalOrderError(f"Column {name!r}: {exc}") from exc
         return out
@@ -279,7 +278,6 @@ class Datagram(ContentIdentifiableBase):
         self._datagram_uuid = record_uuid
 
         self._data_table = data_table
-        self._checked_float_columns = frozenset()
         self._data_dict = None
         self._data_python_schema = None  # computed lazily
         self._data_arrow_schema = None  # computed lazily
@@ -400,12 +398,6 @@ class Datagram(ContentIdentifiableBase):
     # Internal helpers (lazy loading)
     # ------------------------------------------------------------------
 
-    def _stored_float_columns(self) -> frozenset[str]:
-        """Find columns already stored or validated for float input warnings."""
-        if self._data_table is not None:
-            return frozenset(self._data_table.column_names)
-        return self._checked_float_columns
-
     def _ensure_data_dict(self) -> dict[str, DataValue]:
         """
         Ensure that dictionary representation is materialized and then returned
@@ -423,11 +415,10 @@ class Datagram(ContentIdentifiableBase):
         """
         if self._data_table is None:
             assert self._data_dict is not None
-            with skip_float_checks(self._checked_float_columns):
-                self._data_table = self.converter.python_dicts_to_arrow_table(
-                    [self._data_dict],
-                    self._data_python_schema,
-                )
+            self._data_table = self.converter.python_dicts_to_arrow_table(
+                [self._data_dict],
+                self._data_python_schema,
+            )
         return self._data_table
 
     def _ensure_python_schema(self) -> Schema:
@@ -863,9 +854,6 @@ class Datagram(ContentIdentifiableBase):
                 if self._data_python_schema is not None and self._data_dict is not None
                 else None
             )
-            new_d._checked_float_columns = self._checked_float_columns.intersection(
-                column_names
-            )
             new_d._data_arrow_schema = None
             return new_d
         else:
@@ -878,9 +866,6 @@ class Datagram(ContentIdentifiableBase):
             # In the order given, as documented and as the Arrow branch does.
             new_d._data_dict = {k: self._data_dict[k] for k in column_names}
             new_d._data_python_schema = Schema({k: schema[k] for k in column_names})
-            new_d._checked_float_columns = self._checked_float_columns.intersection(
-                column_names
-            )
             new_d._data_arrow_schema = None
             return new_d
 
@@ -928,9 +913,6 @@ class Datagram(ContentIdentifiableBase):
             else:
                 new_d._data_dict = None
                 new_d._data_python_schema = None
-            new_d._checked_float_columns = self._checked_float_columns.difference(
-                column_names
-            )
             new_d._data_arrow_schema = None
             return new_d
         else:
@@ -950,9 +932,6 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_dict = new_data
             new_d._data_python_schema = Schema(
                 {k: v for k, v in schema.items() if k in new_data}
-            )
-            new_d._checked_float_columns = self._checked_float_columns.difference(
-                column_names
             )
             new_d._data_arrow_schema = None
             return new_d
@@ -979,7 +958,6 @@ class Datagram(ContentIdentifiableBase):
             ]
             new_d = self.copy(include_cache=False)
             new_d._data_table = self._data_table.rename_columns(new_names)
-            new_d._checked_float_columns = frozenset()
             new_d._data_dict = None
             new_d._data_python_schema = None
             new_d._data_arrow_schema = None
@@ -991,14 +969,6 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_dict = {
                 column_mapping.get(k, k): v for k, v in self._data_dict.items()
             }
-            # A rename can overwrite a column. Follow the same last value as the dict.
-            checked = {
-                column_mapping.get(k, k): k in self._checked_float_columns
-                for k in self._data_dict
-            }
-            new_d._checked_float_columns = frozenset(
-                k for k, keep in checked.items() if keep
-            )
             new_d._data_python_schema = Schema(
                 {column_mapping.get(k, k): v for k, v in schema.items()}
             )
@@ -1050,22 +1020,18 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_table = arrow_utils.hstack_tables(
                 self._data_table.drop_columns(list(updates.keys())), update_table
             ).select(self._data_table.column_names)
-            new_d._checked_float_columns = frozenset()
             new_d._data_dict = None
             new_d._data_python_schema = None
             new_d._data_arrow_schema = None
             return new_d
         else:
             assert self._data_dict is not None
+            schema = self._ensure_python_schema()
+            warn_float32_narrowing((updates,), schema)
             # Updated dict values are held in canonical key order, as at
             # construction (ITL-905); the caller's dicts are copied, not mutated.
-            canonical_updates = self._canonical_dict_values(
-                updates, self._ensure_python_schema()
-            )
+            canonical_updates = self._canonical_dict_values(updates, schema)
             new_d = self.copy(include_cache=False)
-            new_d._checked_float_columns = self._checked_float_columns.difference(
-                updates
-            )
             new_d._data_dict = {**self._data_dict, **canonical_updates}
             new_d._data_table = None
             return new_d
@@ -1189,6 +1155,7 @@ class Datagram(ContentIdentifiableBase):
                 f"Use update() to modify existing columns."
             )
 
+        warn_float32_narrowing((updates,), column_types)
         has_arrow_types = column_types is not None and any(
             isinstance(t, (pa.DataType, pa.Field)) for t in column_types.values()
         )
@@ -1227,8 +1194,7 @@ class Datagram(ContentIdentifiableBase):
             new_d = self.copy(include_cache=False)
             # New dict values are held in canonical key order, as at construction
             # (ITL-905); the caller's dicts are copied, not mutated.
-            with skip_float_checks(self._checked_float_columns):
-                new_d._data_dict = self._canonical_dict_values(new_data, new_schema)
+            new_d._data_dict = self._canonical_dict_values(new_data, new_schema)
             new_d._data_python_schema = new_schema
             new_d._data_table = None
             new_d._data_arrow_schema = None
@@ -1278,7 +1244,6 @@ class Datagram(ContentIdentifiableBase):
             else None
         )
         new_d._data_arrow_schema = self._data_arrow_schema
-        new_d._checked_float_columns = self._checked_float_columns
 
         # Meta — always dict
         new_d._meta = dict(self._meta)

@@ -3,14 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from orcapod.core.datagrams import Tag
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
 )
 from orcapod.protocols.core_protocols import TagProtocol
-from orcapod.semantic_types.float_narrowing import stored_float_columns_by_row
+from orcapod.semantic_types.float_narrowing import warn_float32_narrowing
 from orcapod.types import SchemaLike
 from orcapod.utils import arrow_utils
 from orcapod.utils.tensor_conversions import warn_source_tensor_conversions
@@ -96,21 +95,13 @@ class ListSource(RootSource):
 
         # Build rows: each row is tag_fields merged with {name: element}.
         rows = []
-        stored_columns: dict[int, frozenset[str]] = {}
         for idx, element in enumerate(self._elements):
             tag_fields = tag_function(element, idx)
-            stored: frozenset[str] = (
-                tag_fields._stored_float_columns()  # pyright: ignore[reportPrivateUsage]  # Track provenance across as_dict().
-                if isinstance(tag_fields, Tag)
-                else frozenset()
-            )
             if hasattr(tag_fields, "as_dict"):
                 tag_fields = tag_fields.as_dict()
             row = dict(tag_fields)
             row[name] = element
             rows.append(row)
-            if stored:
-                stored_columns[id(row)] = stored - {name}
 
         tag_columns = (
             list(self._expected_tag_keys)
@@ -118,13 +109,10 @@ class ListSource(RootSource):
             else [k for k in (rows[0].keys() if rows else []) if k != name]
         )
 
-        token = stored_float_columns_by_row.set(stored_columns or None)
-        try:
-            arrow_table = self.data_context.type_converter.python_dicts_to_arrow_table(
-                rows, python_schema=data_schema
-            )
-        finally:
-            stored_float_columns_by_row.reset(token)
+        warn_float32_narrowing(rows, data_schema)
+        arrow_table = self.data_context.type_converter.python_dicts_to_arrow_table(
+            rows, python_schema=data_schema
+        )
         if data_schema is None:
             # Canonical pattern for Python-origin sources: the type converter
             # defaults all fields to nullable=True. When no explicit schema is
