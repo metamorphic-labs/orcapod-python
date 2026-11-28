@@ -27,6 +27,10 @@ source id and hashes are not frozen with data context v1 (`PROVISIONAL_SOURCES`)
 
 ::: orcapod.core.sources.PostgreSQLTableSource
 
+::: orcapod.sources.SpiralDBTableSource
+
+::: orcapod.sources.DBTableSource
+
 ::: orcapod.core.sources.PollingSource
 
 ::: orcapod.core.sources.DerivedSource
