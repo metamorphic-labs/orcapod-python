@@ -1287,6 +1287,15 @@ _TAGINFO_ROW = "__fetch_taginfo_row"
 _RESULT_ROW = "__fetch_result_row"
 _EPHEMERAL_RESULT_ROW = "__fetch_ephemeral_result_row"
 
+# Logged for the inputs none of whose persistent records names a stored result. It
+# says what was found, never what a run will do: that depends on the run (ITL-1525).
+_NO_STORED_RESULT_MESSAGE = (
+    "%d inputs have pipeline records but no stored result in the persistent result "
+    "database (the results may have been deleted externally). A full run takes the "
+    "result the store holds for the input, or computes it when there is none; a "
+    "load-only run skips it."
+)
+
 # The pipeline-table columns the fetch filters, joins and reads entries by.
 _TAGINFO_MATCH_COLUMNS = (
     constants.NODE_CONTENT_HASH_COL,
@@ -3743,12 +3752,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     [constants.DATA_CONTEXT_COL]
                 )
             if results is None:
-                # Tag table has persistent entries but result DB is empty — data loss
+                # The pipeline table has persistent records but the result table is empty.
                 logger.warning(
-                    "%d pipeline DB entries have no match in persistent result DB "
-                    "— data may have been deleted externally. "
-                    "These inputs will be recomputed.",
-                    persistent_taginfo_df.height,
+                    _NO_STORED_RESULT_MESSAGE,
+                    persistent_taginfo_df.get_column(INSTANCE_ID_COL).n_unique(),
                 )
             else:
                 results_schema = results.schema
@@ -3757,15 +3764,15 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
-                # Warn about persistent tag rows that found no match in the result DB
-                missing_count = persistent_taginfo_df.height - full_persistent_df.height
+                # An input with another record whose result is stored is served that
+                # result, which is ordinary: only an input none of whose persistent
+                # records has a stored result is reported (ITL-1525).
+                missing_count = (
+                    persistent_taginfo_df.get_column(INSTANCE_ID_COL).n_unique()
+                    - full_persistent_df.get_column(INSTANCE_ID_COL).n_unique()
+                )
                 if missing_count > 0:
-                    logger.warning(
-                        "%d pipeline DB entries have no match in persistent result DB "
-                        "— data may have been deleted externally. "
-                        "These inputs will be recomputed.",
-                        missing_count,
-                    )
+                    logger.warning(_NO_STORED_RESULT_MESSAGE, missing_count)
                 persistent_df = full_persistent_df
 
         # ------------------------------------------------------------------
