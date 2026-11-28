@@ -1628,10 +1628,12 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
         from orcapod.pipeline.source_consistency import (
-            require_independent_source_binding,
+            binding_dependency_error,
+            independent_source_dependency,
         )
 
-        require_independent_source_binding(bound_source, name)
+        if (dependency := independent_source_dependency(bound_source)) is not None:
+            raise binding_dependency_error(dependency, name)
         if tag_schema is None or data_schema is None:
             if bound_source is None:
                 raise ValueError(
@@ -1736,12 +1738,12 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                 depends on a bindable source slot or on this job's own node (ITL-1559).
         """
         from orcapod.pipeline.source_consistency import (
-            require_independent_source_binding,
+            require_live_source_bindings,
         )
 
         owner = self._get_binding_owner()
         if owner is None:
-            require_independent_source_binding(value, self.name)
+            require_live_source_bindings((self,), rebinding=((self, value),))
             self._bind(value)
             self._update_modified_time()
         else:
@@ -2263,11 +2265,13 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             case _:
                 # Case 3: concrete stream — bound SJN.
                 from orcapod.pipeline.source_consistency import (
-                    require_independent_source_binding,
+                    binding_dependency_error,
+                    independent_source_dependency,
                 )
 
                 # Schema and source-name inference can consult the live inputs.
-                require_independent_source_binding(stream, name)
+                if (dependency := independent_source_dependency(stream)) is not None:
+                    raise binding_dependency_error(dependency, name)
                 # Slot name priority:
                 #   1. explicit *name* parameter
                 #   2. stream.source_name for RootSource (its id without the kind part)

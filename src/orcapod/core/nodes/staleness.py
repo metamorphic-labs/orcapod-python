@@ -13,6 +13,10 @@ from collections.abc import Iterable
 from typing import Any
 
 from orcapod.errors import live_input_cycle_error
+from orcapod.utils.lazy_module import LazyModule
+
+# Source consistency identifies job nodes using this mixin.
+_source_consistency = LazyModule("orcapod.pipeline.source_consistency")
 
 
 class RunHoldingNode:
@@ -55,6 +59,7 @@ class RunHoldingNode:
         stale (ITL-1095). A stale node reads empty until it runs again. Each node of
         the ancestry is checked once, however many paths lead to it.
         """
+        self._require_live_bindings()
         return _stale(self, {})
 
     def _own_staleness(self) -> bool:
@@ -79,7 +84,12 @@ class RunHoldingNode:
         Returns:
             ``True`` if the node holds a current run for such a run.
         """
+        self._require_live_bindings()
         return _current(self, load_only, {}, {})
+
+    def _require_live_bindings(self) -> None:
+        """Validate the stream graph even when there are no held rows to check."""
+        _source_consistency.require_live_source_bindings((self,))
 
     def _holds_run(self, *, load_only: bool) -> bool:
         """Whether the node holds the rows of a completed run good for such a run."""

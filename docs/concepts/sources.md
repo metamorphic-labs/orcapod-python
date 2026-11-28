@@ -104,17 +104,22 @@ The ITL-1559 stopgap also refuses a prebuilt stream over the receiving job's
 own slot. Pass that slot directly into a step inside the job, or pass the
 source itself.
 
-Binding a source slot to a source or stream that depends on any bindable slot
-raises `SourceSpecMismatchError` (ITL-1559). Pass the underlying source or
-use a non-slot node's `as_source()` to read stored results. If a batch contains
-a refused binding, every existing binding stays in place. Direct slot reads
-and job and node runs, including load-only runs, recheck the binding because
-an operator or wrapper can change its inputs after binding.
+Binding through a live input to any bindable slot, or binding to a node of the
+receiving job even through `as_source()`, raises `SourceSpecMismatchError`
+(ITL-1559). Another job's `node.as_source()` can provide stored results, provided
+its inputs do not lead back to the receiving slot through other bindings. The
+error names the slots involved in such a cycle. Pass an independent underlying
+source to break the cycle. A refused batch preserves all existing bindings.
+Direct reads and job and node runs, including load-only runs, recheck the
+binding because an operator or wrapper can change its inputs after binding.
 
 The capture and restriction checks follow wrappers that can read live inputs.
 This includes tag-copy `DerivedSource` over a live source. A `DerivedSource`
-over a job node reads stored results, so the checks stop there. Source object
-registration uses the wrapper itself and its content hash.
+over a job node reads stored results. Capture checks for an origin from the
+receiving job, and binding validation follows the origin's inputs because the
+derived source still uses the node's live schema and keys. Restriction checks
+stop at the wrapper, and source object registration uses the wrapper itself
+and its content hash.
 
 Capturing into a loaded job or recompiling it can lose its restored graph
 (ITL-1560). Recompilation preserves the loaded job's public `sources` mapping.

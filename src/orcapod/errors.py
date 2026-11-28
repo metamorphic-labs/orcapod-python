@@ -623,9 +623,14 @@ class SourceSpecMismatchError(InputValidationError, ValueError):
     """
 
 
-def live_input_cycle_error(label: str | None = None) -> SourceSpecMismatchError:
-    """Report a cycle found while following live inputs."""
-    location = "" if label is None else f" at {label!r}"
+def live_input_cycle_error(
+    label: str | None = None, *, slots: tuple[str, ...] = ()
+) -> SourceSpecMismatchError:
+    """Report a cycle found while following live and stored-result inputs."""
+    if slots:
+        location = " through source slots " + ", ".join(map(repr, slots))
+    else:
+        location = "" if label is None else f" at {label!r}"
     return SourceSpecMismatchError(
         f"A cycle in the live input graph{location} is not supported (ITL-1559). "
         "Remove the circular input or replace it with an independent source."

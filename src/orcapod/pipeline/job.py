@@ -8,6 +8,7 @@ import logging
 import sys
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING, Any, cast
 
 import orcapod
@@ -49,11 +50,12 @@ from orcapod.pipeline.run_summary import (
     warn_row_failures,
 )
 from orcapod.pipeline.source_consistency import (
+    binding_dependency_error,
+    independent_source_dependency,
     invocation_source_uses,
+    owned_node_dependency,
     require_consistent_sources,
-    require_independent_source_binding,
     require_live_source_bindings,
-    require_no_owned_node_dependency,
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
@@ -269,8 +271,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if key in visited:
                 continue
             visited.add(key)
-            if isinstance(stream, DerivedSource):
-                require_no_owned_node_dependency(stream, stream.source_name, self)
+            if (
+                isinstance(stream, DerivedSource)
+                and (dependency := owned_node_dependency(stream, self)) is not None
+            ):
+                raise binding_dependency_error(dependency, stream.source_name)
             if isinstance(stream, SourceJobNode):
                 if id(stream) not in own_nodes:
                     raise InconsistentSourceError(
@@ -315,11 +320,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             slot = self._persistent_node_map.get(key)
             if isinstance(slot, SourceJobNode):
                 stream = slot
-        if isinstance(stream, SourceJobNode):
-            require_independent_source_binding(stream.bound_source, stream.name, self)
-        else:
-            name = stream.source_name if isinstance(stream, RootSource) else None
-            require_independent_source_binding(stream, name, self)
+        source = stream.bound_source if isinstance(stream, SourceJobNode) else stream
+        if (dependency := independent_source_dependency(source, self)) is not None:
+            name = None
+            if isinstance(stream, SourceJobNode):
+                name = stream.name
+            elif isinstance(stream, RootSource):
+                name = stream.source_name
+            raise binding_dependency_error(dependency, name)
         return self.source_node_class.from_stream(stream)
 
     def compile(self) -> None:
@@ -654,9 +662,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self, rebinding: Rebinding
     ) -> list[tuple[SourceJobNode, cp.StreamProtocol | None, _DeclaredForm | None]]:
         """Validate the prospective job and prepare each changed slot's row form."""
-        for slot, source in rebinding:
-            require_independent_source_binding(source, slot.name, self)
         nodes = self._persistent_node_map.values()
+        # Walk the proposed bindings in input order so a refused batch names the
+        # same receiving slot as a single bind, then check the rest of the graph.
+        require_live_source_bindings(
+            chain((slot for slot, _ in rebinding), nodes),
+            rebinding=rebinding,
+        )
         require_consistent_sources(
             ((f"node {node.label!r}", node) for node in nodes), rebinding
         )
@@ -2028,7 +2040,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             else:
                 if source is None:
                     continue
-                require_independent_source_binding(source, spec_name)
+                if (dependency := independent_source_dependency(source)) is not None:
+                    raise binding_dependency_error(dependency, spec_name)
                 try:
                     # A rebuilt source whose column types changed is treated as
                     # one that could not be rebuilt (ITL-1112).

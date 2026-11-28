@@ -1683,6 +1683,9 @@ data. The rules:
   (ITL-1559). Binding, direct reads, and both job and node runs (including
   load-only) report a dependency as SourceSpecMismatchError. Pass the
   underlying source or use another job's node.as_source() for stored results.
+  A stored-result source still uses its origin's schema and keys. Binding checks
+  follow the origin's inputs through other jobs and refuse cycles, naming the
+  slots involved. A one-way stored-result binding stays supported.
   Call where() once and reuse the resulting object. A source object conflict
   raises InconsistentSourceError before the separate restriction check, which
   can see restrictions beneath wrappers.

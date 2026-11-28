@@ -1768,6 +1768,150 @@ def test_cold_function_held_reads_refuse_a_slot_cycle(
             _ = function.held_row_count()
 
 
+def _feedback_job(name: str, *, copy: bool = False) -> PipelineJob:
+    """Build a cold function job whose results fit another job's slot."""
+    from orcapod.sources import DerivedSource
+
+    root = _shifted_source(name, 0)
+    source = (
+        DerivedSource(root, source_id=name, tags_as_data={"t1": "copy"})
+        if copy
+        else root
+    )
+    with PipelineJob(name, database=InMemoryArrowDatabase()) as job:
+        _ = same_columns.pod(source, label="result")
+    return job
+
+
+@pytest.mark.parametrize("setter", [False, True], ids=["batch", "setter"])
+@pytest.mark.parametrize("chain", [False, True], ids=["mutual", "three_jobs"])
+def test_stored_result_bindings_refuse_cross_job_feedback(
+    setter: bool, chain: bool
+) -> None:
+    left, right = _feedback_job("left"), _feedback_job("right")
+    left_rows = left.nodes["result"].as_source()
+    right_rows = right.nodes["result"].as_source()
+    middle = _feedback_job("middle") if chain else None
+    if middle is None:
+        left.bind(sources={"left": right_rows})
+    else:
+        middle_rows = middle.nodes["result"].as_source()
+        middle.bind(sources={"middle": right_rows})
+        left.bind(sources={"left": middle_rows.cached(InMemoryArrowDatabase())})
+    assert left.nodes["left"].as_table().num_rows == 0
+    right_source = right.sources["right"]
+
+    with pytest.raises(SourceSpecMismatchError, match="cycle.*ITL-1559") as error:
+        _rebind(right, {"right": left_rows}, setter=setter)
+
+    assert "'left'" in str(error.value) and "'right'" in str(error.value)
+    if chain:
+        assert "'middle'" in str(error.value)
+    assert right.sources["right"] is right_source
+    assert right.nodes["right"].bound_source is right_source
+    assert left.nodes["left"].as_table().num_rows == 0
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "run",
+        "run_async",
+        "load_only",
+        "node_run",
+        "slot_table",
+        "node_table",
+        "derived_table",
+        "derived_head",
+        "node_head",
+        "staleness",
+        "current",
+        "preview",
+    ],
+)
+def test_reads_refuse_stored_result_feedback_introduced_by_proxy(entry: str) -> None:
+    from orcapod.core.sources.source_proxy import SourceProxy
+    from orcapod.sources import DerivedSource
+
+    left, right, independent = (
+        _feedback_job(name, copy=True) for name in ("left", "right", "left")
+    )
+    result = left.nodes["result"]
+    left_rows = result.as_source()
+    independent_rows = independent.nodes["result"].as_source()
+    right_rows = right.nodes["result"].as_source()
+    proxy = SourceProxy(
+        independent_rows.source_id,
+        independent_rows.content_hash().to_string(),
+        independent_rows.pipeline_hash().to_string(),
+        *independent_rows.output_schema(),
+    )
+    proxy.bind(independent_rows)
+    left.bind(
+        sources={
+            "left": DerivedSource(
+                right_rows, source_id="read_right", tags_as_data={"t1": "copy"}
+            )
+        }
+    )
+    right.bind(
+        sources={
+            "right": DerivedSource(
+                proxy, source_id="read_left", tags_as_data={"t1": "copy"}
+            )
+        }
+    )
+    proxy.bind(left_rows)
+
+    if entry == "preview":
+        message = result._repr_html_()
+    else:
+        reads = {
+            "run": left.run,
+            "run_async": lambda: asyncio.run(left.run_async()),
+            "load_only": lambda: left.run(load_only=True),
+            "node_run": result.run,
+            "slot_table": left.nodes["left"].as_table,
+            "node_table": result.as_table,
+            "derived_table": left_rows.as_table,
+            "derived_head": left_rows.head,
+            "node_head": result.head,
+            "staleness": lambda: result.is_stale,
+            "current": result.holds_current_run,
+        }
+        with pytest.raises(SourceSpecMismatchError, match="cycle.*ITL-1559") as error:
+            _ = reads[entry]()
+        message = str(error.value)
+    assert "'left'" in message and "'right'" in message
+    assert "cycle" in message and "ITL-1559" in message
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["delegate", "cache"])
+@pytest.mark.parametrize("late", [False, True], ids=["capture", "compile"])
+def test_pipeline_refuses_a_proxy_cycle(cached: bool, late: bool) -> None:
+    from orcapod.core.sources.source_proxy import SourceProxy
+
+    source = _shifted_source("input", 0)
+    proxy = SourceProxy(
+        source.source_id,
+        source.content_hash().to_string(),
+        source.pipeline_hash().to_string(),
+        *source.output_schema(),
+    )
+    circular = proxy.cached(InMemoryArrowDatabase()) if cached else proxy
+    graph = Pipeline("cycle")
+    if late:
+        with pytest.raises(SourceSpecMismatchError, match="cycle.*ITL-1559"), graph:
+            _ = total.pod(proxy, label="result")
+            proxy.bind(circular)
+    else:
+        proxy.bind(circular)
+        with graph:
+            with pytest.raises(SourceSpecMismatchError, match="cycle.*ITL-1559"):
+                _ = total.pod(proxy, label="result")
+        assert "result" not in graph.nodes
+
+
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,

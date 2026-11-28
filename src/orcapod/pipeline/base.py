@@ -21,6 +21,7 @@ from orcapod.pipeline.pod_invocation import (
 from orcapod.pipeline.source_consistency import (
     invocation_source_uses,
     require_consistent_sources,
+    require_live_source_bindings,
 )
 from orcapod.side_effects import SideEffectNode
 from orcapod.protocols import core_protocols as cp
@@ -361,6 +362,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         inputs = tuple(invocation.input_streams)
         self._validate_capture_sources(inputs)
+        uses = tuple(self._source_uses(invocation))
+        require_live_source_bindings(stream for _, stream in uses)
         key = invocation.content_hash().to_string()
         input_keys = tuple(upstream.content_hash().to_string() for upstream in inputs)
         # Checked before anything is recorded, so a refused invocation leaves the
@@ -369,7 +372,6 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # streams lead to it: every source this invocation reads is checked with
         # every source the pipeline's streams read now (nothing is remembered: a
         # slot rebound since the last invocation changes what they read).
-        uses = tuple(self._source_uses(invocation))
         require_consistent_sources(uses)
         require_one_restriction(stream for _, stream in uses)
 
@@ -541,6 +543,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # the last invocation would otherwise connect a branch recorded over one
         # restriction to another (ITL-1218).
         uses = tuple(self._source_uses())
+        require_live_source_bindings(stream for _, stream in uses)
         require_consistent_sources(uses)
         require_one_restriction(stream for _, stream in uses)
 
@@ -832,7 +835,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             A compiled instance of ``cls``.
         """
         instance = cls(name=name)
-        instance._validate_capture_sources(
+        inputs = tuple(
             chain(
                 graph.source_streams.values(),
                 chain.from_iterable(
@@ -840,6 +843,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 ),
             )
         )
+        instance._validate_capture_sources(inputs)
+        require_live_source_bindings(inputs)
         require_consistent_sources(invocation_source_uses(graph.invocations))
         instance._source_streams = dict(graph.source_streams)
         for inv in graph.invocations:

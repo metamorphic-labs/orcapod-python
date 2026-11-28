@@ -4225,6 +4225,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 config, ViewStatus.UNAVAILABLE, note="no database attached"
             )
         if self._run_entry_counts is None:
+            if status != LoadStatus.CACHE_ONLY:
+                self._require_live_bindings()
             return self._head_without_rows(
                 config, ViewStatus.NOT_COMPUTED, note=JOB_NODE_NOT_RUN_NOTE
             )
@@ -4316,16 +4318,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             RuntimeError: If ``load_status`` is UNAVAILABLE.
         """
         from orcapod.pipeline.serialization import LoadStatus
-        from orcapod.pipeline.source_consistency import require_live_source_bindings
 
         status = self.load_status
         if status == LoadStatus.UNAVAILABLE:
             raise self._no_database_error()
         # A CACHE_ONLY node has no live input to be stale against.
-        if status != LoadStatus.CACHE_ONLY:
-            require_live_source_bindings((self,))
-            if self.is_stale:
-                self.clear_cache()
+        if status != LoadStatus.CACHE_ONLY and self.is_stale:
+            self.clear_cache()
 
     def run(self, *, load_only: bool = False) -> StreamView:
         """Run the node as a job run would, and return a ``StreamView`` of its rows.

@@ -390,6 +390,9 @@ Orcapod checks this when binding, when reading the slot directly, and before
 each job or node run, including a load-only run. This also protects the schema
 and hash lookups needed to construct an `as_source()` result. Pass the
 underlying source, or use another job's `node.as_source()` to read stored results.
+The stored-result source still uses its origin's schema and keys, so Orcapod
+checks the origin's inputs across jobs. If those inputs lead back to the receiving
+slot, the binding is refused and the error names the slots in the cycle.
 
 ```python
 from orcapod.errors import SourceSpecMismatchError

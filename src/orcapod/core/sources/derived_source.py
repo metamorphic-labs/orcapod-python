@@ -280,7 +280,7 @@ class DerivedSource(RootSource):
 
         if isinstance(origin, RunHoldingNode):
             # Constructing a stored-result source can inspect the live node's
-            # schema or hash. Once constructed, its live-input walk ends there.
+            # schema or hash.
             require_live_source_bindings((origin,))
         self._tags_as_data: dict[str, str] | None = None
         if tags_as_data is not None:
@@ -328,6 +328,7 @@ class DerivedSource(RootSource):
         Returns:
             The identity structure.
         """
+        self._require_origin_bindings()
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         if self._tags_as_data is None:
             # Tied precisely to the specific node's data identity
@@ -434,6 +435,7 @@ class DerivedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
+        self._require_origin_bindings()
         if self._tags_as_data is None:
             return self._origin.output_schema(columns=columns, all_info=all_info)
         return self._columns_stream(self._tags_as_data).output_schema(
@@ -446,6 +448,7 @@ class DerivedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        self._require_origin_bindings()
         if self._tags_as_data is None:
             return self._origin.keys(columns=columns, all_info=all_info)
         return self._columns_stream(self._tags_as_data).keys(
@@ -495,6 +498,12 @@ class DerivedSource(RootSource):
     def stored_result_origin(self) -> StreamProtocol | None:
         """Return the stored-result node whose live schema and keys this source uses."""
         return self._origin if self.live_source_inputs is None else None
+
+    def _require_origin_bindings(self) -> None:
+        """Check the origin before obtaining even cached rows or metadata."""
+        from orcapod.pipeline.source_consistency import require_live_source_bindings
+
+        require_live_source_bindings((self,))
 
     def _origin_records(self) -> "pa.Table | None":
         """Return the origin's rows, or ``None`` when a job node has none stored.
@@ -669,6 +678,7 @@ class DerivedSource(RootSource):
     def _get_stream(self) -> ArrowTableStream:
         # Every read of rows notes the provisional use, also of rows kept from an
         # earlier read (ITL-1331), as a provisional operator's stream does.
+        self._require_origin_bindings()
         self._note_provisional_identity_use()
         if self._tags_as_data is not None:
             if self._cached_stream is not None:
@@ -719,6 +729,7 @@ class DerivedSource(RootSource):
             ``True`` if the source's modified time moved: it holds new rows, or it holds
             none and its origin changed.
         """
+        self._require_origin_bindings()
         if isinstance(self._origin, RootSource):
             _ = self._origin.check_for_new_data()
         seen = self._origin.last_modified
@@ -753,6 +764,7 @@ class DerivedSource(RootSource):
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the origin."""
+        self._require_origin_bindings()
         return schema_requires_io(self._origin, config)
 
     def head(
@@ -773,6 +785,7 @@ class DerivedSource(RootSource):
         its head (see ``StreamBase.head``).
         """
         check_head_size(n)
+        self._require_origin_bindings()
         # A preview is a read of rows: it notes the provisional use (ITL-1331).
         self._note_provisional_identity_use()
         config = ColumnConfig.handle_config(columns, all_info=all_info)
