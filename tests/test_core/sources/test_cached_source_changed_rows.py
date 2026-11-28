@@ -627,6 +627,41 @@ def test_checking_for_new_data_leaves_a_nested_delivery_for_the_read(
     assert _stored_cache(outer, outer_db).equals(outer_before)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="A positional DerivedSource reads the actual Delta order after its origin writes.",
+)
+def test_a_refused_positional_derivation_leaves_its_delta_origin_unchanged(
+    tmp_path: Path,
+) -> None:
+    inner_db = DeltaTableDatabase(tmp_path / "inner")
+    outer_db = InMemoryArrowDatabase()
+
+    def nested(ids: list[int]) -> tuple[CachedSource, CachedSource]:
+        inner = ArrowTableSource(
+            pa.table({"id": ids, "value": ids}),
+            source_id="readings",
+            record_id_columns="id",
+            tag_columns="id",
+            tag_only_columns=True,
+        ).cached(inner_db)
+        derived = DerivedSource(
+            inner, source_id="derived", tags_as_data={"id": "copied_id"}
+        )
+        return inner, derived.cached(outer_db)
+
+    initial_inner, initial_outer = nested([1])
+    _ = initial_outer.as_table()
+    before = _stored_cache(initial_inner, inner_db)
+
+    # Delta reads the appended row first, so the derivation now gives row_0 to ID 2.
+    updated_inner, updated_outer = nested([1, 2])
+    with pytest.raises(CachedSourceChangedRowError, match="row_0"):
+        _ = updated_outer.as_table()
+    assert _stored_cache(updated_inner, inner_db).equals(before)
+
+
 @pytest.mark.parametrize(
     ("name", "source_tag"),
     [
