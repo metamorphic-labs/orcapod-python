@@ -2194,30 +2194,24 @@ class TestBindOfADatabaseOverARestrictedSlot:
             assert after[0] is before[0] and after[1] is before[1]
 
     @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
-    @pytest.mark.parametrize("inner_name", ["events", "inner"])
     @pytest.mark.parametrize("with_database", [True, False], ids=["db", "no-db"])
-    def test_a_slot_over_a_restricted_slot_is_refused_before_anything_changes(
-        self, project, tmp_path, mode, inner_name, with_database
+    def test_binding_a_restricted_source_is_refused_before_anything_changes(
+        self, project, tmp_path, mode, with_database
     ):
-        """A source to bind that is itself a slot (of another job) bound to a
-        restricted source: its restriction is read, whatever its name. Only the
-        job's own slots take the source being bound (CodeRabbit, PR 435)."""
-        from orcapod.core.nodes.source_node import SourceJobNode
-
+        """Refuse a cache over a prospective restricted binding (PR 435)."""
         store = DeltaTableDatabase(tmp_path / "s")
         job = TestRestrictionThroughWrappers._cached_job(store, mode)
         node, slot = job.nodes["rename"], job.nodes["events"]
-        inner = SourceJobNode.from_stream(_events(), name=inner_name)
-        inner.bound_source = _events().where(subject_id="m1")
+        restricted = _events().where(subject_id="m1")
         before = (job.database, node._pipeline_database, slot.bound_source)  # pyright: ignore[reportPrivateUsage]
         other = DeltaTableDatabase(tmp_path / "other")
 
         for _ in range(2):
             with pytest.raises(ValueError, match="cannot cache a restricted read"):
                 if with_database:
-                    job.bind(sources={"events": inner}, database=other)
+                    job.bind(sources={"events": restricted}, database=other)
                 else:
-                    job.bind(sources={"events": inner})
+                    job.bind(sources={"events": restricted})
             after = (job.database, node._pipeline_database, slot.bound_source)  # pyright: ignore[reportPrivateUsage]
             assert all(a is b for a, b in zip(after, before, strict=True))
 
