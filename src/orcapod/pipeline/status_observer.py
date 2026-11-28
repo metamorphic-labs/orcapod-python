@@ -60,7 +60,11 @@ from uuid_utils import uuid7
 
 from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.observer import NoOpLogger
-from orcapod.pipeline.observer_losses import STATUS_EVENTS, record_lost_event
+from orcapod.pipeline.observer_losses import (
+    STATUS_EVENTS,
+    RunLossObserver,
+    report_lost_event,
+)
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
 
@@ -77,7 +81,7 @@ DEFAULT_STATUS_PATH: tuple[str, ...] = ("execution_status",)
 _NOOP_LOGGER = NoOpLogger()
 
 
-class StatusObserver:
+class StatusObserver(RunLossObserver):
     """Writes node execution status to a pre-scoped status database.
 
     Instantiate once, outside the pipeline, and pass to the orchestrator::
@@ -124,6 +128,7 @@ class StatusObserver:
         ctx = _ContextualizedStatusObserver(self._db.at(*identity_path))
         ctx._current_run_id = self._current_run_id
         ctx._current_pipeline_uri = self._current_pipeline_uri
+        ctx._run_losses = self._run_losses
         return ctx
 
     # -- lifecycle hooks --
@@ -135,7 +140,7 @@ class StatusObserver:
     ) -> None:
         self._current_run_id = run_id
         self._current_pipeline_uri = pipeline_uri
-        self._tag_schema_per_node.clear()
+        self._tag_schema_per_node = {}
 
     def on_run_end(self, run_id: str) -> None:
         self._tag_schema_per_node.clear()
@@ -305,15 +310,18 @@ class StatusObserver:
         except Exception as error:
             # The run goes on: its results do not depend on this row. The loss is
             # logged here and reported by the run (ITL-1556).
-            logger.exception(
+            report_lost_event(
+                self._run_losses,
+                STATUS_EVENTS,
+                error,
+                logger,
                 "StatusObserver: failed to write status event for node=%s state=%s",
                 node_label,
                 state,
             )
-            record_lost_event(self._current_run_id, STATUS_EVENTS, error)
 
 
-class _ContextualizedStatusObserver:
+class _ContextualizedStatusObserver(RunLossObserver):
     """ExecutionObserverProtocol implementation bound to a specific node identity path.
 
     One instance is created per node per run via StatusObserver.contextualize().
@@ -336,10 +344,10 @@ class _ContextualizedStatusObserver:
     def contextualize(self, *identity_path: str) -> "_ContextualizedStatusObserver":
         """Re-contextualize with a new identity path (scopes the DB)."""
         ctx = _ContextualizedStatusObserver(self._db.at(*identity_path))
-        # The copy belongs to the same run: its events carry, and its losses are
-        # reported under, that run's id.
+        # The copy belongs to the same execution and keeps its metadata and counter.
         ctx._current_run_id = self._current_run_id
         ctx._current_pipeline_uri = self._current_pipeline_uri
+        ctx._run_losses = self._run_losses
         return ctx
 
     def on_run_start(
@@ -441,10 +449,13 @@ class _ContextualizedStatusObserver:
         except Exception as error:
             # The run goes on; the loss is logged here and reported by the run
             # (ITL-1556).
-            logger.exception(
+            report_lost_event(
+                self._run_losses,
+                STATUS_EVENTS,
+                error,
+                logger,
                 "_ContextualizedStatusObserver: failed to write status event "
                 "for node=%s state=%s",
                 node_label,
                 state,
             )
-            record_lost_event(self._current_run_id, STATUS_EVENTS, error)

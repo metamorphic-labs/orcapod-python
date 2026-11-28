@@ -32,7 +32,7 @@ from orcapod.pipeline.node_run import (
     clear_run_rows,
     plan_run,
 )
-from orcapod.pipeline.observer_losses import collecting_lost_events
+from orcapod.pipeline.observer_losses import RunLosses
 from orcapod.pipeline.restrictions import (
     refuse_restricted_operator_caches,
     refuse_restriction_conflicts,
@@ -108,13 +108,16 @@ class _PreparedRun:
 
 
 def _with_counter(
-    observer: "ExecutionObserverProtocol | None", counter: RunCountingObserver
+    observer: "ExecutionObserverProtocol | None",
+    counter: RunCountingObserver,
+    losses: RunLosses,
 ) -> "ExecutionObserverProtocol":
     """The observer a run passes to its orchestrator: the user's, plus the row counter.
 
     Args:
         observer: The observer the user passed to ``run``, if any.
         counter: The run's row counter.
+        losses: The run's observer write losses.
 
     Returns:
         ``counter`` alone, or a ``CompositeObserver`` calling ``observer`` then ``counter``.
@@ -123,7 +126,7 @@ def _with_counter(
         return counter
     from orcapod.pipeline.composite_observer import CompositeObserver
 
-    return CompositeObserver(observer, counter)  # pyright: ignore[reportReturnType]  # forwards every hook; its **kwargs signatures do not match the protocol structurally
+    return CompositeObserver(observer, counter)._with_run_losses(losses)  # pyright: ignore[reportPrivateUsage, reportReturnType]  # forwards every hook; its **kwargs signatures do not match the protocol structurally
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -1090,16 +1093,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
         is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
         # Observer events that cannot be written do not stop the run; they are
-        # counted under the run's id and reported at its end (ITL-1556).
-        with (
-            collecting_lost_events(prepared.run_id) as losses,
-            self._executing(prepared, plan, commit_every_rows, load_only=load_only),
-        ):
+        # counted by the run's observers and reported at its end (ITL-1556).
+        losses = RunLosses()
+        run_observer = _with_counter(observer, counter, losses)
+        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             if is_sync:
                 # Held nodes give their output streams on the sync path (ITL-1347).
                 _ = effective_orchestrator.run(
                     plan.dag,
-                    observer=_with_counter(observer, counter),
+                    observer=run_observer,
                     run_id=prepared.run_id,
                     pipeline_uri=prepared.pipeline_uri,
                     materialize_results=materialize_results,
@@ -1110,7 +1112,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 # The async path sends the rows the plan took (until stage 5).
                 _ = effective_orchestrator.run(
                     plan.dag,
-                    observer=_with_counter(observer, counter),
+                    observer=run_observer,
                     run_id=prepared.run_id,
                     pipeline_uri=prepared.pipeline_uri,
                     materialize_results=materialize_results,
@@ -1183,14 +1185,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # The state rule (ITL-1095): a node that holds a current run is not run again.
         plan = prepared.plan
         counter = RunCountingObserver()
-        # Lost observer events are counted under the run's id, as in ``run`` (ITL-1556).
-        with (
-            collecting_lost_events(prepared.run_id) as losses,
-            self._executing(prepared, plan, commit_every_rows, load_only=load_only),
-        ):
+        losses = RunLosses()
+        run_observer = _with_counter(observer, counter, losses)
+        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
             _ = await orchestrator.run_async(
                 plan.dag,
-                observer=_with_counter(observer, counter),
+                observer=run_observer,
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
                 materialize_results=materialize_results,

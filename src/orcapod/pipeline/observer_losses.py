@@ -1,28 +1,20 @@
 """Observer events a run could not record (ITL-1556).
 
-The status and logging observers record run events as rows in a database. A write that
-fails does not stop the run: its results do not depend on those rows. The loss is
-reported instead. A run opens a record under its run id (``collecting_lost_events``), an
-observer that fails to write an event adds to the record of its run
-(``record_lost_event``), and the run puts the record in its ``RunSummary`` and warns once
-at its end.
-
-The record is found by run id, which every observer of a run is given
-(``on_run_start``), so it holds for each contextualized copy of an observer and for an
-observer inside a ``CompositeObserver`` alike. An event lost outside an open record (an
-observer handed to an orchestrator or a node directly, with no job run to report it) is
-only logged by its observer.
+Each job execution gives its built-in observers a shared counter. Their contextualized
+copies and data loggers carry the counter with them, including onto worker threads.
+An observer used directly by an orchestrator or node only logs failed writes.
 """
 
 from __future__ import annotations
 
 import threading
-from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    import logging
+    from typing import Self
 
 STATUS_EVENTS = "status"
 """The kind of the events a ``StatusObserver`` records."""
@@ -67,7 +59,11 @@ class RunLosses:
             kind: The observer kind.
             error: What the failed write raised.
         """
-        text = f"{type(error).__name__}: {error}"
+        try:
+            message = str(error)
+        except Exception:
+            message = "<message unavailable>"
+        text = f"{type(error).__name__}: {message}"
         with self._lock:
             self._counts[kind] = self._counts.get(kind, 0) + 1
             _ = self._first_errors.setdefault(kind, text)
@@ -85,40 +81,31 @@ class RunLosses:
             }
 
 
-_open_lock = threading.Lock()
-_open_records: dict[str, RunLosses] = {}
+class RunLossObserver:
+    """A built-in observer whose copy can collect losses for one job execution."""
+
+    _run_losses: RunLosses | None = None
+
+    def with_run_losses(self, losses: RunLosses) -> Self:
+        """Copy the observer with a counter for this job's execution."""
+        observer = copy(self)
+        observer._run_losses = losses
+        return observer
 
 
-@contextmanager
-def collecting_lost_events(run_id: str) -> Iterator[RunLosses]:
-    """Keep a record of the observer events lost under ``run_id`` while the block runs.
-
-    Args:
-        run_id: The run's id, as the run gives it to its observers.
-
-    Yields:
-        The run's record; read it (``by_kind``) once the run's nodes have finished.
-    """
-    losses = RunLosses()
-    with _open_lock:
-        _open_records[run_id] = losses
-    try:
-        yield losses
-    finally:
-        with _open_lock:
-            if _open_records.get(run_id) is losses:
-                del _open_records[run_id]
-
-
-def record_lost_event(run_id: str, kind: str, error: BaseException) -> None:
-    """Add one lost event to the record of run ``run_id``, if a run keeps one.
-
-    Args:
-        run_id: The run the observer was started for.
-        kind: The observer kind (``STATUS_EVENTS`` or ``LOGGING_EVENTS``).
-        error: What the failed write raised.
-    """
-    with _open_lock:
-        losses = _open_records.get(run_id)
+def report_lost_event(
+    losses: RunLosses | None,
+    kind: str,
+    error: Exception,
+    logger: logging.Logger,
+    message: str,
+    *args: str,
+) -> None:
+    """Count a failed observer write and log the exception from its handler."""
     if losses is not None:
         losses.record(kind, error)
+    try:
+        logger.exception(message, *args, stacklevel=2)
+    except Exception:
+        # An application log handler can raise. The observer write remains nonfatal.
+        pass

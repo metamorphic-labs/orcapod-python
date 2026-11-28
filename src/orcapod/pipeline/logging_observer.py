@@ -53,7 +53,12 @@ from uuid_utils import uuid7
 
 from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.logging_capture import install_capture_streams
-from orcapod.pipeline.observer_losses import LOGGING_EVENTS, record_lost_event
+from orcapod.pipeline.observer_losses import (
+    LOGGING_EVENTS,
+    RunLosses,
+    RunLossObserver,
+    report_lost_event,
+)
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 
 if TYPE_CHECKING:
@@ -86,11 +91,14 @@ class DataLogger:
         log_path: tuple[str, ...],
         run_id: str,
         tag_data: dict[str, Any],
+        *,
+        losses: RunLosses | None = None,
     ) -> None:
         self._db = db
         self._log_path = log_path
         self._run_id = run_id
         self._tag_data = tag_data
+        self._run_losses = losses
 
     def record(self, **kwargs: Any) -> None:
         """Write one log row to the database.
@@ -133,13 +141,16 @@ class DataLogger:
         except Exception as error:
             # The run goes on: its results do not depend on this row. The loss is
             # logged here and reported by the run (ITL-1556).
-            logger.exception(
+            report_lost_event(
+                self._run_losses,
+                LOGGING_EVENTS,
+                error,
+                logger,
                 "LoggingObserver: failed to write log row",
             )
-            record_lost_event(self._run_id, LOGGING_EVENTS, error)
 
 
-class LoggingObserver:
+class LoggingObserver(RunLossObserver):
     """Writes data-level logs to a pre-scoped log database.
 
     Instantiate once, outside the pipeline, and pass to the orchestrator::
@@ -185,7 +196,7 @@ class LoggingObserver:
                 "LoggingObserver.contextualize() requires a non-empty identity_path."
             )
         return _ContextualizedLoggingObserver(
-            self._db.at(*identity_path), self._current_run_id
+            self._db.at(*identity_path), self._current_run_id, self._run_losses
         )
 
     # -- lifecycle hooks --
@@ -237,6 +248,7 @@ class LoggingObserver:
             log_path=DEFAULT_LOG_PATH,
             run_id=self._current_run_id,
             tag_data=dict(tag),
+            losses=self._run_losses,
         )
 
     # -- convenience --
@@ -311,7 +323,7 @@ class LoggingObserver:
         return cls(db)
 
 
-class _ContextualizedLoggingObserver:
+class _ContextualizedLoggingObserver(RunLossObserver):
     """ExecutionObserverProtocol implementation bound to a specific node identity path.
 
     One instance per node per run, created via LoggingObserver.contextualize().
@@ -325,16 +337,20 @@ class _ContextualizedLoggingObserver:
         self,
         db: ArrowDatabaseProtocol,
         run_id: str = "",
+        losses: RunLosses | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
+        self._run_losses = losses
 
     def contextualize(self, *identity_path: str) -> "_ContextualizedLoggingObserver":
         """Re-contextualize with a new identity path (scopes the DB)."""
-        return _ContextualizedLoggingObserver(self._db.at(*identity_path), self._run_id)
+        return _ContextualizedLoggingObserver(
+            self._db.at(*identity_path), self._run_id, self._run_losses
+        )
 
     def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
-        pass
+        self._run_id = run_id
 
     def on_run_end(self, run_id: str) -> None:
         pass
@@ -382,4 +398,5 @@ class _ContextualizedLoggingObserver:
             log_path=DEFAULT_LOG_PATH,
             run_id=self._run_id,
             tag_data=tag_data,
+            losses=self._run_losses,
         )

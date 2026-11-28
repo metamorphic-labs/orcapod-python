@@ -13,9 +13,12 @@ import logging
 import threading
 import warnings
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any
 
 import pytest
+from typing_extensions import override
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
@@ -29,6 +32,7 @@ from orcapod.pipeline import (
     StatusObserver,
     SyncPipelineOrchestrator,
 )
+from orcapod.pipeline.observer import NoOpObserver
 from tests.test_core.operators.several_items import (
     DATA_FIRST_REVERSED,
     MAIN,
@@ -68,8 +72,11 @@ class _Refusals:
         writes: The writes attempted so far.
     """
 
-    def __init__(self, accept_first: int | None) -> None:
+    def __init__(
+        self, accept_first: int | None, error: type[OSError] = OSError
+    ) -> None:
         self.accept_first: int | None = accept_first
+        self.error = error
         self.writes: int = 0
         # Observer hooks may be called from several threads.
         self.lock: threading.Lock = threading.Lock()
@@ -100,16 +107,16 @@ class _RefusingDatabase:
                 and refusals.writes > refusals.accept_first
             )
         if refused:
-            raise OSError("store refuses writes")
+            raise refusals.error("store refuses writes")
         self._database.add_record(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._database, name)
 
 
-def _database(accept_first: int | None = 0) -> Any:
+def _database(accept_first: int | None = 0, *, error: type[OSError] = OSError) -> Any:
     """A database refusing every write after the first ``accept_first``."""
-    return _RefusingDatabase(InMemoryArrowDatabase(), _Refusals(accept_first))
+    return _RefusingDatabase(InMemoryArrowDatabase(), _Refusals(accept_first, error))
 
 
 def _job(arrangement: Arrangement, store: Any = None) -> PipelineJob:
@@ -429,7 +436,7 @@ def test_the_warning_can_be_turned_into_an_error_after_the_run_is_kept(
 def test_a_recontextualized_status_observer_keeps_its_run() -> None:
     """A copy contextualized twice writes its run's id and reports under it."""
     from orcapod.core.datagrams import Tag
-    from orcapod.pipeline.observer_losses import collecting_lost_events
+    from orcapod.pipeline.observer_losses import RunLosses
 
     stored = StatusObserver(InMemoryArrowDatabase())
     stored.on_run_start("run-1", pipeline_uri="p@1")
@@ -440,10 +447,224 @@ def test_a_recontextualized_status_observer_keeps_its_run() -> None:
     assert table.column("_status_run_id").to_pylist() == ["run-1"]
     assert table.column("_status_pipeline_uri").to_pylist() == ["p@1"]
 
-    refusing = StatusObserver(_database())
+    losses = RunLosses()
+    refusing = StatusObserver(_database()).with_run_losses(losses)
     refusing.on_run_start("run-2")
-    with collecting_lost_events("run-2") as losses:
-        refusing.contextualize("a").contextualize("b").on_data_start("n", tag, None)  # pyright: ignore[reportArgumentType]  # as above
+    refusing.contextualize("a").contextualize("b").on_data_start("n", tag, None)  # pyright: ignore[reportArgumentType]  # as above
     assert losses.by_kind() == {
         "status": LostObserverEvents("status", 1, "OSError: store refuses writes")
     }
+
+
+def test_overlapping_async_jobs_can_share_observers() -> None:
+    """Both jobs count the events lost by their own execution."""
+    observer = CompositeObserver(
+        StatusObserver(_database()), LoggingObserver(_database())
+    )
+    first, second = (_job(arrangement) for arrangement in ARRANGEMENTS)
+
+    async def run_both() -> tuple[RunSummary, RunSummary]:
+        return await asyncio.gather(
+            first.run_async(observer=observer), second.run_async(observer=observer)
+        )
+
+    with pytest.warns(ObserverEventsLostWarning) as caught:
+        summaries = asyncio.run(run_both())
+
+    assert len(caught) == 2
+    for summary in summaries:
+        assert {
+            kind: lost.count for kind, lost in summary.lost_observer_events.items()
+        } == {
+            "status": 2 * N_ROWS,
+            "logging": N_ROWS,
+        }
+    assert _rows(first) == _rows(second) == EXPECTED_ROWS
+
+
+class _RunStart(NoOpObserver):
+    """Remember the ID delivered to the observer at the start of the run."""
+
+    run_id: str = ""
+
+    @override
+    def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
+        self.run_id = run_id
+
+
+class _GateRunStart(_RunStart):
+    """Hold a run in its start hook while a second run finishes."""
+
+    def __init__(self) -> None:
+        self.started: threading.Event = threading.Event()
+        self.release: threading.Event = threading.Event()
+
+    @override
+    def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
+        super().on_run_start(run_id, pipeline_uri)
+        self.started.set()
+        assert self.release.wait(timeout=10)
+
+
+@pytest.mark.parametrize("same_id", [False, True], ids=["shared-observer", "same-id"])
+def test_overlapping_sync_jobs_keep_separate_losses(
+    same_id: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sharing the observer or reusing the public ID cannot connect two runs."""
+    if same_id:
+        original = PipelineJob._prepare_run  # pyright: ignore[reportPrivateUsage]
+
+        def prepare_run(job: PipelineJob, *args: Any, **kwargs: Any) -> Any:
+            return replace(original(job, *args, **kwargs), run_id="12345678abcd4eee")
+
+        monkeypatch.setattr(PipelineJob, "_prepare_run", prepare_run)
+
+    gate = _GateRunStart()
+    second_start = _RunStart()
+    first, second = (_job(arrangement) for arrangement in ARRANGEMENTS)
+    status = StatusObserver(_database())
+    second_status = StatusObserver(_database()) if same_id else status
+    first_observer: Any = CompositeObserver(status, gate)
+    second_observer: Any = CompositeObserver(second_status, second_start)
+    with (
+        pytest.warns(ObserverEventsLostWarning) as caught,
+        ThreadPoolExecutor(2) as pool,
+    ):
+        pending = pool.submit(first.run, observer=first_observer)
+        try:
+            assert gate.started.wait(timeout=10)
+            second_summary = pool.submit(second.run, observer=second_observer).result(
+                timeout=10
+            )
+        finally:
+            gate.release.set()
+        first_summary = pending.result(timeout=10)
+
+    assert len(caught) == 2
+    assert (gate.run_id == second_start.run_id) is same_id
+    for summary in (first_summary, second_summary):
+        assert summary.lost_observer_events["status"].count == 2 * N_ROWS
+
+
+@pytest.mark.parametrize(
+    "shared_observer", [False, True], ids=["direct-only", "shared"]
+)
+def test_direct_orchestrator_with_the_jobs_id_cannot_report_losses_for_it(
+    shared_observer: bool,
+) -> None:
+    """A nested direct execution shares neither the job's report nor its warning."""
+    direct_store = _database()
+    direct_job = _job(ARRANGEMENTS[1])
+    status = StatusObserver(direct_store)
+
+    class RunDirectly(NoOpObserver):
+        @override
+        def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
+            _ = SyncPipelineOrchestrator().run(
+                direct_job.dag, observer=status, run_id=run_id
+            )
+
+    nested_run = RunDirectly()
+    observer = CompositeObserver(status, nested_run) if shared_observer else nested_run
+    summary, messages = _run_losing(_job(ARRANGEMENTS[0]), observer=observer)
+
+    assert direct_store.refusals.writes == (4 if shared_observer else 2) * N_ROWS
+    if shared_observer:
+        assert summary.lost_observer_events["status"].count == 2 * N_ROWS
+        assert len(messages) == 1
+    else:
+        assert summary.lost_observer_events == {}
+        assert messages == []
+
+
+class _UnprintableWriteError(OSError):
+    @override
+    def __str__(self) -> str:
+        raise RuntimeError("could not format the failed write")
+
+
+@pytest.mark.parametrize("kind", ["status", "logging"])
+def test_unprintable_write_error_preserves_rows(
+    kind: str, orchestrator: Any, arrangement: Arrangement
+) -> None:
+    """Summarizing either observer's error cannot damage the run."""
+    database = _database(error=_UnprintableWriteError)
+    observer = (
+        StatusObserver(database) if kind == "status" else LoggingObserver(database)
+    )
+    count = 2 * N_ROWS if kind == "status" else N_ROWS
+    job = _job(arrangement)
+    summary, messages = _run_losing(job, orchestrator=orchestrator, observer=observer)
+
+    assert summary.lost_observer_events == {
+        kind: LostObserverEvents(
+            kind, count, "_UnprintableWriteError: <message unavailable>"
+        )
+    }
+    assert len(messages) == 1
+    assert summary.ok and _rows(job) == EXPECTED_ROWS
+
+
+def test_a_failing_log_handler_cannot_interrupt_loss_reporting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A log sink failure cannot prevent either built-in from recording a loss."""
+
+    class RefusingHandler(logging.Handler):
+        @override
+        def emit(self, record: logging.LogRecord) -> None:
+            raise OSError("log sink unavailable")
+
+    log = logging.getLogger("orcapod.pipeline")
+    monkeypatch.setattr(log, "handlers", [RefusingHandler()])
+    observer = CompositeObserver(
+        StatusObserver(_database()), LoggingObserver(_database())
+    )
+    job = _job(ARRANGEMENTS[0])
+    summary, messages = _run_losing(job, observer=observer)
+
+    assert {
+        kind: loss.count for kind, loss in summary.lost_observer_events.items()
+    } == {
+        "status": 2 * N_ROWS,
+        "logging": N_ROWS,
+    }
+    assert len(messages) == 1
+    assert summary.ok and _rows(job) == EXPECTED_ROWS
+
+
+def test_precontextualized_logging_observer_uses_the_current_run(
+    orchestrator: Any, arrangement: Arrangement
+) -> None:
+    """A twice scoped observer replaces stale metadata and counts failed writes."""
+    observer = LoggingObserver(_database(accept_first=1))
+    observer.on_run_start("earlier-run")
+    scoped = observer.contextualize("tenant").contextualize("project")
+    started = _RunStart()
+    job = _job(arrangement)
+    summary, messages = _run_losing(
+        job, orchestrator=orchestrator, observer=CompositeObserver(scoped, started)
+    )
+
+    assert summary.lost_observer_events["logging"].count == N_ROWS - 1
+    assert len(messages) == 1
+    logs = observer.get_logs()
+    assert logs is not None
+    assert logs["_log_run_id"].to_pylist() == [started.run_id]
+    assert _rows(job) == EXPECTED_ROWS
+
+
+def test_async_orchestrator_on_its_own_thread_keeps_the_jobs_losses() -> None:
+    """A blocking async run in a running event loop reports from its new thread."""
+
+    async def run() -> tuple[RunSummary, list[str]]:
+        return _run_losing(
+            _job(ARRANGEMENTS[0]),
+            orchestrator=AsyncPipelineOrchestrator(),
+            observer=LoggingObserver(_database()).contextualize("tenant"),
+        )
+
+    summary, messages = asyncio.run(run())
+
+    assert summary.lost_observer_events["logging"].count == N_ROWS
+    assert len(messages) == 1

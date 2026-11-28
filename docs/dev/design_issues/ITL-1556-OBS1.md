@@ -13,9 +13,10 @@ successfully with its status and log records missing or incomplete, and nothing 
 one case only (a SQLite-backed store is accepted at setup and refuses every event row).
 
 **Fix:** Developer decision (November 28, 2026): the observers continue, and the loss is
-reported. A job run opens a record of lost events under its run id
-(`pipeline/observer_losses.py`, `collecting_lost_events`); an observer that fails to write
-adds to the record of its run (`record_lost_event`) after the log line it always wrote. The
+reported. A job creates a counter for its execution (`pipeline/observer_losses.py`,
+`RunLosses`) and gives it to copies of the built-in observers. Node-scoped observers and
+data loggers carry that counter, so overlapping executions remain independent even when
+they share an observer or a run id. A failed write is counted and logged. The
 run puts the record in `RunSummary.lost_observer_events` (per observer kind: count and first
 error's text) and issues one `ObserverEventsLostWarning` at the end of the run, after the
 summary is kept, at the caller's line. The end and not the first loss: the counts are

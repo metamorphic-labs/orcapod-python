@@ -22,11 +22,16 @@ Example::
 
 from __future__ import annotations
 
-from typing import Any, cast
+from copy import copy
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from orcapod.pipeline.observer import NoOpLogger
+from orcapod.pipeline.observer_losses import RunLossObserver
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
+
+if TYPE_CHECKING:
+    from orcapod.pipeline.observer_losses import RunLosses
 
 _NOOP_LOGGER = NoOpLogger()
 
@@ -51,6 +56,19 @@ class CompositeObserver:
         return CompositeObserver(
             *[o.contextualize(*identity_path) for o in self._observers]
         )
+
+    def _with_run_losses(self, losses: RunLosses) -> Self:
+        """Copy this composite and bind its built-in children to a job execution."""
+        observer = copy(self)
+        observer._observers = [
+            child._with_run_losses(losses)
+            if isinstance(child, CompositeObserver)
+            else child.with_run_losses(losses)
+            if isinstance(child, RunLossObserver)
+            else child
+            for child in self._observers
+        ]
+        return observer
 
     def on_run_start(self, run_id: str, **kwargs: Any) -> None:
         for o in self._observers:
