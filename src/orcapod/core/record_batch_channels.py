@@ -477,17 +477,7 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 f"column {column.name!r} holds values where the stream's type "
                 + f"{expected.type} holds only nulls"
             )
-        if system_tag:
-            if (expected.metadata or None) != (column.metadata or None) or not (
-                column.type.equals(carried, check_metadata=True)
-            ):
-                return f"column {column.name!r} carries field metadata that differs from its stream"
-            if not expected.nullable and batch.column(index).null_count:
-                return (
-                    f"column {column.name!r} holds nulls, the stream's is not nullable"
-                )
-            continue
-        if expected.nullable != column.nullable:
+        if not system_tag and expected.nullable != column.nullable:
             flags = {True: "nullable", False: "not nullable"}
             return (
                 f"column {column.name!r} is {flags[column.nullable]}, the stream's is "
@@ -505,6 +495,8 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
         if (expected.metadata or None) != (column.metadata or None) or not (
             column.type.equals(carried, check_metadata=True)
         ):
+            if system_tag:
+                return f"column {column.name!r} carries field metadata that differs from its stream"
             return (
                 f"column {column.name!r} has field metadata {column.metadata} (or in "
                 + f"its type {column.type}), the stream's is {expected.metadata}"

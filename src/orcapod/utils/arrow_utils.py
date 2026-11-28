@@ -1083,19 +1083,17 @@ def source_info_replacement(
         pa.ArrowTypeError: If a token cannot fit the declaration, also a null
             given for a list type: a list token is never null.
     """
-    if token is None and isinstance(
-        kind, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)
-    ):
-        raise pa.ArrowTypeError(
-            f"A list token is never null: no null replacement for type {kind}"
-        )
 
     def require_fit(value: SourceInfoValue, data_type: "pa.DataType") -> None:
         """Check nested nullability and reject strings that Arrow would split."""
-        if value is None or not isinstance(
+        if not isinstance(
             data_type, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)
         ):
             return
+        if value is None:
+            raise pa.ArrowTypeError(
+                f"A list token is never null: no null replacement for type {data_type}"
+            )
         if not isinstance(value, list):
             raise pa.ArrowTypeError(f"Expected a list token for type {data_type}")
         child = data_type.value_field
@@ -1810,12 +1808,126 @@ def _system_tag_position_groups(
     return groups
 
 
+def _tied_custom_system_tags(
+    names: Collection[str],
+) -> list[dict[int, list[str]]]:
+    """Return tied Join operands that carry custom system tags, by suffix hash."""
+    groups: dict[str, dict[int, list[str]]] = {}
+    custom = set()
+    ids = {constants.SYSTEM_TAG_SOURCE_ID_PREFIX, constants.SYSTEM_TAG_RECORD_ID_PREFIX}
+    for name in names:
+        if not name.startswith(constants.SYSTEM_TAG_PREFIX):
+            continue
+        base, sep, suffix = name.rpartition(constants.BLOCK_SEPARATOR)
+        digest, _, position = suffix.rpartition(constants.FIELD_SEPARATOR)
+        if not sep or not position.isdigit():
+            continue
+        positions = groups.setdefault(digest, {})
+        positions.setdefault(int(position), []).append(name)
+        if base.partition(constants.BLOCK_SEPARATOR)[0] not in ids:
+            custom.add(digest)
+    return [
+        positions
+        for digest, positions in groups.items()
+        if digest in custom and len(positions) > 1
+    ]
+
+
+def _sort_equally_declared_system_tags(tables: list["pa.Table"]) -> list["pa.Table"]:
+    """Put matched rows in a common order, keeping each operand's arrays together."""
+    if len(tables) < 2 or not tables[0].num_rows:
+        return tables
+    row_count = tables[0].num_rows
+    stacked = pa.concat_tables(tables)
+    rows_by_position: list[list[int]] = [[] for _ in tables]
+    for row in range(row_count):
+        indices = range(row, stacked.num_rows, row_count)
+        # Arrow serialization orders arbitrary Arrow values, including nulls and
+        # temporal values below Python's precision. Take copies a single row out
+        # of its surrounding buffers before serialization.
+        ranked = sorted(
+            indices,
+            key=lambda i: (
+                stacked.take(pa.array([i], type=pa.int64()))
+                .to_batches()[0]
+                .serialize()
+                .to_pybytes()
+            ),
+        )
+        for position, index in enumerate(ranked):
+            rows_by_position[position].append(index)
+    return [stacked.take(pa.array(rows, type=pa.int64())) for rows in rows_by_position]
+
+
+def has_tied_custom_system_tags(names: Collection[str]) -> bool:
+    """Whether tied Join operands include a custom system tag."""
+    return bool(_tied_custom_system_tags(names))
+
+
+def sort_tied_custom_system_tags(table: "pa.Table") -> "pa.Table":
+    """Assign tied operands with custom tags to canonical positions.
+
+    Order whole system-tag declarations first. Only between operands with the
+    same declaration, order each matched row's values as a bundle. In either
+    case every field and value stays with its operand's other system tags.
+    """
+    groups = _tied_custom_system_tags(table.column_names)
+    if not groups:
+        return table
+    replacements: dict[str, tuple[pa.Field[Any], pa.ChunkedArray[Any]]] = {}
+    for positions in groups:
+        by_layout: dict[bytes, list[tuple[list[str], pa.Table]]] = defaultdict(list)
+        for names in positions.values():
+            names = sorted(names)
+            bundle = table.select(names).rename_columns(
+                [name.rsplit(constants.BLOCK_SEPARATOR, 1)[0] for name in names]
+            )
+            # Serialize the declaration, including all nested flags and metadata,
+            # with system tags laid out by name.
+            signature = bundle.schema.remove_metadata().serialize().to_pybytes()
+            by_layout[signature].append((names, bundle))
+        target_positions = iter(sorted(positions))
+        for signature in sorted(by_layout):
+            inputs = by_layout[signature]
+            ordered = _sort_equally_declared_system_tags(
+                [bundle for _, bundle in inputs]
+            )
+            for (names, _), bundle in zip(inputs, ordered, strict=True):
+                target = next(target_positions)
+                for name, field, array in zip(
+                    names, bundle.schema, bundle.columns, strict=True
+                ):
+                    prefix = name.rsplit(constants.FIELD_SEPARATOR, 1)[0]
+                    replacements[name] = (field.with_name(f"{prefix}:{target}"), array)
+    columns = [
+        replacements.get(field.name, (field, column))
+        for field, column in zip(table.schema, table.columns, strict=True)
+    ]
+    return pa.Table.from_arrays(
+        [column for _, column in columns],
+        schema=pa.schema(
+            [field for field, _ in columns],
+            metadata=cast(
+                "dict[bytes | str, bytes | str] | None", table.schema.metadata
+            ),
+        ),
+    )
+
+
 def sorted_system_tag_nullability(
     nullable_by_name: Mapping[str, bool],
 ) -> dict[str, bool]:
     """Return nullability for the source/record fields rebuilt by a tied sort."""
+    custom_tags = {
+        name
+        for group in _tied_custom_system_tags(nullable_by_name.keys())
+        for bundle in group.values()
+        for name in bundle
+    }
     nullable: dict[str, bool] = {}
-    for positions in _system_tag_position_groups(nullable_by_name.keys()).values():
+    for positions in _system_tag_position_groups(
+        nullable_by_name.keys() - custom_tags
+    ).values():
         if len(positions) <= 1:
             continue
         for prefix in (
@@ -1859,10 +1971,11 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
     if not sys_tag_cols:
         return table
 
-    groups = _system_tag_position_groups(sys_tag_cols)
     nullable = sorted_system_tag_nullability(
         {name: table.schema.field(name).nullable for name in sys_tag_cols}
     )
+    groups = _system_tag_position_groups(nullable.keys())
+    table = sort_tied_custom_system_tags(table)
 
     source_id_field = constants.SYSTEM_TAG_SOURCE_ID_PREFIX[
         len(constants.SYSTEM_TAG_PREFIX) :
@@ -1912,7 +2025,9 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
                 (sid_values[pos_idx][row_idx], rid_values[pos_idx][row_idx])
                 for pos_idx in range(n_positions)
             ]
-            row_tuples.sort()
+            row_tuples.sort(
+                key=lambda pair: (pair[0] is None, pair[0], pair[1] is None, pair[1])
+            )
             for pos_idx, (sid_val, rid_val) in enumerate(row_tuples):
                 sorted_sid[pos_idx].append(sid_val)
                 sorted_rid[pos_idx].append(rid_val)

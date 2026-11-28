@@ -85,7 +85,13 @@ class DataFrameSource(RootSource):
                 arrow_input = pa.Table.from_batches([batch])
             else:
                 arrow_input = pa.table(cast("ArrowStreamExportable", data))
-            require_custom_system_tags(arrow_input, system_tag_columns)
+            if schema is None:
+                require_custom_system_tags(arrow_input, system_tag_columns)
+            else:
+                require_custom_system_tags_values(arrow_input, system_tag_columns)
+                require_custom_system_tags(
+                    arrow_input, system_tag_columns, schema=schema
+                )
             arrow_input_schema = arrow_input.schema
             # Polars rechunks native tables but preserves chunks on exporter inputs.
             df = cast(
@@ -127,8 +133,11 @@ class DataFrameSource(RootSource):
         arrow_table = df.to_arrow()
         if schema is not None:
             require_supported_nullable_types(schema)
-            require_custom_system_tags_values(arrow_table, system_tag_columns)
-            require_custom_system_tags(arrow_table, system_tag_columns, schema=schema)
+            if arrow_input_schema is None:
+                require_custom_system_tags_values(arrow_table, system_tag_columns)
+                require_custom_system_tags(
+                    arrow_table, system_tag_columns, schema=schema
+                )
             arrow_table = arrow_table.cast(schema)
         elif arrow_input_schema is not None:
             arrow_table = arrow_utils.restore_schema_nullability(

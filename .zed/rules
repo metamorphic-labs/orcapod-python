@@ -1136,7 +1136,7 @@ these preimages anywhere else.
   `with_source_info` writes a Python replacement under the row's held token type and
   preserves the item name, nullability and metadata (`arrow_utils.source_info_replacement`,
   ITL-1557). It refuses a string for a list, a list for a string, a wrong depth, a null item
-  under a required item field, and `None` for a list type. Under a held string type,
+  under a required item field, and `None` for a list type at any depth. Under a held string type,
   `with_source_info(x=None)` writes a `large_string` null in both `as_table` and
   `source_info_table`. The `Data` constructor also checks non-`None` replacements against
   the held type. `Data(table, source_info={"x": None})` keeps the token the table already
@@ -1468,9 +1468,14 @@ data. The rules:
   A source's custom system-tag names must each identify an existing non-nullable text
   column with no null values and no Arrow field metadata. Remove field metadata before
   building the source. This restriction is a stopgap pending ITL-1561. System-tag fields on
-  a raw ArrowTableStream keep their metadata. When Join sorts tied system tags, it declares
-  the rebuilt fields without operand metadata. A rebuilt field is nullable if any of the
-  corresponding input fields can hold a null.
+  a raw ArrowTableStream keep their metadata. DataFrameSource uses an explicit schema for
+  custom system-tag nullability and validates the raw values, types and metadata before casting.
+  Join sorts tied source and record IDs together, with null IDs last, and declares the
+  rebuilt fields without operand metadata. A rebuilt field is nullable if any of the
+  corresponding input fields can hold a null. When tied operands carry custom system tags,
+  their complete system-tag declarations determine the canonical positions. Within one
+  declaration, Join sorts the matched rows' system tags together. Each field keeps its
+  declared type, nullable flag and metadata. Sorting happens on the final link only.
   A raw `ArrowTableStream` still preserves `null` in its table in ITL-1543 part A.
   A row's system-tag fields come from its stream, including raw streams. Join
   uses those declarations on the async row path as well as in its tables.

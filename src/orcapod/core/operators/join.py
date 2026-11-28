@@ -573,8 +573,11 @@ class Join(NonZeroInputOperator):
         ordered_streams = self.order_input_streams(*streams)
 
         system_tag_fields: dict[str, DataType] = {}
+        names_by_input: list[dict[str, str]] = []
         for idx, stream in enumerate(ordered_streams):
             stream_tag_schema, _ = stream.output_schema(columns={"system_tags": True})
+            names: dict[str, str] = {}
+            names_by_input.append(names)
             for col_name, col_type in stream_tag_schema.items():
                 if col_name.startswith(constants.SYSTEM_TAG_PREFIX):
                     new_name = (
@@ -582,6 +585,23 @@ class Join(NonZeroInputOperator):
                         f"{stream.pipeline_hash().to_hex(n_char)}:{idx}"
                     )
                     system_tag_fields[new_name] = col_type
+                    names[col_name] = new_name
+        if arrow_utils.has_tied_custom_system_tags(system_tag_fields.keys()):
+            fields = [
+                field.with_name(names[field.name])
+                for stream, names in zip(ordered_streams, names_by_input, strict=True)
+                for field in stream.arrow_schema()
+                if field.name in names
+            ]
+            if len(fields) == len(system_tag_fields):
+                declared = pa.schema(fields).empty_table()
+                canonical = arrow_utils.sort_tied_custom_system_tags(declared)
+                renamed = dict(
+                    zip(declared.column_names, canonical.column_names, strict=True)
+                )
+                system_tag_fields = {
+                    renamed[name]: kind for name, kind in system_tag_fields.items()
+                }
         nullable = arrow_utils.sorted_system_tag_nullability(
             {
                 name: kind is type(None) or type(None) in get_args(kind)
@@ -1360,13 +1380,14 @@ class Join(NonZeroInputOperator):
 
     @staticmethod
     def _join_system_tag_tables(
-        tables: Sequence["pa.Table | None"],
+        tables: Sequence["pa.Table | None"], *, final: bool = True
     ) -> "pa.Table | None":
-        """Join the system-tag tables and sort tied positions."""
+        """Join the system-tag tables and sort tied positions on the final link."""
         present = [table for table in tables if table is not None]
         if not present:
             return None
-        return arrow_utils.sort_system_tag_values(arrow_utils.hstack_tables(*present))
+        joined = arrow_utils.hstack_tables(*present)
+        return arrow_utils.sort_system_tag_values(joined) if final else joined
 
     @staticmethod
     def _build_tag(
@@ -1378,7 +1399,7 @@ class Join(NonZeroInputOperator):
 
         Args:
             table: The tag's user columns, or ``None`` for a tag without any.
-            system_tags: The tag's system tags, already renamed and sorted.
+            system_tags: The tag's renamed system tags.
             data_context_key: The data context key of the incoming datagrams.
 
         Returns:
@@ -1675,7 +1696,8 @@ class Join(NonZeroInputOperator):
         is the chain's one set of merged columns (see ``_merge_data``).
         """
         merged_sys = Join._join_system_tag_tables(
-            [Join._system_tag_table(left_tag), Join._system_tag_table(right_tag)]
+            [Join._system_tag_table(left_tag), Join._system_tag_table(right_tag)],
+            final=final,
         )
         merged_tag = Join._build_tag(
             Join._merge_tag_tables(left_tag, right_tag),

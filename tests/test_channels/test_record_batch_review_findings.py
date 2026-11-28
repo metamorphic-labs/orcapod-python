@@ -941,6 +941,67 @@ def test_a_nested_null_under_a_non_nullable_field_is_refused(case: str) -> None:
     asyncio.run(write())
 
 
+def test_a_system_tag_cannot_hold_a_null_in_a_required_struct_child() -> None:
+    name = "_tag_extra"
+    kind = pa.struct(
+        [pa.field("required", pa.int64(), nullable=False, metadata={b"unit": b"m"})]
+    )
+    stream = ArrowTableStream(
+        pa.table(
+            {
+                "k": [1, 2],
+                "x": [3, 4],
+                name: pa.array([{"required": 1}, None], type=kind),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    (good,) = pa.Table.from_batches(batches_of(stream)).combine_chunks().to_batches()
+    index = good.schema.get_field_index(name)
+    bad = good.set_column(
+        index,
+        good.schema.field(index),
+        pa.array([{"required": None}, None], type=kind),
+    )
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        with pytest.raises(ValueError, match=r"_tag_extra.*required.*not nullable"):
+            await output.send(bad)
+        await output.send(good)
+        await output.close()
+        result = output.result().as_table(columns={"system_tags": True})
+        assert result.schema.field(name).equals(
+            good.schema.field(name), check_metadata=True
+        )
+        assert result[name].to_pylist() == [{"required": 1}, None]
+
+    asyncio.run(write())
+
+
+def test_empty_channel_result_keeps_accepted_arrow_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    field = pa.field("x", pa.int8(), nullable=True, metadata={b"unit": b"m"})
+    table = pa.schema([field]).empty_table()
+    stream = ArrowTableStream(table, tag_columns=[])
+    monkeypatch.setattr(stream, "_typed_zero_row_table", lambda: None)
+    batch = pa.RecordBatch.from_arrays([pa.array([], pa.int8())], schema=table.schema)
+
+    async def run() -> None:
+        output = OutputChannel(stream)
+        await output.send(batch)
+        await output.close()
+        assert (
+            output.result()
+            .as_table()
+            .schema.field("x")
+            .equals(field, check_metadata=True)
+        )
+
+    asyncio.run(run())
+
+
 # --- CodeRabbit on PR 510, final pass (365f2a08) ------------------------------------
 
 
@@ -1135,7 +1196,7 @@ class _ListFeed:
 def test_batches_that_declare_two_token_types_fail_the_operator() -> None:
     """CodeRabbit on PR 510, restated for ITL-1491: a row-by-row operator processes
     batches as they arrive; a later batch that declares another source-info token
-    type than the earlier ones (one list level, then two) is refused, and the output
+    type than the earlier ones (two list levels, then one) is refused, and the output
     fails instead of completing with part of the rows. The operator drops the
     column, so its own output (whose send check compares token types too) would not
     see the conflict. The sync path reads such rows with their stream's one type."""
@@ -1145,8 +1206,8 @@ def test_batches_that_declare_two_token_types_fail_the_operator() -> None:
 
     stream = _deep_token_stream([[], [["b"]]], [1, 2])  # its rows: one declared type
     clean = _deep_token_stream([[["a"]], [["b"]]], [1, 2])  # one schema, buildable
-    shallow = _token_batch(clean, [[], []], SHALLOW_TOKENS).slice(0, 1)
-    deep = _token_batch(clean, [[["a"]], [["b"]]], DEEP_TOKENS).slice(1, 1)
+    deep = _token_batch(clean, [[["a"]], [["b"]]], DEEP_TOKENS).slice(0, 1)
+    shallow = _token_batch(clean, [[], []], SHALLOW_TOKENS).slice(1, 1)
     op = SelectDataColumns(["y"])
     from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
@@ -1157,12 +1218,20 @@ def test_batches_that_declare_two_token_types_fail_the_operator() -> None:
     assert rebuilt.schema.field("_source_x").type == DEEP_TOKENS
     assert rebuilt.column("_source_x").to_pylist() == [[], [["b"]]]
 
+    sent: list[pa.RecordBatch] = []
+
+    class ObservedOutput(OutputChannel):
+        async def send(self, batch: pa.RecordBatch) -> None:
+            await super().send(batch)
+            sent.append(batch)
+
     async def go() -> OutputChannel:
-        output = OutputChannel(op(clean))
+        output = ObservedOutput(op(clean))
         with pytest.raises(SourceInfoTypesDisagree):
             await op.async_execute_batches(
-                [InputChannel(clean, _ListFeed([shallow, deep]))], output
+                [InputChannel(clean, _ListFeed([deep, shallow]))], output
             )
+        assert [batch.column("k").to_pylist() for batch in sent] == [[1]]
         return output
 
     output = asyncio.run(go())

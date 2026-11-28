@@ -910,6 +910,46 @@ def test_dataframe_source_refuses_nullable_arrow_custom_system_tag(
         DataFrameSource(data, tag_columns=TAGS, system_tag_columns=["extra"])
 
 
+@pytest.mark.parametrize("representation", ["table", "reader", "stream"])
+@pytest.mark.parametrize("raw", ["text", "integer", "null", "metadata"])
+def test_dataframe_source_uses_explicit_custom_system_tag_declaration(
+    representation: str, raw: str
+) -> None:
+    base = pa.field("extra", pa.string(), nullable=True)
+    match = "non-text values"
+    if raw == "integer":
+        table = _table(pa.field("extra", pa.int64()), [1, 2])
+    elif raw == "null":
+        table = _table(base, ["a", None])
+        match = "contains null values"
+    elif raw == "metadata":
+        table = _table(base.with_metadata({b"origin": b"raw"}), ["a", "b"])
+        match = "field metadata"
+    else:
+        table = _table(base, ["a", "b"])
+    if representation == "reader":
+        data = table.to_reader()
+    elif representation == "stream":
+        data = _ArrowStreamExporter(table)
+    else:
+        data = table
+    schema = table.schema.set(
+        table.schema.get_field_index("extra"), base.with_nullable(False)
+    )
+    if raw != "text":
+        with pytest.raises(InputValidationError, match=match):
+            DataFrameSource(
+                data, schema=schema, tag_columns=TAGS, system_tag_columns=["extra"]
+            )
+        return
+    source = DataFrameSource(
+        data, schema=schema, tag_columns=TAGS, system_tag_columns=["extra"]
+    )
+    result = source.as_table(columns={"system_tags": True})
+    assert not result.schema.field("_tag_extra").nullable
+    assert result["_tag_extra"].to_pylist() == ["a", "b"]
+
+
 @pytest.mark.parametrize("representation", ["pandas", "polars"])
 def test_dataframe_source_declares_native_custom_system_tag_required_large_string(
     representation: str,

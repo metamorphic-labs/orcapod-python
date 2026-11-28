@@ -121,8 +121,8 @@ def _with_declared_token_columns(
         data_table: The output row, with the source-info columns it has.
         output_keys: The row's output keys, in order.
         carried: The schema of the row's own token columns
-            (``DataProtocol.source_info_table``), which keeps the Arrow type of a
-            token that ``data_table`` gives typed from its value.
+            (``DataProtocol.source_info_table``), checked alongside the token
+            fields in ``data_table`` for the required Arrow type.
 
     Returns:
         The row with one token column per output.

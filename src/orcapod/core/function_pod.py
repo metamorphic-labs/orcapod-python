@@ -37,7 +37,7 @@ from orcapod.core.streams.view import (
     StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.errors import OrcapodDatabaseError, TypeIdentityError
+from orcapod.errors import InputValidationError, OrcapodDatabaseError, TypeIdentityError
 from orcapod.utils.database_errors import keep_database_error, note_callback_failure
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
@@ -1145,11 +1145,21 @@ def _token_rows(rows: "Sequence[pa.Table]") -> pa.Table:
     Returns:
         The table of every row's source-info columns, in first-seen column order,
         every field nullable.
+
+    Raises:
+        InputValidationError: If any two rows declare different types for a token,
+            including the metadata or nullability of any nested item field.
     """
     types: dict[str, pa.DataType] = {}
     for row in rows:
         for field in row.schema:
-            _ = types.setdefault(field.name, field.type)
+            expected = types.setdefault(field.name, field.type)
+            if not expected.equals(field.type, check_metadata=True):
+                raise InputValidationError(
+                    f"Function output rows disagree on token {field.name!r}: "
+                    f"{arrow_utils.describe_arrow_type(expected)} vs "
+                    f"{arrow_utils.describe_arrow_type(field.type)}."
+                )
     schema = pa.schema(
         [arrow_utils.source_info_field(name, kind) for name, kind in types.items()]
     )
