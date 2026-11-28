@@ -32,15 +32,15 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.operators import SelectDataColumns
-from tests.test_core.operators.test_materialize_source_info import (
-    _broadcast_row_zero,  # pyright: ignore[reportPrivateUsage]  # the one re-creation of the pre-fix broadcast
-)
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
+from tests.test_core.operators.test_materialize_source_info import (
+    _broadcast_row_zero_in_transport,  # pyright: ignore[reportPrivateUsage]  # historical fixture
+)
 
 CALLS: list[str] = []
 
@@ -225,7 +225,7 @@ class TestStoreWrittenBeforeFix:
         """
         store = InMemoryArrowDatabase()
         with monkeypatch.context() as patch:
-            _broadcast_row_zero(patch)
+            _broadcast_row_zero_in_transport(patch)
             old_job = _job(store)
             _run(old_job)
         before = {label: _tag_rows(old_job, label) for label in _FUNCTION_NODES}
@@ -261,7 +261,7 @@ class TestStoreWrittenBeforeFix:
 class TestDropOnlyTagTables:
     """Dropping the tag tables but keeping the result tables refills them correctly.
 
-    The result tables (``_result/.../rdb_v2``) serve every output by input data
+    The result tables (``_result/.../rdb_v1``) serve every output by input data
     hash, so no function runs again; only ``__computed`` flips to ``False``.
     """
 
@@ -271,7 +271,7 @@ class TestDropOnlyTagTables:
         """Write a Delta database the pre-fix way and read its tag tables back."""
         store = DeltaTableDatabase(tmp_path)
         with monkeypatch.context() as patch:
-            _broadcast_row_zero(patch)
+            _broadcast_row_zero_in_transport(patch)
             _run(_job(store))
             store.flush()
         # Read back through a fresh handle: the writer's handle can serve a stale

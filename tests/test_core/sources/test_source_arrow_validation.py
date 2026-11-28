@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Collection
 from pathlib import Path
 from typing import Any, TypedDict
+from uuid import UUID
 
 import deltalake
 import polars as pl
@@ -16,6 +18,7 @@ import pytest
 from orcapod import PipelineJob
 from orcapod.contexts.stored import with_data_context
 from orcapod.core.nodes.operator_node import OperatorJobNode
+from orcapod.core.row_ids import entry_id, instance_id, record_id
 from orcapod.core.sources import (
     ArrowTableSource,
     CachedSource,
@@ -32,7 +35,7 @@ from orcapod.core.sources import (
 )
 from orcapod.core.sources.source_proxy import SourceProxy
 from orcapod.core.streams import ArrowTableStream
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.operators import DropNulls
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -119,6 +122,13 @@ def _source(
         deltalake.write_deltalake(path / "delta", table)
         return DeltaTableSource(path / "delta", **options)
     if kind == "sqlite":
+        if any(field.metadata for field in table.schema):
+            # SQLite cannot store Arrow field metadata. Supply it at the reader boundary.
+            monkeypatch.setattr(
+                "orcapod.core.sources.sqlite_table_source.SQLiteConnector",
+                lambda *_: _Connector(table),
+            )
+            return SQLiteTableSource(path / "rows.db", "rows", **options)
         file = path / "rows.db"
         types = {pa.string(): "TEXT", pa.int64(): "INTEGER"}
         cols = ", ".join(
@@ -209,6 +219,81 @@ def test_refuses_missing_custom_system_tag_columns(
     table = _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"])
     with pytest.raises(ValueError, match=r"system_tag_columns not found.*'missing'"):
         _source(kind, table, tmp_path, monkeypatch, system_tag_columns=names)
+
+
+@pytest.mark.parametrize("kind", SOURCE_KINDS)
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {b"owner": b"research"},
+        {b"ARROW:extension:name": b"user.opaque", b"ARROW:extension:metadata": b""},
+    ],
+    ids=["ordinary", "extension"],
+)
+@pytest.mark.parametrize("names", [("extra",), ("extra", "rev"), ("rev", "extra")])
+def test_refuses_field_metadata_on_custom_system_tags(
+    kind: str,
+    metadata: dict[bytes, bytes],
+    names: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = _table(
+        pa.field("extra", pa.string(), nullable=False, metadata=metadata), ["a", "b"]
+    )
+    with pytest.raises(
+        InputValidationError, match=r"'extra'.*[Rr]emove.*field metadata"
+    ):
+        _source(kind, table, tmp_path, monkeypatch, system_tag_columns=names)
+
+
+def test_metadata_free_custom_system_tag_keeps_its_existing_row_ids() -> None:
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("g", pa.large_string(), False),
+            pa.field("x", pa.int64(), False),
+            pa.field("y", pa.large_string(), False),
+            pa.field("custom", pa.large_string(), False),
+        ]
+    )
+    raw = pa.Table.from_pydict(
+        {
+            "k": [1, 2],
+            "g": ["a", "b"],
+            "x": [3, 4],
+            "y": ["v", "w"],
+            "custom": ["p", "q"],
+        },
+        schema=schema,
+    )
+    source = ArrowTableSource(
+        raw,
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        system_tag_columns=["custom"],
+        source_id="meta",
+    )
+    hasher = source.data_context.arrow_hasher
+    actual = []
+    for tag, data in source.iter_data():
+        entry = entry_id(hasher, tag, data)
+        instance = instance_id(hasher, tag, data)
+        record = record_id(hasher, source.content_hash(), instance, UUID(int=40))
+        actual.append((entry.to_hex(), instance.to_hex(), record.to_hex()))
+    # The metadata-free source's hashes at 969ed093.
+    assert actual == [
+        (
+            "00000266ff2e58dd5c1cb957ac9ff249ae13e17918a263847f8e2f65d756f746b3f561",
+            "000002e9be964a36d499b5a1efe697c53d9b7e2e0103b79be7b0e2d489c1be8f7b8636",
+            "00000279f295215ecb6c92fc49cf4ec41df41327a43c3b351f0baac467b4f45a0f33d2",
+        ),
+        (
+            "0000029689a4a738cf93bbcfde75085dc43bac31570b0b368eff34b0f3d0fa427769c1",
+            "000002b6b64a14a2bb8cc662759a15839f8e4e730c89a03230bb8cac2f951fbe8f2002",
+            "000002fb3fc3affffe0e390dcfb5695db61b332eb2d38f83c2cfab5570c8a956371e18",
+        ),
+    ]
 
 
 @pytest.mark.parametrize("kind", SOURCE_KINDS)
@@ -391,6 +476,249 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
         cached.as_table()
 
 
+@pytest.mark.parametrize("route", ["table", "rows", "async_rows", "stored"])
+def test_reopened_cache_refuses_legacy_system_tag_metadata(
+    route: str,
+    tmp_path: Path,
+) -> None:
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        system_tag_columns=["extra"],
+        source_id="rows",
+    )
+    cache = source.cached(DeltaTableDatabase(tmp_path))
+    columns = {"source": True, "system_tags": True}
+    records = source.as_table(columns=columns)
+    name = "_tag_extra"
+    pos = records.schema.get_field_index(name)
+    field = records.schema.field(pos).with_metadata(
+        {b"ARROW:extension:name": b"user.opaque"}
+    )
+    records = records.set_column(pos, field, records.column(pos))
+    records = records.append_column(
+        CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"])
+    )
+    DeltaTableDatabase(tmp_path).add_records(
+        cache.cache_path,
+        with_data_context(records, source.data_context_key),
+        record_id_column=CachedSource.HASH_COLUMN_NAME,
+        flush=True,
+    )
+    reopened = CachedSource.from_config(cache.to_config())
+
+    async def consume() -> None:
+        _ = [row async for row in reopened.async_iter_data()]
+
+    with pytest.raises(
+        InputValidationError,
+        match=r"'_tag_extra'.*cache.*written.*field metadata.*[Rr]ebuild",
+    ):
+        if route == "table":
+            reopened.as_table(columns=columns)
+        elif route == "rows":
+            list(reopened.iter_data())
+        elif route == "async_rows":
+            asyncio.run(consume())
+        else:
+            reopened.get_all_records()
+
+
+class _ArrowStreamExporter:
+    def __init__(self, table: pa.Table) -> None:
+        self.table = table
+        self.exports = 0
+
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+        self.exports += 1
+        return self.table.__arrow_c_stream__(requested_schema)
+
+
+class _ArrowArrayExporter:
+    def __init__(self, batch: pa.RecordBatch) -> None:
+        self.batch = batch
+        self.exports = 0
+
+    def __arrow_c_array__(self, requested_schema: Any = None) -> Any:
+        self.exports += 1
+        return self.batch.__arrow_c_array__(requested_schema)
+
+
+class _DualArrowExporter(_ArrowArrayExporter):
+    def __init__(self, batch: pa.RecordBatch, stream: pa.Table) -> None:
+        super().__init__(batch)
+        self.stream = stream
+        self.stream_exports = 0
+
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+        self.stream_exports += 1
+        return self.stream.__arrow_c_stream__(requested_schema)
+
+
+@pytest.mark.parametrize(
+    "representation", ["table", "batch", "reader", "stream", "array", "dual"]
+)
+@pytest.mark.parametrize("row_count", [0, 2])
+@pytest.mark.parametrize("declare_schema", [False, True])
+@pytest.mark.parametrize("field_metadata", [None, {b"owner": b"research"}])
+def test_dataframe_source_validates_arrow_inputs_before_polars(
+    representation: str,
+    row_count: int,
+    declare_schema: bool,
+    field_metadata: dict[bytes | str, bytes | str] | None,
+) -> None:
+    clean = _table(pa.field("extra", pa.string(), False), ["a", "b"][:row_count])
+    pos = clean.schema.get_field_index("extra")
+    table = (
+        clean
+        if field_metadata is None
+        else clean.set_column(
+            pos,
+            clean.schema.field(pos).with_metadata(field_metadata),
+            clean.column(pos),
+        )
+    )
+    batch = pa.RecordBatch.from_arrays(
+        [c.combine_chunks() for c in table.columns], schema=table.schema
+    )
+    representations = {
+        "table": table,
+        "batch": batch,
+        "reader": table.to_reader(max_chunksize=1),
+        "stream": _ArrowStreamExporter(table),
+        "array": _ArrowArrayExporter(batch),
+        "dual": _DualArrowExporter(batch, clean),
+    }
+    data = representations[representation]
+    schema = clean.schema if declare_schema else None
+
+    if field_metadata is not None:
+        with pytest.raises(
+            InputValidationError, match=r"'extra'.*[Rr]emove.*field metadata"
+        ):
+            DataFrameSource(
+                data,
+                schema=schema,
+                tag_columns=TAGS,
+                system_tag_columns=["rev", "extra"],
+            )
+    else:
+        source = DataFrameSource(
+            data, schema=schema, tag_columns=TAGS, system_tag_columns=["rev", "extra"]
+        )
+        expected = DataFrameSource(
+            clean, schema=schema, tag_columns=TAGS, system_tag_columns=["rev", "extra"]
+        )
+        columns = {"system_tags": True, "source": True}
+        actual_table = source.as_table(columns=columns)
+        assert actual_table.num_rows == row_count
+        assert actual_table.equals(
+            expected.as_table(columns=columns), check_metadata=True
+        )
+        assert source.source_id == expected.source_id
+        assert source.content_hash() == expected.content_hash()
+        assert source.pipeline_hash() == expected.pipeline_hash()
+
+    if isinstance(data, (_ArrowArrayExporter, _ArrowStreamExporter)):
+        assert data.exports == 1
+    if isinstance(data, _DualArrowExporter):
+        assert data.stream_exports == 0
+
+
+@pytest.mark.parametrize("route", ["table", "rows", "async_rows", "head"])
+def test_bound_proxy_refuses_delegated_system_tag_metadata(
+    route: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        system_tag_columns=["extra"],
+        source_id="rows",
+    )
+    tags, data = source.output_schema()
+    proxy = SourceProxy(
+        source.source_id,
+        source.content_hash().to_string(),
+        source.pipeline_hash().to_string(),
+        tags,
+        data,
+    )
+    proxy.bind(source)
+    columns = {"system_tags": True}
+    table = source.as_table(columns=columns)
+    pos = table.schema.get_field_index("_tag_extra")
+    field = table.schema.field(pos).with_metadata({b"owner": b"research"})
+    raw = ArrowTableStream(
+        table.set_column(pos, field, table.column(pos)),
+        tag_columns=TAGS,
+    )
+    monkeypatch.setattr(source, "as_table", raw.as_table)
+    monkeypatch.setattr(source, "iter_data", raw.iter_data)
+    monkeypatch.setattr(source, "head", raw.head)
+
+    async def consume() -> None:
+        _ = [row async for row in proxy.async_iter_data()]
+
+    with pytest.raises(
+        InputValidationError, match=r"'_tag_extra'.*[Rr]emove.*field metadata"
+    ):
+        if route == "table":
+            proxy.as_table(columns=columns)
+        elif route == "rows":
+            list(proxy.iter_data())
+        elif route == "async_rows":
+            asyncio.run(consume())
+        else:
+            proxy.head(columns=columns)
+
+
+@pytest.mark.parametrize("stored_flag", [False, True])
+def test_cached_source_presents_stored_token_fields_as_nullable(
+    stored_flag: bool,
+) -> None:
+    """A cache read presents nullable token fields when its source is unavailable."""
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        source_id="rows",
+    )
+    tags, data = source.output_schema()
+    proxy = SourceProxy(
+        source_id=source.source_id,
+        content_hash_str=source.content_hash().to_string(),
+        pipeline_hash_str=source.pipeline_hash().to_string(),
+        tag_schema=tags,
+        data_schema=data,
+    )
+    database = InMemoryArrowDatabase()
+    cache = CachedSource(proxy, cache_database=database)
+    columns = {"source": True, "system_tags": True}
+    table = source.as_table(columns=columns)
+    token = "_source_extra"
+    position = table.schema.get_field_index(token)
+    table = table.set_column(
+        position,
+        table.schema.field(position).with_nullable(stored_flag),
+        table.column(position),
+    )
+    table = table.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
+    database.add_records(
+        cache.cache_path,
+        with_data_context(table, source.data_context_key),
+        record_id_column=CachedSource.HASH_COLUMN_NAME,
+        flush=True,
+    )
+    assert cache.as_table(columns=columns).schema.field(token).nullable
+    assert all(
+        data.source_info_table().schema.field(token).nullable
+        for _, data in cache.iter_data()
+    )
+
+
 @pytest.mark.parametrize("row_count", [0, 2])
 def test_derived_source_refuses_stored_null_in_its_direct_table_view(
     row_count: int, monkeypatch: pytest.MonkeyPatch
@@ -428,7 +756,7 @@ def test_derived_source_checks_reserved_columns_before_filtering_storage(
         ) -> pa.Table | None:
             """Add a reserved column to the stored operator table."""
             table = super().get_all_records(record_path, *args, **kwargs)
-            if table is not None and record_path[-1] == "odb_v2":
+            if table is not None and record_path[-1] == "odb_v3":
                 return table.append_column("__raw_missing", pa.nulls(table.num_rows))
             return table
 
@@ -458,11 +786,13 @@ def test_derived_source_checks_reserved_columns_before_filtering_storage(
         derived.as_table()
 
 
-def test_spiral_can_nominate_a_tag_copy_as_a_custom_system_tag(
+@pytest.mark.parametrize("metadata", [None, {b"owner": b"research"}])
+def test_spiral_validates_field_metadata_on_a_tag_copy_nominated_as_a_system_tag(
     tmp_path: Path,
+    metadata: dict[bytes, bytes] | None,
 ) -> None:
     schema = pa.schema(
-        [pa.field("k", pa.string(), False), pa.field("x", pa.int8(), False)]
+        [pa.field("k", pa.string(), False, metadata), pa.field("x", pa.int8(), False)]
     )
     table = pa.Table.from_pylist([{"k": "a", "x": 1}, {"k": "b", "x": 2}], schema)
     with fake_spiral_sdk.install(tmp_path):
@@ -471,14 +801,24 @@ def test_spiral_can_nominate_a_tag_copy_as_a_custom_system_tag(
         )
         external.write(table)
         external.record(schema)
-        source = SpiralDBTableSource(
-            "project",
-            "rows",
-            tag_columns=["k"],
-            tag_only_columns=True,
-            tags_as_data={"k": "copy"},
-            system_tag_columns=["copy"],
-        )
+
+        def build() -> SpiralDBTableSource:
+            return SpiralDBTableSource(
+                "project",
+                "rows",
+                tag_columns=["k"],
+                tag_only_columns=True,
+                tags_as_data={"k": "copy"},
+                system_tag_columns=["copy"],
+            )
+
+        if metadata is not None:
+            with pytest.raises(
+                InputValidationError, match=r"'copy'.*[Rr]emove.*field metadata"
+            ):
+                build()
+            return
+        source = build()
         columns = {"system_tags": True}
         assert source.as_table(columns=columns).column("_tag_copy").to_pylist() == [
             "a",

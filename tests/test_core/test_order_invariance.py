@@ -47,6 +47,7 @@ import subprocess
 import sys
 import warnings
 from collections.abc import Callable, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,7 @@ from orcapod.core.nodes.function_node import (
 )
 from orcapod.core.nodes.operator_node import OPERATOR_RECORDED_AT_COL
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.sources.source_proxy import SourceProxy
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import RestrictedAggregationWarning
@@ -81,6 +83,7 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import (
     OPERATOR_DB_SCHEMA_VERSION,
     PIPELINE_DB_SCHEMA_VERSION,
+    constants,
 )
 from orcapod.types import Condition
 from orcapod.operators import (
@@ -112,12 +115,14 @@ from orcapod.sources import (
     ArrowTableSource,
     CachedSource,
     CSVSource,
+    DBTableSource,
     DataFrameSource,
     DeltaTableSource,
     DerivedSource,
     DictSource,
     ListSource,
     PollingSource,
+    PostgreSQLTableSource,
     SQLiteTableSource,
     SpiralDBTableSource,
 )
@@ -140,6 +145,8 @@ from .operators.several_items import (
     make_source,
 )
 from .order_rules import KNOWN_VIOLATIONS, ORDER_EXCEPTIONS
+from .sources.test_source_arrow_validation import _Connector
+from tests.test_databases import fake_spiral_sdk
 
 pytestmark = [
     pytest.mark.filterwarnings(
@@ -784,6 +791,20 @@ def _cached_source(role: str, order: int, layout: str, _tmp: Path) -> Any:
     )
 
 
+def _bound_source_proxy(role: str, order: int, layout: str, _tmp: Path) -> Any:
+    delegate = source(MAIN, role, order, layout)
+    tags, data = delegate.output_schema()
+    proxy = SourceProxy(
+        delegate.source_id,
+        delegate.content_hash().to_string(),
+        delegate.pipeline_hash().to_string(),
+        tags,
+        data,
+    )
+    proxy.bind(delegate)
+    return proxy
+
+
 def _derived_source(role: str, order: int, layout: str, _tmp: Path) -> Any:
     return DerivedSource(
         source(MAIN, role, order, layout),
@@ -836,6 +857,7 @@ STREAM_CASES: tuple[StreamCase, ...] = (
     # PollingSource takes no tag_only_columns: its tags are plain.
     StreamCase("polling_source", _polling_source, roles=(PLAIN,)),
     StreamCase("cached_source", _cached_source),
+    StreamCase("bound_source_proxy", _bound_source_proxy),
     StreamCase("derived_source_tags_as_data", _derived_source),
     StreamCase("raw_arrow_table_stream", _raw_stream),
     StreamCase("function_pod_call", _pod_call, with_async=True),
@@ -857,18 +879,16 @@ KIND_CASES: dict[str, str] = {
     "SQLiteTableSource": "sqlite_table_source",
     "PollingSource": "polling_source",
     "CachedSource": "cached_source",
-    "DerivedSource": "derived_source_tags_as_data",  # plain: test_a_job_...
+    "SourceProxy": "bound_source_proxy",
+    "DerivedSource": "derived_source_tags_as_data",  # plain: test_plain_derived_source_...
     "ArrowTableStream": "raw_arrow_table_stream",
 }
 NOT_APPLICABLE: dict[str, str] = {
     "RootSource": "the abstract base of every source",
     "StreamBase": "the abstract base of every stream",
-    "StreamView": "a view of rows a stream already has; it orders nothing",
-    "SourceProxy": "stands in for a source a loaded job cannot rebuild; it reads nothing",
-    "DBTableSource": "the base of the database sources; SQLiteTableSource is its case",
-    "PostgreSQLTableSource": "needs a PostgreSQL server; a DBTableSource like SQLite",
-    "SpiralDBTableSource": "needs a SpiralDB project; reads through the same builder",
+    "StreamView": "exposes its table and has no sync or async datagram iterator",
 }
+CONNECTOR_KINDS = (DBTableSource, PostgreSQLTableSource, SpiralDBTableSource)
 
 
 def _kind_names() -> set[str]:
@@ -889,8 +909,9 @@ def _kind_names() -> set[str]:
 
 def test_every_exported_source_and_stream_kind_has_a_case() -> None:
     """A new source or stream kind fails here until it has a case (or a reason)."""
-    assert _kind_names() == set(KIND_CASES) | set(NOT_APPLICABLE)
-    assert not set(KIND_CASES) & set(NOT_APPLICABLE)
+    tested = set(KIND_CASES) | {kind.__name__ for kind in CONNECTOR_KINDS}
+    assert _kind_names() == tested | set(NOT_APPLICABLE)
+    assert not tested & set(NOT_APPLICABLE)
     labels = {case.label for case in STREAM_CASES}
     assert set(KIND_CASES.values()) <= labels
 
@@ -921,6 +942,163 @@ def test_a_source_stream_or_pod_does_not_depend_on_the_arrangement_of_its_input(
             result["source_id"] = stream.source_id
         results[f"{order}/{layout}"] = result
     assert_all_equal(results)
+
+
+async def _iter_async_rows(stream: Any, count: int) -> list[Any]:
+    async with aclosing(stream.async_iter_data()) as rows:
+        if isinstance(stream, PollingSource):
+            # Polling subscriptions are live. Read the rows of the finite snapshot.
+            async with asyncio.timeout(5):
+                return [await anext(rows) for _ in range(count)]
+        return [row async for row in rows]
+
+
+def _assert_stream_and_row_fields(stream: Any, *, native_async: bool) -> None:
+    columns = {"system_tags": True, "source": True}
+    table = stream.as_table(columns=columns)
+    user_tags, data_names = stream.keys()
+    tag_names = set(user_tags) | {
+        name
+        for name in table.column_names
+        if name.startswith(constants.SYSTEM_TAG_PREFIX)
+    }
+    token_fields = {
+        field.name: field
+        for field in table.schema
+        if field.name.startswith(constants.SOURCE_PREFIX)
+    }
+    assert all(field.nullable for field in token_fields.values())
+    assert all(
+        field.nullable
+        for field in stream.arrow_schema()
+        if field.name.startswith(constants.SOURCE_PREFIX)
+    )
+    sync_rows = list(stream.iter_data())
+    async_rows = asyncio.run(
+        _run_async(stream.producer, list(stream.upstreams))
+        if native_async
+        else _iter_async_rows(stream, table.num_rows)
+    )
+    for path, rows in (("sync", sync_rows), ("async", async_rows)):
+        assert len(rows) == table.num_rows, path
+        for tag, data in rows:
+            tag_table, data_table = tag.as_table(columns=columns), data.as_table()
+            assert set(tag_table.column_names) == tag_names, path
+            assert set(data_table.column_names) == set(data_names), path
+            tokens = data.source_info_table().schema
+            assert set(tokens.names) == token_fields.keys(), path
+            assert all(
+                field.equals(token_fields[field.name], check_metadata=True)
+                for field in tokens
+            ), path
+            for row_table in (tag_table, data_table):
+                expected = table.select(row_table.column_names).schema
+                assert row_table.schema.equals(expected, check_metadata=True), (
+                    path,
+                    row_table.schema,
+                    expected,
+                )
+
+
+@pytest.mark.parametrize(
+    "case", [*STREAM_CASES], ids=[case.label for case in STREAM_CASES]
+)
+def test_stream_and_rows_agree_on_tag_data_and_token_fields(
+    case: StreamCase, tmp_path: Path
+) -> None:
+    """Compare row fields to the table in both modes across tag orders and layouts.
+
+    Connector-backed kinds have their own fixture below. The only exclusions
+    are the abstract RootSource and StreamBase, StreamView (table only), and
+    the unbound form of SourceProxy (cannot read rows).
+    The standalone SideEffectPod exposes the stream iterator. Async delivery
+    through the job executor is exercised by the job tests below.
+    """
+    for order, layout in ARRANGEMENTS:
+        stream = case.build(case.roles[0], order, layout, tmp_path)
+        _assert_stream_and_row_fields(stream, native_async=case.with_async)
+
+
+@pytest.mark.parametrize("kind", CONNECTOR_KINDS, ids=lambda kind: kind.__name__)
+def test_database_stream_and_rows_agree_on_tag_data_and_token_fields(
+    kind: type[DBTableSource] | type[SpiralDBTableSource],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """DB and PostgreSQL use a connector double. SpiralDB scans a local SDK fake."""
+    for i, (order, layout) in enumerate(ARRANGEMENTS):
+        raw = table(MAIN, order, layout)
+        tags = MAIN.tag_orders()[order]
+        if kind is SpiralDBTableSource:
+            with fake_spiral_sdk.install(tmp_path / str(i)):
+                external = fake_spiral_sdk.ExternalProject("project").create_table(
+                    "default.rows",
+                    key_schema=raw.select(MAIN.tags).schema,
+                )
+                external.write(raw)
+                external.record(raw.schema)
+                stream = SpiralDBTableSource(
+                    "project",
+                    "rows",
+                    tag_columns=tags,
+                    tag_only_columns=True,
+                )
+                _assert_stream_and_row_fields(stream, native_async=False)
+        else:
+            connector = _Connector(raw)
+            # The shared fixture defaults to a different key; use this table's key.
+            if kind is PostgreSQLTableSource:
+                monkeypatch.setattr(
+                    "orcapod.core.sources.postgresql_table_source.PostgreSQLConnector",
+                    lambda *args, **kwargs: connector,
+                )
+                stream = PostgreSQLTableSource(
+                    "postgresql://localhost/test",
+                    "rows",
+                    tag_columns=tags,
+                    tag_only_columns=True,
+                    record_id_columns=MAIN.tags,
+                )
+            else:
+                stream = DBTableSource(
+                    connector,
+                    "rows",
+                    tag_columns=tags,
+                    source_id="rows",
+                    tag_only_columns=True,
+                    record_id_columns=MAIN.tags,
+                )
+            _assert_stream_and_row_fields(stream, native_async=False)
+
+
+def test_plain_derived_source_and_rows_agree_on_data_and_token_fields() -> None:
+    for order, layout in ARRANGEMENTS:
+        job = PipelineJob(name="fields", database=InMemoryArrowDatabase())
+        with job:
+            SelectDataColumns(["d1", "d2", "d3"])(
+                source(MAIN, PLAIN, order, layout), label="selected"
+            )
+        node = job.nodes["selected"]
+        node.attach_databases(pipeline_database=job.database, cache_mode=CacheMode.LOG)
+        job.run()
+        _assert_stream_and_row_fields(node.as_source(), native_async=False)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, id=case.label)
+        for cases in OPERATOR_CASES.values()
+        for case in cases
+    ],
+)
+def test_operator_stream_and_rows_agree_on_tag_data_and_token_fields(
+    case: OperatorCase,
+) -> None:
+    """Exercise every exported operator's native sync and async row paths."""
+    for order, layout in ARRANGEMENTS:
+        stream = case.build()(*case.sources(case.roles[0], order, layout))
+        _assert_stream_and_row_fields(stream, native_async=True)
 
 
 @pytest.mark.parametrize("role", ROLES)

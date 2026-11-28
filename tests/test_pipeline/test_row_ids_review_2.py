@@ -521,22 +521,48 @@ def test_a_placeholder_without_a_result_stops_the_run_under_fail_fast(
 # ---------------------------------------------------------------------------
 
 _LIST = pa.large_list(pa.large_string())
-# Token columns ``_source_a`` of three rows, by kind.
+# Token columns ``_source_a`` of three rows, by kind. ``a`` is a list column here
+# (the token-shape rule, ITL-1491: a list token needs list data; a string token
+# fits any data), so list tokens and string tokens are both valid over it.
 TOKEN_KINDS: dict[str, "pa.Array[Any]"] = {
-    "null_typed_list": pa.array([None, None, None], _LIST),
     "null_typed_string": pa.array([None, None, None], pa.large_string()),
     "strings": pa.array(["s::r0::a", "s::r1::a", "s::r2::a"], pa.large_string()),
     "lists": pa.array([["s::r0::a"], ["s::r1::a", "t::r1::a"], ["s::r2::a"]], _LIST),
+    "lists_with_null_elements": pa.array(
+        [[None], ["s::r1::a", None], ["s::r2::a"]], _LIST
+    ),
+}
+# Token columns that are not valid: a token with a list layer is never null.
+NULL_LIST_TOKENS: dict[str, "pa.Array[Any]"] = {
+    "null_typed_list": pa.array([None, None, None], _LIST),
     "null_and_lists": pa.array([None, ["s::r1::a"], None], _LIST),
 }
+_A_LISTS = [[10], [20, 0], [30]]
+
+
+@function_pod(output_keys=["total", "scaled"])
+def combine_lists(a: list[int], b: float) -> tuple[float, float]:
+    """``combine`` over a list-valued ``a``: its sum takes the place of ``a``."""
+    calls["combine_lists"] += 1
+    return sum(a) + b, sum(a) * b
+
+
+def _list_session_table(session: str) -> pa.Table:
+    """``_session_stream``'s rows with ``a`` as a list column (sums 10, 20, 30)."""
+    table = _session_stream(session).as_table()
+    return table.set_column(
+        table.schema.get_field_index("a"),
+        pa.field("a", pa.large_list(pa.int64()), nullable=False),
+        pa.array(_A_LISTS, pa.large_list(pa.int64())),
+    )
 
 
 def _token_stream(kind: str, session: str = "first") -> ArrowTableStream:
-    """``_session_stream`` with a token column ``_source_a`` of the given kind."""
-    table = _session_stream(session).as_table()
+    """The list-valued session rows with a token column ``_source_a`` of the kind."""
+    tokens = {**TOKEN_KINDS, **NULL_LIST_TOKENS}[kind]
     return ArrowTableStream(
-        table.append_column(
-            pa.field("_source_a", TOKEN_KINDS[kind].type), TOKEN_KINDS[kind]
+        _list_session_table(session).append_column(
+            pa.field("_source_a", tokens.type), tokens
         ),
         tag_columns=["subject", "session"],
     )
@@ -553,26 +579,20 @@ def _pipeline_table(database: InMemoryArrowDatabase) -> pa.Table:
 @PATH
 @pytest.mark.parametrize(
     "kinds",
-    [
-        ("null_typed_list", "null_typed_string"),
-        ("null_typed_string", "null_typed_list"),
-        ("null_typed_list", "strings"),
-        ("strings", "null_typed_list"),
-    ],
+    [("null_typed_string", "strings"), ("strings", "null_typed_string")],
 )
-def test_sessions_whose_null_tokens_are_typed_differently_share_a_table(
+def test_sessions_with_null_and_with_string_tokens_share_a_table(
     path: str, kinds: tuple[str, str]
 ) -> None:
-    """A null token is a ``large_string`` null, whatever type its column declares.
+    """A null token is a ``large_string`` null: it shares a column with strings.
 
     Two sessions over one pipeline table, in both orders: a token column that holds
-    only nulls, declared as a list in one session and as a string in the other (or
-    holding strings in the other). Both complete and the table keeps one column
-    type (review of PR #583: hashed and stored with the declared type, the second
-    session failed with ``ArrowInvalid``; ``main`` completed both).
+    only nulls in one session and strings in the other. Both complete and the table
+    keeps one column type. (Review of PR #583; the cases whose null tokens were
+    declared a list are not valid streams: the refusal test below.)
     """
     database = InMemoryArrowDatabase()
-    pod = combine.pod
+    pod = combine_lists.pod
     assert isinstance(pod, FunctionPod)
     for kind, session in zip(kinds, ("first", "second")):
         stream = _token_stream(kind, session)
@@ -586,37 +606,46 @@ def test_sessions_whose_null_tokens_are_typed_differently_share_a_table(
     assert table.schema.field("_input_source_a").type == pa.large_string()
 
 
-@pytest.mark.parametrize("tokens", ["null_typed_list", "null_typed_string"])
-def test_a_null_tokens_instance_id_does_not_follow_its_columns_type(
-    tokens: str,
-) -> None:
-    """The id is a function of the row alone: its tags, its data and its tokens."""
-    ids = {}
-    for kind in ("null_typed_list", "null_typed_string"):
-        stream = _token_stream(kind)
-        ids[kind] = [
-            row_ids.instance_id(HASHER, tag, data) for tag, data in stream.iter_data()
-        ]
-        for tag, data in stream.iter_data():
-            preimage = row_ids.instance_id_preimage(
-                row_ids.entry_id(HASHER, tag, data), data
-            )
-            assert preimage.schema.field("_input_source_a").type == pa.large_string()
-            assert preimage.column("_input_source_a").to_pylist() == [None]
-    assert ids["null_typed_list"] == ids["null_typed_string"]
-    assert len(set(ids[tokens])) == 3
+@pytest.mark.parametrize("kind", list(NULL_LIST_TOKENS))
+def test_a_stream_with_a_null_list_token_is_refused_when_built(kind: str) -> None:
+    """A token with a list layer is never null (the token-shape rule, ITL-1491).
+
+    Replaces three tests about a null token in a list-typed column (its instance id
+    not following the column's type; sessions typed differently sharing a table; a
+    session mixing null and list tokens refused at the write): the stream is now
+    refused where it is built, naming the token column, its data column and both
+    types, so no node sees it. It still protects what they did: one pipeline table
+    never receives a null and a list in one token column.
+    """
+    from orcapod.errors import InputValidationError
+
+    with pytest.raises(InputValidationError) as refused:
+        _ = _token_stream(kind)
+    message = str(refused.value)
+    assert "'_source_a'" in message and "'a'" in message
+    assert str(_LIST) in message and str(pa.large_list(pa.int64())) in message
+    assert "null" in message
 
 
-def test_a_non_null_token_keeps_the_type_of_its_column() -> None:
-    """Rows of a list-typed column: a list token is a list, a null a string null."""
-    types = [
-        str(data.source_info_table().schema.field("_source_a").type)
-        for _, data in _token_stream("null_and_lists").iter_data()
-    ]
-    assert types == ["large_string", str(_LIST), "large_string"]
+def test_a_null_string_tokens_preimage_is_a_string_null() -> None:
+    """The id of a row with a null token: a ``large_string`` null in the preimage."""
+    stream = _token_stream("null_typed_string")
+    ids = [row_ids.instance_id(HASHER, tag, data) for tag, data in stream.iter_data()]
+    for tag, data in stream.iter_data():
+        preimage = row_ids.instance_id_preimage(
+            row_ids.entry_id(HASHER, tag, data), data
+        )
+        assert preimage.schema.field("_input_source_a").type == pa.large_string()
+        assert preimage.column("_input_source_a").to_pylist() == [None]
+    assert len(set(ids)) == 3
+
+
+@pytest.mark.parametrize("kind", ["lists", "lists_with_null_elements"])
+def test_a_list_token_keeps_the_type_of_its_column(kind: str) -> None:
+    """Rows of a list-typed token column: every token is a list, a null inside too."""
     assert [
         str(data.source_info_table().schema.field("_source_a").type)
-        for _, data in _token_stream("lists").iter_data()
+        for _, data in _token_stream(kind).iter_data()
     ] == [str(_LIST)] * 3
 
 
@@ -644,7 +673,7 @@ def test_sessions_whose_tokens_differ_in_type_are_refused_naming_the_column(
     from orcapod.errors import OrcapodDatabaseWriteError
 
     database = InMemoryArrowDatabase()
-    pod = combine.pod
+    pod = combine_lists.pod
     assert isinstance(pod, FunctionPod)
     first = _token_stream(kinds[0], "first")
     node = FunctionJobNode(pod, first, pipeline_database=database)
@@ -659,29 +688,6 @@ def test_sessions_whose_tokens_differ_in_type_are_refused_naming_the_column(
     assert "_input_source_a" in message
     assert "large_string" in message and "large_list<" in message
     assert _pipeline_table(database).equals(before)
-
-
-@PATH
-def test_a_session_mixing_null_and_list_tokens_in_one_column_is_refused(
-    path: str,
-) -> None:
-    """A null token is a string null and a list token a list: two types, one column.
-
-    As on ``main``, where the rows were stored with those two types and the write
-    failed; the refusal now names the column and both types.
-    """
-    from orcapod.errors import OrcapodDatabaseWriteError
-
-    database = InMemoryArrowDatabase()
-    pod = combine.pod
-    assert isinstance(pod, FunctionPod)
-    stream = _token_stream("null_and_lists")
-    node = FunctionJobNode(pod, stream, pipeline_database=database)
-    with pytest.raises((OrcapodDatabaseWriteError, ExceptionGroup)) as raised:
-        _run_node(node, stream, path)
-    message = _refusal(raised.value)
-    assert "_input_source_a" in message
-    assert "large_string" in message and "large_list<" in message
 
 
 class _AllEvents(_Events):
@@ -778,10 +784,14 @@ _FIXED = pa.list_(pa.large_string(), 2)
 
 
 def _data_tag_stream(tags: tuple[str, ...]) -> ArrowTableStream:
-    """Three rows; ``d`` and ``e`` are data-tags, ``d``'s token a fixed-size list."""
+    """Three rows; ``d`` and ``e`` are data-tags, ``d``'s token a fixed-size list.
+
+    ``d`` is a fixed-size list of the same size: a token's list layers are its
+    data's (the token-shape rule, ITL-1491).
+    """
     columns: dict[str, tuple[Any, pa.DataType, bool]] = {
         "k": (["a", "b", "c"], pa.large_string(), False),
-        "d": ([1, 2, 3], pa.int64(), False),
+        "d": ([[1, 1], [2, 2], [3, 3]], pa.list_(pa.int64(), 2), False),
         "e": ([0.5, 1.5, 2.5], pa.float64(), False),
         "x": ([10, 20, 30], pa.int64(), False),
         "_source_d": ([["p", "q"], ["r", "s"], ["t", "u"]], _FIXED, True),
@@ -846,23 +856,34 @@ def test_both_routes_record_one_instance_per_row_in_a_shared_store(
 ) -> None:
     """Sessions on either route over one store: one instance id per row, no refusal.
 
-    A data-tag falls through both functions with its token. The token's type is
-    the same whether the row was just computed or is served from the stored
-    result, and on the sync as on the async route (review of PR #583: the async
-    route kept a fixed-size list where the sync edge gave a large list, so one
-    function output had two instance ids, and the second route's write was
-    refused for the token column's type). Each later session finds the first
-    one's records: nothing is computed again and no row is added.
+    A data-tag falls through both functions with its token, value and type
+    unchanged (developer, November 27, 2026, ITL-1491: the pipeline determines a
+    token column's type, never its values): ``d``'s token is the stream's
+    fixed-size list after each function, whether the row was just computed or is
+    served from the stored result, on the sync as on the async route. Review of
+    PR #583: the sync edge had typed the token again from its value (a large
+    list) while the async route kept the fixed-size list, so one function output
+    had two instance ids and the second route's write was refused for the token
+    column's type. Each later session finds the first one's records: nothing is
+    computed again and no row is added.
     """
     database = InMemoryArrowDatabase()
+    before = {
+        data.as_dict()["x"]: data.source_info_table().select(["_source_d", "_source_e"])
+        for _, data in _data_tag_stream(tags).iter_data()
+    }
     stored: list[tuple[Any, ...]] = []
     for index, route in enumerate(routes):
         out = _two_nodes_on(route, database, tags)
         assert sorted(data.as_dict()["z"] for _, data in out) == [22, 42, 62]
         for _, data in out:
-            assert data.source_info_table().schema.field(
-                "_source_d"
-            ).type == pa.large_list(pa.large_string())
+            # x = z / 2 - 1 names the input row: the token columns after the two
+            # functions equal the ones before them, type and value.
+            after = data.source_info_table()
+            assert after.schema.field("_source_d").type == _FIXED
+            origin = before[data.as_dict()["z"] // 2 - 1]
+            assert after.select(["_source_d", "_source_e"]).equals(origin)
+            assert after.schema.field("_source_z").type == pa.large_string()
         database.flush()
         (path,) = [
             p
@@ -872,9 +893,7 @@ def test_both_routes_record_one_instance_per_row_in_a_shared_store(
         table = database.get_all_records(path)
         assert table is not None
         assert table.num_rows == 3, (index, route)
-        assert table.schema.field("_input_source_d").type == pa.large_list(
-            pa.large_string()
-        )
+        assert table.schema.field("_input_source_d").type == _FIXED
         assert table.column("_input_source_e").null_count == 1
         stored.append(
             tuple(

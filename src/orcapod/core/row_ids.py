@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 
 from orcapod.system_constants import constants
+from orcapod.utils.arrow_utils import contains_null_type
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -89,7 +90,23 @@ def entry_id(
     Returns:
         The entry id.
     """
-    return hasher.hash_table(entry_id_preimage(tag, data))
+    preimage = entry_id_preimage(tag, data)
+    try:
+        return hasher.hash_table(preimage)
+    except ValueError as exc:
+        raw_null_tags = [
+            repr(field.name)
+            for field in preimage.schema
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+            and contains_null_type(field.type)
+        ]
+        if raw_null_tags:
+            names = ", ".join(raw_null_tags)
+            raise ValueError(
+                f"{exc}. Declare a supported nullable type for the raw Arrow Null "
+                f"system-tag column(s) {names}."
+            ) from exc
+        raise
 
 
 def input_source_info_table(data: "DataProtocol") -> "pa.Table":

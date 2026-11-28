@@ -308,7 +308,12 @@ def test_nested_source_info_pairs_with_its_own_row(
     table = pa.Table.from_pydict(
         {
             "id": _chunked(list(range(n)), tag_sizes, pa.int64()),
-            "x": _chunked([i * 10 for i in range(n)], data_sizes, pa.int64()),
+            # ``x`` has its token's two list layers (the token-shape rule, ITL-1491).
+            "x": _chunked(
+                [[[i * 10], [i * 10, i * 10]] for i in range(n)],
+                data_sizes,
+                pa.large_list(pa.large_list(pa.int64())),
+            ),
             SOURCE_X: _chunked(tokens, source_sizes, NESTED_SOURCE_TYPE),
         }
     )
@@ -317,7 +322,7 @@ def test_nested_source_info_pairs_with_its_own_row(
     assert len(pairs) == n
     for row, (tag, data) in enumerate(pairs):
         assert tag["id"] == row
-        assert data["x"] == row * 10
+        assert data["x"] == [[row * 10], [row * 10, row * 10]]
         assert data.source_info()["x"] == tokens[row]
         source_schema = data.as_table(columns={"source": True}).schema
         assert source_schema.field(SOURCE_X).type == NESTED_SOURCE_TYPE
@@ -335,7 +340,11 @@ def test_iter_data_keeps_the_source_info_arrow_type() -> None:
     table = pa.table(
         {
             "id": pa.array([0, 1], type=pa.int64()),
-            "x": pa.array([0, 10], type=pa.int64()),
+            # ``x`` has its token's three list layers (the token-shape rule).
+            "x": pa.array(
+                [[[], [[0]]], [[[10]], [[10], []]]],
+                type=pa.large_list(pa.large_list(pa.large_list(pa.int64()))),
+            ),
             SOURCE_X: pa.array(tokens, type=source_type),
         }
     )

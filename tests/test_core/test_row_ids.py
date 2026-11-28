@@ -11,7 +11,7 @@ data columns in two orders, each with its own source-info token.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -21,7 +21,9 @@ from orcapod.core import row_ids
 from orcapod.core.data_function import output_source_info
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.datagrams.tag_data import EmptyData
+from orcapod.core.streams import ArrowTableStream
 from orcapod.system_constants import constants
+from orcapod.utils import arrow_utils
 
 HASHER = get_default_context().arrow_hasher
 
@@ -52,6 +54,87 @@ def _data(
 
 def _binary(value: bytes) -> "pa.Array[Any]":
     return pa.array([value], type=pa.large_binary())
+
+
+@pytest.mark.parametrize("scalar_last", [False, True])
+def test_with_source_info_uses_the_later_alias_in_every_view(scalar_last: bool) -> None:
+    """Prefixed and bare spellings update the same token in keyword order."""
+    data = Data(
+        pa.table({"x": [1], "y": [2], "_source_x": ["old"], "_source_y": ["kept"]})
+    )
+    scalar = pa.scalar(["arrow"], type=pa.large_list(pa.large_string()))
+    if scalar_last:
+        updated = data.with_source_info(x="python", _source_x=scalar)
+        expected = ["arrow"]
+        expected_type = scalar.type
+    else:
+        updated = data.with_source_info(x=scalar, _source_x="python")
+        expected = "python"
+        expected_type = pa.large_string()
+
+    assert updated.source_info() == {"x": expected, "y": "kept"}
+    entry = row_ids.entry_id(HASHER, _tag(), updated)
+    for table, prefix in (
+        (updated.as_table(columns={"source": True}), constants.SOURCE_PREFIX),
+        (updated.source_info_table(), constants.SOURCE_PREFIX),
+        (row_ids.instance_id_preimage(entry, updated), constants.INPUT_SOURCE_PREFIX),
+    ):
+        assert table.column(prefix + "x").to_pylist() == [expected]
+        assert table.schema.field(prefix + "x").type.equals(
+            expected_type, check_metadata=True
+        )
+        assert table.column(prefix + "y").to_pylist() == ["kept"]
+
+
+def test_with_source_info_keeps_a_scalar_type_its_value_cannot_show() -> None:
+    """Replacing a typed column never infers the Arrow scalar's type."""
+    data = Data(
+        pa.table({"x": [1], "y": [2], "_source_x": ["old"], "_source_y": ["kept"]})
+    )
+    token_type = pa.large_list(pa.large_list(pa.large_list(pa.large_string())))
+    token = [[], [[]]]
+    updated = data.with_source_info(x=pa.scalar(token, type=token_type))
+
+    assert updated.source_info() == {"x": token, "y": "kept"}
+    entry = row_ids.entry_id(HASHER, _tag(), updated)
+    for table, prefix in (
+        (updated.as_table(columns={"source": True}), constants.SOURCE_PREFIX),
+        (updated.source_info_table(), constants.SOURCE_PREFIX),
+        (row_ids.instance_id_preimage(entry, updated), constants.INPUT_SOURCE_PREFIX),
+    ):
+        assert table.column(prefix + "x").to_pylist() == [token]
+        assert table.schema.field(prefix + "x").type.equals(
+            token_type, check_metadata=True
+        )
+        assert table.column(prefix + "y").to_pylist() == ["kept"]
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "values"),
+    [(pa.null(), [None, None]), (pa.large_list(pa.null()), [[None], [None, None]])],
+)
+def test_entry_id_explains_how_to_replace_a_raw_null_system_tag(
+    arrow_type: pa.DataType,
+    values: list[Any],
+) -> None:
+    name = "_tag_record_id::seed"
+    stream = ArrowTableStream(
+        pa.table(
+            {
+                "subject": pa.array(["m1", "m2"], pa.large_string()),
+                "session": [1, 2],
+                "_tag_source_id::seed": pa.array(
+                    ["source", "source"], pa.large_string()
+                ),
+                name: pa.array(values, type=arrow_type),
+                "weight": [25, 30],
+            }
+        ),
+        tag_columns=["subject", "session"],
+    )
+    for tag, data in stream.iter_data():
+        with pytest.raises(ValueError, match=rf"{name}.*supported nullable type"):
+            row_ids.entry_id(HASHER, tag, data)
 
 
 class TestEntryId:
@@ -379,17 +462,28 @@ class TestTokensAreReadAsTheRowCarriesThem:
         from orcapod.core.streams import ArrowTableStream
 
         tokens_a = (
-            pa.array([[None, [[]]], [None, [[]]], [[["t"]]]], self.NESTED)
+            pa.array([[[], [[]]], [[], [[]]], [[["t"]]]], self.NESTED)
             if nested
             else pa.array(
                 ["s::row_0::a", "s::row_1::a", "s::row_2::a"], pa.large_string()
             )
         )
+        # ``a`` has its token's list layers (the token-shape rule, ITL-1491).
+        from tests.token_shapes import data_for, data_type_for
+
+        a_type = data_type_for(tokens_a.type)
+        data_a = pa.array(
+            [
+                data_for(t, v, a_type)
+                for t, v in zip(cast("Any", tokens_a).to_pylist(), (10, 20, 30))
+            ],
+            a_type,
+        )
         table = pa.Table.from_arrays(
             [
                 pa.array(["m1", "m1", "m2"], pa.large_string()),
                 pa.array([1, 2, 1], pa.int64()),
-                pa.array([10, 20, 30], pa.int64()),
+                data_a,
                 pa.array([0.5, 1.5, 2.5], pa.float64()),
                 tokens_a,
                 pa.array(["s::row_0::b", "s::row_1::b", None], pa.large_string()),
@@ -398,7 +492,7 @@ class TestTokensAreReadAsTheRowCarriesThem:
                 [
                     pa.field("subject", pa.large_string(), nullable=False),
                     pa.field("session", pa.int64(), nullable=False),
-                    pa.field("a", pa.int64(), nullable=False),
+                    pa.field("a", a_type, nullable=False),
                     pa.field("b", pa.float64(), nullable=False),
                     pa.field("_source_a", tokens_a.type, nullable=nested),
                     pa.field("_source_b", pa.large_string()),
@@ -457,10 +551,19 @@ class TestTokensAreReadAsTheRowCarriesThem:
             ]
             assert preimage.schema.field("_input_source_a").type == self.NESTED
             ids.add(row_ids.instance_id(HASHER, tag, data))
+            # The row's table gives the same typed column, never one typed again
+            # from the token's value, which fails for the first two rows (ITL-1491).
+            shown = data.as_table(columns={"source": True})
+            assert shown.schema.field("_source_a").type == self.NESTED
+            assert shown.column("_source_a").equals(typed.column("_source_a"))
             if index < 2:
-                # Typing this token again from its value is what fails.
                 with pytest.raises(pa.ArrowTypeError):
-                    data.as_table(columns={"source": True})
+                    pa.array(
+                        shown.column("_source_a").to_pylist(),
+                        arrow_utils.source_info_arrow_type(
+                            shown.column("_source_a").to_pylist()[0]
+                        ),
+                    )
         assert len(ids) == 3
 
     def test_a_changed_row_gives_the_tokens_it_now_has(self) -> None:
@@ -570,15 +673,17 @@ class TestTokensOfBuiltAndChangedRows:
             ids.add(row_ids.instance_id(HASHER, _tag(), changed))
         assert len(ids) == 3
 
-    def test_columns_taken_from_another_row_have_tokens_typed_from_their_values(
+    def test_columns_taken_from_another_row_keep_their_tokens_types(
         self,
     ) -> None:
-        """``with_columns_of`` (a data-tag falling through a function) types from values.
+        """``with_columns_of`` (a data-tag falling through a function) keeps the type.
 
-        The copied columns' tokens are typed again from their values: a stopgap,
-        not the proper solution (developer, November 27, 2026). A fixed-size list
-        token becomes a large list; a nested token that cannot be typed from its
-        value fails here. ITL-1491 removes the re-typing.
+        The taken columns' tokens keep the typed columns the other row carries
+        (developer, November 27, 2026, ITL-1491: the pipeline determines a token
+        column's type; it is never taken from values): a fixed-size list token
+        stays a fixed-size list, and a nested token that cannot be typed from its
+        value is taken as it is. The row's own columns (a function's output) keep
+        their string tokens.
         """
         fixed = pa.list_(pa.large_string(), 2)
         table = pa.Table.from_arrays(
@@ -611,8 +716,9 @@ class TestTokensOfBuiltAndChangedRows:
                     "_source_y",
                     "_source_z",
                 ]
-                assert tokens.schema.field("_source_a").type == pa.large_list(
-                    pa.large_string()
+                assert tokens.schema.field("_source_a").type == fixed
+                assert tokens.column("_source_a").equals(
+                    other.source_info_table().column("_source_a")
                 )
                 assert tokens.schema.field("_source_b").type == pa.large_string()
                 # Every view gives the same tokens, and the table view the same types.
@@ -629,10 +735,18 @@ class TestTokensOfBuiltAndChangedRows:
                 ids.add(row_ids.instance_id(HASHER, _tag(), joined))
         # Two rows, each with one id whatever the order the columns were taken in.
         assert len(ids) == 2
-        for other in self._nested_rows()[:2]:
+        for other in self._nested_rows():
             own = Data({"y": 1}, source_info={"y": "f::r::y"})
-            with pytest.raises(pa.ArrowTypeError):
-                own.with_columns_of(other, ["a"]).source_info_table()
+            joined = own.with_columns_of(other, ["a"])
+            for view in (
+                joined.source_info_table(),
+                joined.as_table(columns={"source": True}),
+            ):
+                assert view.schema.field("_source_a").type == self.NESTED
+                assert view.column("_source_a").equals(
+                    other.source_info_table().column("_source_a")
+                )
+                assert view.schema.field("_source_y").type == pa.large_string()
 
 
 class TestARenameMovesTheToken:
