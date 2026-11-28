@@ -14,10 +14,13 @@ reused. Serving the stored result is the intended behaviour (developer, November
 2026); the message was wrong.
 
 **Fix:** Nothing is logged for an input that has a record with a stored result. The
-warning is kept for the inputs none of whose persistent records has a stored result,
-counted by input, and says what was found and what each kind of run does (a full run
+warning is kept for inputs that have persistent records and no matching result in
+either the persistent or ephemeral store. It counts inputs and says what was found
+and what each kind of run does (a full run
 takes the result the store holds for the input, or computes it when there is none; a
 load-only run skips it) instead of promising a recompute. No behaviour changed.
 `tests/test_pipeline/test_newest_result_missing.py` pins the served result in every
 combination of full and load-only run, sync and async path, in-memory and Delta
-database, and the ephemeral mode as it is.
+database, and the ephemeral mode as it is. Mixed-store cases also verify that a
+result from the ephemeral store is served silently when its newer persistent result
+is gone.

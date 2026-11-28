@@ -1287,13 +1287,12 @@ _TAGINFO_ROW = "__fetch_taginfo_row"
 _RESULT_ROW = "__fetch_result_row"
 _EPHEMERAL_RESULT_ROW = "__fetch_ephemeral_result_row"
 
-# Logged for the inputs none of whose persistent records names a stored result. It
-# says what was found, never what a run will do: that depends on the run (ITL-1525).
+# Logged for inputs with persistent records and no matching result in either store.
 _NO_STORED_RESULT_MESSAGE = (
-    "%d inputs have pipeline records but no stored result in the persistent result "
-    "database (the results may have been deleted externally). A full run takes the "
-    "result the store holds for the input, or computes it when there is none; a "
-    "load-only run skips it."
+    "%d inputs have persistent pipeline records but no stored result matching their "
+    "records in either result database (the results may have been deleted externally). "
+    "A full run takes the result the store holds for the input, or computes it when "
+    "there is none; a load-only run skips it."
 )
 
 # The pipeline-table columns the fetch filters, joins and reads entries by.
@@ -3664,10 +3663,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         Partition the pipeline rows by ``IS_EPHEMERAL_COL`` and join each group
         to its result database by the exact result id. Keep all matched rows
-        from both databases. Log a warning for persistent rows with a missing
-        result. For ephemeral rows with a missing result, keep a placeholder
-        per instance from the latest record, breaking ties by the greater
-        result id.
+        from both databases. Warn for inputs with persistent records and no
+        match in either database. For ephemeral rows with a missing result,
+        keep a placeholder per instance from the latest record, breaking ties
+        by the greater result id.
 
         If ``instance_ids`` is provided, filter joined rows to matching
         ``INSTANCE_ID_COL`` values before conversion to Arrow.
@@ -3751,29 +3750,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 results = keep_rows_of_data_context(results, context_key).drop(
                     [constants.DATA_CONTEXT_COL]
                 )
-            if results is None:
-                # The pipeline table has persistent records but the result table is empty.
-                logger.warning(
-                    _NO_STORED_RESULT_MESSAGE,
-                    persistent_taginfo_df.get_column(INSTANCE_ID_COL).n_unique(),
-                )
-            else:
                 results_schema = results.schema
-                full_persistent_df = persistent_taginfo_df.join(
+                persistent_df = persistent_taginfo_df.join(
                     _row_frame(results, (constants.DATA_RECORD_ID,), _RESULT_ROW),
                     on=constants.DATA_RECORD_ID,
                     how="inner",
                 )
-                # An input with another record whose result is stored is served that
-                # result, which is ordinary: only an input none of whose persistent
-                # records has a stored result is reported (ITL-1525).
-                missing_count = (
-                    persistent_taginfo_df.get_column(INSTANCE_ID_COL).n_unique()
-                    - full_persistent_df.get_column(INSTANCE_ID_COL).n_unique()
-                )
-                if missing_count > 0:
-                    logger.warning(_NO_STORED_RESULT_MESSAGE, missing_count)
-                persistent_df = full_persistent_df
 
         # ------------------------------------------------------------------
         # Ephemeral join
@@ -3867,9 +3849,23 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             merged_df = pl.concat([ephemeral_df, persistent_df], how="diagonal")
         elif ephemeral_df.height > 0:
             merged_df = ephemeral_df
-        elif persistent_df.height > 0:
-            merged_df = persistent_df
         else:
+            merged_df = persistent_df
+
+        if persistent_taginfo_df.height > 0:
+            # A match in either store serves the input (ITL-1525).
+            missing_instances = persistent_taginfo_df.select(INSTANCE_ID_COL)
+            if merged_df.height > 0:
+                missing_instances = missing_instances.join(
+                    merged_df.select(INSTANCE_ID_COL), on=INSTANCE_ID_COL, how="anti"
+                )
+            if missing_instances.height > 0:
+                logger.warning(
+                    _NO_STORED_RESULT_MESSAGE,
+                    missing_instances.get_column(INSTANCE_ID_COL).n_unique(),
+                )
+
+        if merged_df.height == 0:
             # No results found in either database — return empty table preserving taginfo schema
             empty_table = taginfo.slice(0, 0)
             return _JoinedRecords(

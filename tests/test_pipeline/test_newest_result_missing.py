@@ -20,6 +20,7 @@ import logging
 from pathlib import Path
 from typing import Any, final
 
+import pyarrow.compute as pc
 import pytest
 
 from orcapod import PipelineJob, function_pod
@@ -27,6 +28,7 @@ from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import RunSummary
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import DictSource
+from orcapod.system_constants import DATA_RECORD_ID
 from orcapod.types import NodeConfig
 
 KEY = "__key"
@@ -61,6 +63,7 @@ class Fixture:
         use_async: bool,
         *,
         ephemeral: bool,
+        newer_persistent: bool = False,
     ) -> None:
         self.use_async = use_async
         self.ephemeral = ephemeral
@@ -83,12 +86,15 @@ class Fixture:
         self._compute = compute
         self.pipeline_db = self._database()
         self.older_results = self._database()
-        newer_results = self._database()
-        for added, results in ((10, self.older_results), (20, newer_results)):
-            self._added = added
-            assert self.run(self.job(results)).ok
+        self.newer_results = self._database()
+        self._added = 10
+        assert self.run(self.job(self.older_results)).ok
+        self._added = 20
+        assert self.run(
+            self.job(self.newer_results, ephemeral=ephemeral and not newer_persistent)
+        ).ok
         self._added = 30
-        assert self.calls == [0, 1, 0, 1]
+        assert sorted(self.calls) == [0, 0, 1, 1]
         self.calls.clear()
         assert self.record_count() == 4
 
@@ -98,17 +104,21 @@ class Fixture:
         self._databases += 1
         return DeltaTableDatabase(self._tmp_path / f"db{self._databases}")
 
-    def job(self, results: ArrowDatabaseProtocol) -> PipelineJob:
+    def job(
+        self, results: ArrowDatabaseProtocol, *, ephemeral: bool | None = None
+    ) -> PipelineJob:
         """A fresh job over the pipeline database and *results*."""
+        if ephemeral is None:
+            ephemeral = self.ephemeral
         job = PipelineJob(
             name="newest_result_missing",
             database=self.pipeline_db,
-            result_database=InMemoryArrowDatabase() if self.ephemeral else results,
+            result_database=InMemoryArrowDatabase() if ephemeral else results,
         )
         with job:
             source = DictSource(self._rows, tag_columns=self._tags, source_id="rows")
             self._compute.pod(source, label="compute")
-        if self.ephemeral:
+        if ephemeral:
             job.apply_node_config(NodeConfig(is_result_ephemeral=True))
             job.set_ephemeral_database(results)
         return job
@@ -203,6 +213,58 @@ def test_ephemeral_full_run_serves_the_stored_result(
     assert [r for r in _node_log(caplog) if r.levelno >= logging.WARNING] == []
 
 
+@USE_ASYNC
+@LOAD_ONLY
+@pytest.mark.parametrize(
+    "keep_one_persistent_result", [False, True], ids=["absent", "partial"]
+)
+def test_ephemeral_result_is_served_silently_when_persistent_result_is_gone(
+    use_async: bool,
+    load_only: bool,
+    keep_one_persistent_result: bool,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An older ephemeral match suppresses a warning about a newer persistent miss."""
+    fixture = Fixture(
+        "memory",
+        tmp_path,
+        "as_declared",
+        use_async,
+        ephemeral=True,
+        newer_persistent=True,
+    )
+    reader = fixture.job(fixture.older_results)
+    expected = SERVED
+    if keep_one_persistent_result:
+        (path,) = fixture.newer_results.list_table_paths()
+        records = fixture.newer_results.get_all_records(
+            path, record_id_column=DATA_RECORD_ID
+        )
+        assert records is not None
+        persistent_results = reader.result_database
+        assert persistent_results is not None
+        persistent_results.add_records(
+            path,
+            records.filter(pc.equal(records["result"], 21)),
+            record_id_column=DATA_RECORD_ID,
+            flush=True,
+        )
+        expected = [SERVED[0], (2, "b", 21, 26)]
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="orcapod"):
+        summary = fixture.run(reader, load_only=load_only)
+
+    assert summary.ok
+    assert _rows(reader) == expected
+    assert fixture.calls == []
+    assert fixture.record_count() == 4
+    node = summary.nodes["compute"]
+    assert (node.computed, node.reused, node.not_stored) == (0, 2, 0)
+    assert [r for r in _node_log(caplog) if r.levelno >= logging.WARNING] == []
+
+
 @BACKEND
 @USE_ASYNC
 @ARRANGEMENT
@@ -268,3 +330,4 @@ def test_no_stored_result_at_all_is_reported_without_a_recompute_claim(
     warnings = [r for r in _node_log(caplog) if r.levelno >= logging.WARNING]
     assert warnings
     assert all("no stored result" in r.getMessage() for r in warnings)
+    assert all(r.getMessage().startswith("2 inputs") for r in warnings)
