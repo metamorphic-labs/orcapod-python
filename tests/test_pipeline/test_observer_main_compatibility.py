@@ -9,10 +9,11 @@ import logging
 import os
 import subprocess
 import sys
-import tarfile
 import warnings
+from zipfile import ZipFile
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import FrameType
 from typing import TYPE_CHECKING, TypedDict, cast
 from unittest.mock import patch
 from uuid import UUID
@@ -60,6 +61,7 @@ BASE = "37f784318931e5e276203c44277571b042057145"
 PATHS = ("sync", "async", "run_async")
 SCENARIOS = (
     "success",
+    "quiet-frame-audit",
     "continue",
     "fail_fast",
     "loss",
@@ -247,7 +249,7 @@ def _run_case(path: str, scenario: str, arrangement: Arrangement) -> _RunRecord:
             last,
         )
 
-    # A single row keeps the order deterministic even on the fail-fast async path.
+    # A single row removes ordering differences among concurrent row callbacks.
     spec = replace(
         MAIN, columns={key: col.slice(0, 1) for key, col in MAIN.columns.items()}
     )
@@ -325,19 +327,29 @@ def _probe() -> None:
     assert PACKAGE.parent == Path(sys.argv[1]).resolve()
     path = sys.argv[2]
     fixed_uuid = UUID("01234567-89ab-4def-8abc-0123456789ab")
+    audit_caller = False
+
+    def audit(event: str, args: tuple[object, ...]) -> None:
+        if event == "sys._getframe" and audit_caller:
+            (frame,) = args
+            assert isinstance(frame, FrameType)
+            if frame.f_code.co_qualname in (
+                "_run_case",
+                "_run_case.<locals>.run_async",
+            ):
+                raise PermissionError("caller frame access denied")
+
+    # An audit hook is permanent, so install it only in the probe process.
+    sys.addaudithook(audit)
+    records: dict[str, _RunRecord] = {}
     with patch("uuid.uuid4", return_value=fixed_uuid):
-        print(
-            json.dumps(
-                {
-                    f"{path}/{scenario}/{arrangement.id}": _run_case(
-                        path, scenario, arrangement
-                    )
-                    for scenario in SCENARIOS
-                    for arrangement in ARRANGEMENTS
-                },
-                default=str,
-            )
-        )
+        for scenario in SCENARIOS:
+            audit_caller = scenario == "quiet-frame-audit"
+            for arrangement in ARRANGEMENTS:
+                records[f"{path}/{scenario}/{arrangement.id}"] = _run_case(
+                    path, scenario, arrangement
+                )
+    print(json.dumps(records, default=str))
 
 
 def _run_probe(source: Path, path: str) -> dict[str, _RunRecord]:
@@ -355,11 +367,33 @@ def _run_probe(source: Path, path: str) -> dict[str, _RunRecord]:
     return cast("dict[str, _RunRecord]", json.loads(completed.stdout))
 
 
+def _operator_completion(calls: list[list[object]]) -> list[list[object]]:
+    """Partition out the column selector's async completion after checking its order."""
+    completion: list[list[object]] = []
+    started: list[list[object]] = []
+    for call in calls:
+        if len(call) < 4 or call[2] not in ("on_node_start", "on_node_end"):
+            continue
+        payload = call[3]
+        if not isinstance(payload, list) or payload[0] != "SelectDataColumns":
+            continue
+        scope = call[:2]
+        if call[2] == "on_node_start":
+            started.append(scope)
+        else:
+            assert scope in started
+            started.remove(scope)
+            completion.append(call)
+    for call in completion:
+        calls.remove(call)
+    return completion
+
+
 @pytest.mark.parametrize("path", PATHS)
 def test_run_behavior_matches_reviewed_main(tmp_path: Path, path: str) -> None:
     """Compare the whole record after removing only the two loss-report additions."""
     baseline = subprocess.run(
-        ["git", "archive", BASE, "src"],
+        ["git", "archive", "--format=zip", BASE, "src"],
         cwd=ROOT,
         capture_output=True,
         check=False,
@@ -368,8 +402,8 @@ def test_run_behavior_matches_reviewed_main(tmp_path: Path, path: str) -> None:
         pytest.skip(
             f"Reviewed origin/main commit {BASE} is unavailable in this checkout"
         )
-    with tarfile.open(fileobj=io.BytesIO(baseline.stdout)) as archive:
-        archive.extractall(tmp_path, filter="data")
+    with ZipFile(io.BytesIO(baseline.stdout)) as archive:
+        archive.extractall(tmp_path)
 
     main = _run_probe(tmp_path / "src", path)
     branch = _run_probe(ROOT / "src", path)
@@ -391,6 +425,12 @@ def test_run_behavior_matches_reviewed_main(tmp_path: Path, path: str) -> None:
         else:
             assert losses == {}
         actual["losses"] = {}
+        if path != "sync":
+            # The operator forwards rows before it completes. Its end hook can run
+            # before or after downstream row hooks, even with one input row.
+            assert _operator_completion(actual["calls"]) == _operator_completion(
+                expected["calls"]
+            ), case
         assert actual == expected, case
 
 

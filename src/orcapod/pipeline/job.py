@@ -308,7 +308,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         The same object ``run`` and ``run_async`` returned: per function node, the rows
         computed, read from the database and failed, and each node's first error. Use
         ``job.last_run.print_traceback("<node label>")`` to see a failed row's full
-        traceback. A run that raised leaves it unchanged. A loaded job has none.
+        traceback. If execution fails before completion, this property keeps the
+        previous summary. If a completion warning is promoted to an error, the
+        new summary is already available here. A loaded job has none.
         """
         return self._last_run
 
@@ -1077,7 +1079,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Rows whose function raised (with the default ``error_policy="continue"``) are
         skipped, and the run goes on. At the end, if any row failed, a single
         ``RowFailuresWarning`` names each node with failed rows, how many failed, the
-        first error, and how to print its traceback. A run without failures is quiet.
+        first error, and how to print its traceback. If an observer could not record
+        events, a single ``ObserverEventsLostWarning`` reports the loss even when every
+        row succeeded. A warnings-as-errors filter can raise either warning after
+        the summary is kept in ``job.last_run``.
 
         Returns:
             The run's ``RunSummary``: per function node, the rows computed, read from
@@ -1148,8 +1153,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             asynchronous=not is_sync,
             lost_observer_events=losses.by_kind(),
         )
-        caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warnings are shown
-        _warn_run_completion(summary, caller)
+        if not summary.ok or summary.lost_observer_events:
+            caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warnings are shown
+            _warn_run_completion(summary, caller)
         return summary
 
     async def run_async(
@@ -1223,8 +1229,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             asynchronous=True,
             lost_observer_events=losses.by_kind(),
         )
-        caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # the coroutine's awaiting or resuming frame
-        _warn_run_completion(summary, caller)
+        if not summary.ok or summary.lost_observer_events:
+            caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # the coroutine's awaiting or resuming frame
+            _warn_run_completion(summary, caller)
         return summary
 
     def _prepare_run(

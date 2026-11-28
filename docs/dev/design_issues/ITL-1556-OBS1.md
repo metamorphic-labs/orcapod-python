@@ -24,7 +24,8 @@ observers, and the built-ins derive event metadata as before.
 The run puts the count and first reported error for each observer kind in
 `RunSummary.lost_observer_events`. The observer logs the original exception before
 rendering it for the summary. If the error's message cannot be rendered,
-the summary shows its type name. The summary display and warning escape non-ASCII
+the summary shows its type name. An interrupt while formatting the error propagates.
+The summary display and warning escape non-ASCII
 text and ASCII control characters. If warning delivery raises, the totals are logged.
 A filter that promotes `ObserverEventsLostWarning` to an error still raises it.
 The run issues one `ObserverEventsLostWarning` after

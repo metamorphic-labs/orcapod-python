@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import io
 import logging
+import signal
 import threading
 import warnings
 from collections.abc import Callable
@@ -810,17 +811,19 @@ def test_each_run_reports_its_own_losses(
     status_database = _database()
     observer = StatusObserver(status_database)
     store = InMemoryArrowDatabase()
+    first_job = _job(arrangement, store)
 
     first, first_messages = _run_losing(
-        _job(arrangement, store), orchestrator=orchestrator, observer=observer
+        first_job, orchestrator=orchestrator, observer=observer
     )
     status_database.refusals.accept_first = None
     second_job = _job(arrangement, store)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
+        attempted = status_database.refusals.writes
+        held = first_job.run(orchestrator=orchestrator, observer=observer)
+        assert status_database.refusals.writes == attempted
         second = second_job.run(orchestrator=orchestrator, observer=observer)
-        # Every node now holds a current run: nothing runs and nothing can be lost.
-        held = second_job.run(orchestrator=orchestrator, observer=observer)
 
     assert first.lost_observer_events["status"].count == 2 * N_ROWS
     assert len(first_messages) == 1
@@ -1323,6 +1326,32 @@ def test_summary_formatting_preserves_observer_tracebacks(
     count = 2 * N_ROWS if kind == "status" else N_ROWS
     assert tracebacks == ["format call 1"] * count
     assert summary.lost_observer_events[kind].count == count
+
+
+@pytest.mark.parametrize("kind", ["status", "logging"])
+def test_interrupt_during_observer_error_formatting_propagates(
+    kind: str, arrangement: Arrangement, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C still interrupts a sync job while it formats an observer write error."""
+
+    class InterruptedWriteError(OSError):
+        @override
+        def __str__(self) -> str:
+            signal.raise_signal(signal.SIGINT)
+            return super().__str__()
+
+    logger = logging.getLogger(f"orcapod.pipeline.{kind}_observer")
+    monkeypatch.setattr(logger, "disabled", True)
+    database = _database(error=InterruptedWriteError)
+    observer = (
+        StatusObserver(database) if kind == "status" else LoggingObserver(database)
+    )
+    job = _job(arrangement)
+
+    with pytest.raises(KeyboardInterrupt):
+        _ = job.run(orchestrator=SyncPipelineOrchestrator(), observer=observer)
+
+    assert job.last_run is None
 
 
 def test_concurrent_losses_keep_the_first_reported_error() -> None:

@@ -81,13 +81,13 @@ class RunLosses:
         """
         try:
             name = str.__str__(type(error).__name__)
-        except BaseException:
+        except Exception:
             name = "Exception"
         try:
             # An exception's __str__ can return a subclass with a custom __format__.
             message = str.__str__(str(error))
             text = f"{name}: {message}"
-        except BaseException:
+        except Exception:
             text = name
         safe_text = ascii_loss_text(text)
         with self._lock:

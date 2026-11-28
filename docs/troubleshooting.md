@@ -217,7 +217,9 @@ kind, how many events were lost and the first error.
 **Fix.** Check the first error in the message and the traceback in the
 `orcapod.pipeline` logs. The counts are in `job.last_run.lost_observer_events`. For a
 write error, use a database that accepts the observer's rows, such as in-memory or Delta.
-For an encoding error, correct the reported value. Run again if you need the records.
+For an encoding error, correct the reported value before it is used in another event.
+These changes apply to future writes. A later `job.run()` can reuse work from the
+completed run and may never emit replacement events for the missing records.
 
 ### `TypeError: ...() got an unexpected keyword argument 'ctx'` from a `sink_pod`
 
