@@ -595,7 +595,7 @@ class CompleteStreamFeed:
 
 
 def typed_arrow_schemas(
-    stream: object, *, own: bool = True
+    stream: object, *, own: bool = True, data_fields: Sequence[str] | None = None
 ) -> tuple[pa.Schema, pa.Schema]:
     """Return the Arrow schemas of ``stream``'s tag and data columns (ITL-640).
 
@@ -614,6 +614,8 @@ def typed_arrow_schemas(
         stream: The stream, source or node.
         own: Whether to return the ``arrow_schemas`` the stream states, when it has
             them; ``False`` derives them (the stream's own derivation).
+        data_fields: The data fields to select, if comparing only part of the
+            advertised data schema.
 
     Returns:
         The tag and data Arrow schemas.
@@ -621,11 +623,16 @@ def typed_arrow_schemas(
     if own:
         stated = getattr(stream, "arrow_schemas", None)
         if isinstance(stated, tuple):
-            return cast("tuple[pa.Schema, pa.Schema]", stated)
+            tag_arrow, data_arrow = cast("tuple[pa.Schema, pa.Schema]", stated)
+            if data_fields is not None:
+                data_arrow = pa.schema([data_arrow.field(name) for name in data_fields])
+            return tag_arrow, data_arrow
     typed = cast(StreamProtocol, stream)
     # The columns are those of the Python output schema, which the identity has always
     # named; only their types come from the zero-row table.
     tag_schema, data_schema = typed.output_schema()
+    if data_fields is not None:
+        data_schema = data_schema.select(*data_fields)
     table = typed_zero_row_table(stream)
     if table is None:
         from orcapod.utils.schema_utils import declared_arrow_schema
