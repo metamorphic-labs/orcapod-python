@@ -77,7 +77,6 @@ def _arranged(spec: Spec, variant: str, roles: str) -> ArrowTableSource:
 
 
 SEEDS = range(12)
-# The fields whose flags a complete table decides by its values.
 # Batch sizes drawn for the cuts: empty and one-row batches included.
 SIZES = (0, 1, 1, 2, 3, 5, 64)
 
@@ -207,16 +206,13 @@ def _rows(table: pa.Table) -> Counter[tuple[Any, ...]]:
 
 
 def assert_same_fields(got: pa.Table, want: pa.Table) -> None:
-    """Same columns, types, field metadata and flags for regular and token fields."""
+    """Same columns, types, flags and metadata for every field."""
     assert sorted(got.column_names) == sorted(want.column_names)
     for field in want.schema:
         other = got.schema.field(field.name)
         assert other.type == field.type, field.name
         assert other.metadata == field.metadata, field.name
-        if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
-            assert got[field.name].null_count == want[field.name].null_count, field.name
-        else:
-            assert other.nullable == field.nullable, field.name
+        assert other.nullable == field.nullable, field.name
 
 
 def assert_same_rows(
@@ -1600,3 +1596,57 @@ def test_merge_join_preserves_system_tag_declarations(matched: list[int]) -> Non
         )
         for schema in actual
     )
+
+
+@pytest.mark.parametrize("kind", ["semijoin", "rejoin"])
+@pytest.mark.parametrize("nullable", [False, True], ids=["required", "nullable"])
+def test_filtering_join_kernels_preserve_system_tag_fields(
+    kind: str, nullable: bool
+) -> None:
+    """Each emitted field and zero-row declaration agrees with sync."""
+    from orcapod.core.operators import Rejoin
+    from orcapod.core.operators.streaming_joins import StreamingRejoin
+
+    name = "_tag_custom"
+    field = pa.field(
+        name, pa.large_string(), nullable=nullable, metadata={b"owner": b"raw"}
+    )
+    values = pa.array(["selected", None if nullable else "another"], field.type)
+    left = ArrowTableStream(
+        pa.Table.from_arrays(
+            [pa.array([1, 2]), pa.array([10, 20]), values],
+            schema=pa.schema(
+                [pa.field("k", pa.int64()), pa.field("x", pa.int64()), field]
+            ),
+        ),
+        tag_columns=["k"],
+    )
+    right_table = pa.table({"k": [1, 2], "y": [30, 40]})
+    if kind == "rejoin":
+        right = ArrowTableStream(
+            right_table.append_column(field, values), tag_columns=["k"]
+        )
+        operator = Rejoin()
+        kernel = StreamingRejoin(operator, (left, right))
+    else:
+        right = ArrowTableStream(right_table, tag_columns=["k"])
+        operator = SemiJoin()
+        kernel = StreamingSemiJoin(operator, (left, right))
+    expected = operator.static_process(left, right).as_table(columns=TRANSPORT_COLUMNS)
+    assert expected.schema.field(name).equals(field, check_metadata=True)
+    assert (
+        kernel.zero_row_result.as_table(columns=TRANSPORT_COLUMNS)
+        .schema.field(name)
+        .equals(field, check_metadata=True)
+    )
+    out = [
+        result
+        for i, stream in enumerate((left, right))
+        for result in kernel.push(i, _sent(stream).combine_chunks().to_batches()[0])
+    ]
+    out += kernel.close(0) + kernel.close(1)
+    assert out
+    assert all(
+        batch.schema.field(name).equals(field, check_metadata=True) for batch in out
+    )
+    assert_same_rows(out, kernel, expected)

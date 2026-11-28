@@ -233,6 +233,17 @@ class OutputChannel:
         token_types = settle_token_types(batch, self._token_types)
         self._schema = schema
         self._token_types = token_types
+        fields = [
+            field.with_nullable(schema.field(field.name).nullable)
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+            else field
+            for field in batch.schema
+        ]
+        if any(
+            field.nullable != sent.nullable
+            for field, sent in zip(fields, batch.schema, strict=True)
+        ):
+            batch = pa.RecordBatch.from_arrays(batch.columns, schema=pa.schema(fields))
         if batch.num_rows:
             if self._order is None:
                 self._order = names
@@ -377,7 +388,9 @@ class OutputChannel:
                 + "is a stream only once it is complete."
             )
         if self._result is None:
-            self._result = stream_from_batches(self._stream, self._batches)
+            self._result = stream_from_batches(
+                self._stream, self._batches, declared_schema=self._schema
+            )
         return self._result
 
 

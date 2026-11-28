@@ -10,7 +10,6 @@ unless a live source has been bound via `bind`.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +29,6 @@ from orcapod.core.streams.base import (
     typed_zero_row_table,
 )
 from orcapod.protocols.core_protocols import SourceProtocol
-from orcapod.system_constants import constants
 from orcapod.types import ContentHash, Schema
 
 if TYPE_CHECKING:
@@ -289,19 +287,9 @@ class SourceProxy(RootSource):
         all_info: bool = False,
     ) -> pa.Table:
         delegate = self._require_delegate()
-        config = ColumnConfig.handle_config(columns, all_info=all_info)
-        table = validate_source_table(
-            delegate.as_table(columns=replace(config, system_tags=True))
-        )
-        if config.system_tags:
-            return table
-        return table.drop_columns(
-            [
-                name
-                for name in table.column_names
-                if name.startswith(constants.SYSTEM_TAG_PREFIX)
-            ]
-        )
+        table = delegate.as_table(columns=columns, all_info=all_info)
+        self._validate_delegate_schema(delegate)
+        return validate_source_table(table)
 
     def head(
         self,

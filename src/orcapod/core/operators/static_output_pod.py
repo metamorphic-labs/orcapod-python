@@ -1167,7 +1167,10 @@ reading.
 
 
 def stream_from_batches(
-    stream: StreamProtocol, batches: Sequence[pa.RecordBatch]
+    stream: StreamProtocol,
+    batches: Sequence[pa.RecordBatch],
+    *,
+    declared_schema: pa.Schema | None = None,
 ) -> StreamProtocol:
     """Return the Arrow record batches of ``stream``'s rows as a stream.
 
@@ -1185,29 +1188,21 @@ def stream_from_batches(
     Args:
         stream: The describing stream: the node or stream the rows are of.
         batches: Its rows (``row_built_columns``), in order.
+        declared_schema: The declaration already accepted by an output channel.
 
     Returns:
         A complete, re-readable stream over the rows.
     """
-    if not batches:
-        return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
-    table = concatenate_batches(batches)
+    typed = typed_zero_row_table(stream)
+    if declared_schema is None and typed is not None:
+        declared_schema = typed.schema
+    if declared_schema is None and batches:
+        declared_schema = batches[0].schema
+    table = concatenate_batches(batches, declared_schema=declared_schema)
     if table is None:
-        return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
-    declared = typed_zero_row_table(stream)
-    fields = []
-    for field, column in zip(table.schema, table.columns, strict=True):
-        if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
-            typed = (
-                declared.schema.field(field.name)
-                if declared is not None and field.name in declared.column_names
-                else None
-            )
-            field = field.with_nullable(
-                typed.nullable if typed is not None else column.null_count > 0
-            )
-        fields.append(field)
-    table = pa.Table.from_arrays(table.columns, schema=pa.schema(fields))
+        if typed is not None or declared_schema is None:
+            return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
+        table = declared_schema.empty_table()
     return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
         table, _keys_in_delivered_order(stream.keys(), table.column_names), stream
     )
@@ -1282,14 +1277,18 @@ def settle_token_types(
     return settled
 
 
-def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
+def concatenate_batches(
+    batches: Sequence[pa.RecordBatch], *, declared_schema: pa.Schema | None = None
+) -> pa.Table | None:
     """Put a stream's record batches under one another, or ``None`` with no row.
 
-    System tags are opened to nullable while joining batches, and each source-info
-    column keeps the type every batch declares. Batches with no rows are skipped.
+    System tags keep their declared fields, and each source-info column keeps the
+    type every batch declares. Batches with no rows contribute no values.
 
     Args:
         batches: Record batches of one stream's rows, in order.
+        declared_schema: The stream or channel declaration, or the first batch's
+            schema when no earlier declaration is available.
 
     Returns:
         The table, or ``None`` when no batch has a row.
@@ -1304,10 +1303,12 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
     if not rows:
         return None
 
+    if declared_schema is None:
+        declared_schema = batches[0].schema
     settled: dict[str, pa.DataType] = {}
     for batch in rows:
         settled = settle_token_types(batch, settled)
-    opened: list[pa.RecordBatch] = []
+    aligned: list[pa.RecordBatch] = []
     for batch in rows:
         columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
         fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
@@ -1315,11 +1316,26 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
             if field.name in settled:
                 field = arrow_utils.source_info_field(field.name, settled[field.name])
             if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
-                field = field.with_nullable(True)
+                if field.name not in declared_schema.names:
+                    raise ValueError(
+                        f"System-tag field {field.name!r} has no declaration."
+                    )
+                expected = declared_schema.field(field.name)
+                if not expected.equals(
+                    field.with_nullable(expected.nullable), check_metadata=True
+                ):
+                    raise ValueError(
+                        f"System-tag field {field.name!r} differs from its declaration."
+                    )
+                if not expected.nullable and column.null_count:
+                    raise ValueError(
+                        f"Required system-tag field {field.name!r} contains nulls."
+                    )
+                field = expected
             columns.append(column)
             fields.append(field)
-        opened.append(pa.RecordBatch.from_arrays(columns, schema=pa.schema(fields)))
-    return pa.Table.from_batches(opened)
+        aligned.append(pa.RecordBatch.from_arrays(columns, schema=pa.schema(fields)))
+    return pa.Table.from_batches(aligned)
 
 
 class RowsOnRead:

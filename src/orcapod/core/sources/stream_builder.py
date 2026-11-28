@@ -148,6 +148,74 @@ def require_custom_system_tags(
             )
 
 
+def declare_native_custom_system_tags(
+    table: pa.Table, names: Collection[str]
+) -> pa.Table:
+    """Declare native custom system tags as required large strings.
+
+    Args:
+        table: A table inferred from native Python values.
+        names: The columns nominated as custom system tags.
+
+    Returns:
+        The table with nominated fields declared as non-nullable large strings.
+
+    Raises:
+        InputValidationError: If a nominated column is not text or contains nulls.
+    """
+    if not names:
+        return table
+    require_custom_system_tags_values(table, names)
+    schema = pa.schema(
+        [
+            pa.field(
+                field.name,
+                pa.large_string(),
+                nullable=False,
+                metadata=field.metadata,
+            )
+            if field.name in names
+            else field
+            for field in table.schema
+        ],
+        metadata=cast(dict[bytes | str, bytes | str] | None, table.schema.metadata),
+    )
+    return table.cast(schema)
+
+
+def require_custom_system_tags_values(table: pa.Table, names: Collection[str]) -> None:
+    """Validate values and types before declaring native custom system tags.
+
+    Args:
+        table: A table inferred from native Python values.
+        names: The columns nominated as custom system tags.
+
+    Raises:
+        ValueError: If a nominated column is missing.
+        InputValidationError: If a nominated column is not text or contains nulls.
+    """
+    if missing := sorted(set(names) - set(table.column_names)):
+        raise ValueError(
+            f"system_tag_columns not found in table: {missing}. "
+            f"Available columns: {sorted(table.column_names)}"
+        )
+    for name in names:
+        field = table.schema.field(name)
+        require_system_tag_without_field_metadata(field)
+        has_nulls = table.column(name).null_count > 0
+        if has_nulls or not (
+            pa.types.is_string(field.type)
+            or pa.types.is_large_string(field.type)
+            or pa.types.is_string_view(field.type)
+        ):
+            raise InputValidationError(
+                f"Custom system-tag column {name!r} has type {field.type} "
+                f"({'contains null values' if has_nulls else 'non-text values'}). "
+                "Declare a non-nullable string column with no null values "
+                "and convert its values to text first."
+            )
+
+
 def normalize_record_id_columns(
     record_id_columns: str | Collection[str] | None,
 ) -> tuple[str, ...] | None:

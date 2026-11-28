@@ -10,6 +10,7 @@ from typing import Any, TypedDict
 from uuid import UUID
 
 import deltalake
+import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.csv as pa_csv
@@ -869,3 +870,108 @@ def test_spiral_validates_reserved_null_in_an_empty_scan_batch(
             InputValidationError, match=r"'__unused'.*declare a supported nullable type"
         ):
             source.as_table()
+
+
+def test_bound_proxy_keeps_projections_row_order() -> None:
+    """Hidden tags used for validation do not become sort keys for the table."""
+    source = ArrowTableSource(
+        pa.table({"x": [9, 1, 4]}), tag_columns=[], record_id_columns=["x"]
+    )
+    proxy = SourceProxy(
+        source.source_id,
+        source.content_hash().to_string(),
+        source.pipeline_hash().to_string(),
+        *source.output_schema(),
+    )
+    proxy.bind(source)
+    config = {"sort_by_tags": True}
+    table = proxy.as_table(columns=config)
+    assert table.equals(source.as_table(columns=config), check_metadata=True)
+    assert proxy.head(2, columns=config).table.equals(
+        table.slice(0, 2), check_metadata=True
+    )
+
+
+@pytest.mark.parametrize("representation", ["table", "reader", "stream"])
+def test_dataframe_source_refuses_nullable_arrow_custom_system_tag(
+    representation: str,
+) -> None:
+    """Converting a declared nullable custom system tag never makes it required."""
+    table = _table(pa.field("extra", pa.string(), nullable=True), ["a", "b"])
+    if representation == "reader":
+        data = table.to_reader()
+    elif representation == "stream":
+        data = _ArrowStreamExporter(table)
+    else:
+        data = table
+    with pytest.raises(InputValidationError, match=r"'extra'.*nullable"):
+        ArrowTableSource(table, tag_columns=TAGS, system_tag_columns=["extra"])
+    with pytest.raises(InputValidationError, match=r"'extra'.*nullable"):
+        DataFrameSource(data, tag_columns=TAGS, system_tag_columns=["extra"])
+
+
+@pytest.mark.parametrize("representation", ["pandas", "polars"])
+def test_dataframe_source_declares_native_custom_system_tag_required_large_string(
+    representation: str,
+) -> None:
+    """Native frame system tags have a value-independent declared field."""
+    values = {
+        "g": ["a", "b"],
+        "k": ["a", "b"],
+        "x": [1, 2],
+        "extra": ["one", "two"],
+    }
+    data = pd.DataFrame(values) if representation == "pandas" else pl.DataFrame(values)
+    source = DataFrameSource(data, tag_columns=TAGS, system_tag_columns=["extra"])
+    field = source.as_table(columns={"system_tags": True}).schema.field("_tag_extra")
+    assert field.type == pa.large_string()
+    assert not field.nullable
+
+
+@pytest.mark.parametrize("representation", ["pandas", "polars"])
+@pytest.mark.parametrize("values", [["one", None], [1, 2]])
+def test_dataframe_source_rejects_invalid_native_custom_system_tag(
+    representation: str, values: list[object]
+) -> None:
+    """Native custom system tags reject null and non-text values."""
+    data_values = {
+        "g": ["a", "b"],
+        "k": ["a", "b"],
+        "x": [1, 2],
+        "extra": values,
+    }
+    data = (
+        pd.DataFrame(data_values)
+        if representation == "pandas"
+        else pl.DataFrame(data_values)
+    )
+    with pytest.raises(InputValidationError, match=r"'extra'"):
+        DataFrameSource(data, tag_columns=TAGS, system_tag_columns=["extra"])
+
+
+def test_dict_source_declares_custom_system_tag_required_large_string() -> None:
+    """Dict system tags use the same fixed declaration as native frames."""
+    source = DictSource(
+        [
+            {"g": "a", "k": "a", "x": 1, "extra": "one"},
+            {"g": "b", "k": "b", "x": 2, "extra": "two"},
+        ],
+        tag_columns=TAGS,
+        system_tag_columns=["extra"],
+    )
+    field = source.as_table(columns={"system_tags": True}).schema.field("_tag_extra")
+    assert field.type == pa.large_string()
+    assert not field.nullable
+
+
+@pytest.mark.parametrize("values", [["one", None], [1, 2]])
+def test_dict_source_rejects_invalid_custom_system_tag(
+    values: list[str | None | int],
+) -> None:
+    """Dict system tags reject null and non-text values."""
+    rows = [
+        {"g": "a", "k": "a", "x": 1, "extra": values[0]},
+        {"g": "b", "k": "b", "x": 2, "extra": values[1]},
+    ]
+    with pytest.raises(InputValidationError, match=r"'extra'"):
+        _ = DictSource(rows, tag_columns=TAGS, system_tag_columns=["extra"])

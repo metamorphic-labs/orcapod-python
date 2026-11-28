@@ -13,9 +13,9 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
+    declare_native_custom_system_tags,
     require_custom_system_tags,
     require_supported_nullable_types,
-    require_system_tag_without_field_metadata,
 )
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -71,6 +71,7 @@ class DataFrameSource(RootSource):
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
 
+        arrow_system_tag_flags: dict[str, bool] = {}
         # Keep pandas and Polars on their native paths even if they export Arrow.
         # For Arrow inputs, materialize once before Polars drops field metadata.
         if not isinstance(data, (pd.DataFrame, pl.DataFrame, pl.Series)) and (
@@ -82,9 +83,11 @@ class DataFrameSource(RootSource):
                 arrow_input = pa.Table.from_batches([batch])
             else:
                 arrow_input = pa.table(cast("ArrowStreamExportable", data))
-            for field in arrow_input.schema:
-                if field.name in system_tag_columns:
-                    require_system_tag_without_field_metadata(field)
+            require_custom_system_tags(arrow_input, system_tag_columns)
+            arrow_system_tag_flags = {
+                name: arrow_input.schema.field(name).nullable
+                for name in system_tag_columns
+            }
             # Polars rechunks native tables but preserves chunks on exporter inputs.
             df = cast(
                 pl.DataFrame,
@@ -121,11 +124,26 @@ class DataFrameSource(RootSource):
             require_custom_system_tags(arrow_table, system_tag_columns, schema=schema)
             arrow_table = arrow_table.cast(schema)
         else:
+            if not arrow_system_tag_flags:
+                arrow_table = declare_native_custom_system_tags(
+                    arrow_table, system_tag_columns
+                )
+                arrow_system_tag_flags = {name: False for name in system_tag_columns}
             # Polars defaults all fields to nullable=True; infer the correct
             # flags from the actual data before passing to the builder.
             require_supported_nullable_types(arrow_table.schema)
+            inferred = arrow_utils.infer_schema_nullable(
+                arrow_table.drop_columns(list(arrow_system_tag_flags))
+            )
             arrow_table = arrow_table.cast(
-                arrow_utils.infer_schema_nullable(arrow_table)
+                pa.schema(
+                    [
+                        field.with_nullable(arrow_system_tag_flags[field.name])
+                        if field.name in arrow_system_tag_flags
+                        else inferred.field(field.name)
+                        for field in arrow_table.schema
+                    ]
+                )
             )
 
         self._key_columns = normalize_record_id_columns(record_id_columns) or ()

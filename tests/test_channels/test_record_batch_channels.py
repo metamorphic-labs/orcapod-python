@@ -2391,3 +2391,34 @@ def test_a_source_nodes_channel_gives_its_output_stream_as_it_is() -> None:
     output = run(read)
     assert getattr(output, ROW_BUILT_OUTPUT, False)
     assert same(output.as_table(columns=ALL), R(node))
+
+
+def test_channel_keeps_first_system_tag_declaration_and_entry_id() -> None:
+    """A later batch containing a null cannot change an earlier row's entry ID."""
+    from orcapod.core import row_ids
+
+    name = "_tag_custom"
+    field = pa.field(name, pa.large_string(), metadata={b"owner": b"test"})
+    table = pa.Table.from_arrays(
+        [pa.array([1, 2]), pa.array([7, 8]), pa.array(["kept", None], field.type)],
+        schema=pa.schema([pa.field("k", pa.int64()), pa.field("x", pa.int64()), field]),
+    )
+    stream = _UntypedStream(table, tag_columns=["k"])
+    first, second = batches_of(ArrowTableStream(table, tag_columns=["k"]), rows=1)
+
+    async def read(pieces: Sequence[pa.RecordBatch]):
+        channel = OutputChannel(stream)
+        for batch in pieces:
+            await channel.send(batch)
+        await channel.close()
+        outputs = [channel.result(), await channel.open_reader().to_stream()]
+        ids = []
+        for result in outputs:
+            assert isinstance(result, ArrowTableStream)
+            tag, data = next(result.iter_data())
+            declared = result.as_table(columns=ALL).schema.field(name)
+            assert declared.equals(field, check_metadata=True)
+            ids.append(row_ids.entry_id(result.data_context.arrow_hasher, tag, data))
+        return ids
+
+    assert run(lambda: read([first])) == run(lambda: read([first, second]))
