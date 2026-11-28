@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from abc import abstractmethod
 from collections.abc import Collection, Sequence
+from itertools import combinations
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.operators.meta_columns import (
@@ -55,6 +56,7 @@ def require_shared_arrow_type(
     """
     shared = arrow_utils.shared_arrow_type(left_type, right_type)
     if shared is None:
+        _require_matching_nested_flags(operator, name, left_type, right_type)
         left_description = arrow_utils.describe_arrow_type(left_type)
         right_description = arrow_utils.describe_arrow_type(right_type)
         raise InputValidationError(
@@ -64,6 +66,43 @@ def require_shared_arrow_type(
             + "have the same Arrow type."
         )
     return shared
+
+
+def _require_matching_nested_flags(
+    operator: str, column: str, left_type: pa.DataType, right_type: pa.DataType
+) -> None:
+    """Name a join's conflicting nested fields and how to make the flags agree."""
+    paths = arrow_utils.nested_nullability_differences(left_type, right_type)
+    if paths:
+        fields = ", ".join(repr(f"{column}.{path}") for path in paths)
+        raise InputValidationError(
+            f"{operator} inputs disagree on column {column!r}: their Arrow types "
+            f"differ in the nullability of nested field {fields}. Declare the same "
+            "nested flags on both inputs or drop the explicit non-null declaration."
+        )
+
+
+def explain_nested_join_conflict(
+    operator: str, *streams: StreamProtocol, include_data: bool = False
+) -> None:
+    """Diagnose nested flags when Python schema validation already failed.
+
+    Synthesized struct classes can differ even when their Python annotations
+    look alike. Only examine typed Arrow schemas on the error path.
+    """
+    from orcapod.core.streams.base import typed_arrow_schemas
+
+    try:
+        schemas = [typed_arrow_schemas(stream) for stream in streams]
+    except (TypeError, ValueError, InputValidationError):
+        return  # Keep the original validation error if the Arrow schema is unavailable.
+    roles = 2 if include_data else 1
+    for a, b in combinations(schemas, 2):
+        for left, right in zip(a[:roles], b[:roles], strict=True):
+            for name in sorted(set(left.names) & set(right.names)):
+                _require_matching_nested_flags(
+                    operator, name, left.field(name).type, right.field(name).type
+                )
 
 
 def require_matchable_key(operator: str, name: str, arrow_type: pa.DataType) -> None:

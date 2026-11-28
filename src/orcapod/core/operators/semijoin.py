@@ -17,6 +17,7 @@ from orcapod.core.operators.base import (
     BinaryOperator,
     require_matchable_key,
     require_shared_arrow_type,
+    explain_nested_join_conflict,
 )
 from orcapod.core.operators.key_nullability import reconcile_key_nullability
 from orcapod.core.operators.match_keys import frozen_scalar
@@ -307,6 +308,8 @@ class SemiJoin(BinaryOperator):
             )
 
         except Exception as e:
+            if isinstance(e, TypeError):
+                explain_nested_join_conflict("SemiJoin", left_stream, right_stream)
             raise InputValidationError(
                 f"Input streams are not compatible for semi-join: {e}"
             ) from e

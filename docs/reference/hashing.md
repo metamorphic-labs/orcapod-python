@@ -1729,6 +1729,13 @@ The same walker gives the form of every other place a schema is compared or save
   slot made from that source have one Python schema, one Arrow schema and one pipeline
   hash.
 
+Python declarations produce implicitly nullable nested fields in data context v1.
+For example, `list[int]` and `list[int | None]` convert to the same Arrow type
+and yield the same Arrow schema hash for that column. An explicit Arrow field
+flag is preserved and hashed at every depth, including in a list item or struct
+child. A column's top-level nullable flag also enters the hash. Function output
+validation uses the return annotation independently of these storage flags.
+
 What a schema must therefore agree on to be one identity:
 
 - **A bind** accepts a source whose Arrow types equal the slot's, as this hash compares them,

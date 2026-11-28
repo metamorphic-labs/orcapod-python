@@ -1317,7 +1317,21 @@ for tag, data in count_rows.pod(readings):
 
 ### A `None` inside a container
 
-A `None` inside a list, a set, a dict value or a class field is accepted where its type is
+In data context v1, top-level `T` and `T | None` are distinct. Inside a column, Python
+declarations produce nullable Arrow fields. For example, `list[int]` and
+`list[int | None]` produce the same Arrow type. A function with a `list[int]` parameter
+can receive a list containing `None` from a source or datagram. An explicit Arrow
+non-null item flag is preserved by the source.
+
+The return annotation constrains the values a function can return. A pod returning
+`[1, None]` for `-> list[int]`, or `{None}` for `-> set[int]`, raises
+`OutputTypeError` naming the nested position. Use `list[int | None]` or
+`set[int | None]` when the function intentionally returns missing items. Fixed and
+heterogeneous tuples are unsupported as a single pod output. A tuple annotation can
+still describe several separate outputs.
+
+When the position admits `None`, it can be stored and read in a list, a set, a dict
+value or a class field where its type is
 a scalar (`int`, `float`, `str`, `bool`, `bytes`, `datetime`, ...) or a class of your own
 (a dataclass, an `orcapod.dataclass` or a pydantic model): `list[int | None]`,
 `dict[str, float | None]`, `list[MyData | None]` and a field `x: int | None` store and read

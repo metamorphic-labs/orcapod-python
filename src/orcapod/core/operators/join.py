@@ -22,6 +22,7 @@ from orcapod.core.operators.base import (
     NonZeroInputOperator,
     require_matchable_key,
     require_shared_arrow_type,
+    explain_nested_join_conflict,
     require_tag_data_roles_agree,
 )
 from orcapod.core.data_tags import (
@@ -206,6 +207,8 @@ class Join(NonZeroInputOperator):
         try:
             self.output_schema(*streams)
         except Exception as e:
+            if isinstance(e, TypeError):
+                explain_nested_join_conflict("Join", *streams)
             raise InputValidationError(f"Input streams are not compatible: {e}") from e
 
     def order_input_streams(self, *streams: StreamProtocol) -> list[StreamProtocol]:
