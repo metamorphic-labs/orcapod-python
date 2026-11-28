@@ -108,7 +108,7 @@ print(units.head(3))
 # │ mouse_01    ┆ s1       ┆ imec0  ┆ 2     ┆ V1     ┆ 600      ┆ 662      │
 # └─────────────┴──────────┴────────┴───────┴────────┴──────────┴──────────┘
 print(job.nodes["rates"].head())
-# FunctionJobNode[rates] — not run; run() fills it; node.as_source() shows every stored result
+# FunctionJobNode[rates] — not run; run() fills it; node.as_source() reads stored results
 # * = tag
 # shape: (0, 5)
 # ┌─────────────┬──────────┬────────┬───────┬─────────┐

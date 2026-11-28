@@ -186,7 +186,7 @@ class TestFunctionJobNode:
             result_database=result_db,
         )
         node.run()
-        source = node.as_source()
+        source = node.as_source(source_id="stored")
         assert isinstance(source, DerivedSource)
 
     def test_node_identity_path_uses_pipeline_hash(self):
@@ -311,5 +311,5 @@ class TestOperatorJobNode:
             cache_mode=CacheMode.LOG,
         )
         node.run()
-        source = node.as_source()
+        source = node.as_source(source_id="stored")
         assert isinstance(source, DerivedSource)

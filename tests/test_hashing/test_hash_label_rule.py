@@ -33,7 +33,7 @@ import orcapod as op
 from orcapod import PipelineJob, function_pod
 from orcapod.contexts import get_default_context
 from orcapod.core.nodes.operator_node import OperatorJobNode
-from orcapod.core.sources import CachedSource
+from orcapod.core.sources import CachedSource, derived_source
 from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
@@ -261,6 +261,7 @@ def renamed_labels() -> Iterator[dict[str, str]]:
         (pandas_value_hash, "PANDAS_SERIES_HASH_LABEL"),
         (polars_expr, "POLARS_EXPR_HASH_LABEL"),
         (directory_hashers, "DIRECTORY_HASH_LABEL"),
+        (derived_source, "DERIVED_ROW_FOLD_LABEL"),
         (arrow_hashers, "ARROW_ORDERED_HASH_LABEL"),
         (arrow_hashers, "ARROW_STRICT_HASH_LABEL"),
         (arrow_hashers, "ARROW_SCHEMA_HASH_LABEL"),
@@ -316,6 +317,50 @@ def _by_name_pattern(values: dict[str, Any]) -> dict[str, list[tuple[str, str]]]
 
 class TestRenamingALabelMovesEveryHashItFeeds:
     """Rule 1 end to end: renaming a label moves exactly the hashes it feeds."""
+
+    def test_renaming_the_derived_fold_label_moves_only_records_that_use_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only folded record IDs and their data tokens carry the fold label."""
+        source = _source()
+
+        def snapshot(
+            key_columns: tuple[str, ...] | None,
+        ) -> tuple[ContentHash, ContentHash, pa.Table]:
+            derived = DerivedSource(
+                source,
+                tags_as_data={"id": "id_copy"},
+                source_id="label_rule_derived",
+                record_id_columns=key_columns,
+            )
+            return (
+                derived.content_hash(),
+                derived.pipeline_hash(),
+                derived.as_table(columns={"system_tags": True, "source": True}),
+            )
+
+        policies = (None, (), ("id",))
+        before = {policy: snapshot(policy) for policy in policies}
+        label = "derived_row_v1"
+        renamed = label_feeds.RENAMED[label]
+        monkeypatch.setattr(derived_source, "DERIVED_ROW_FOLD_LABEL", renamed)
+        for policy in policies:
+            old_content, old_pipeline, old_table = before[policy]
+            content, pipeline, table = snapshot(policy)
+            assert (content, pipeline) == (old_content, old_pipeline)
+            if policy is not None:
+                assert table.equals(old_table)
+                continue
+            (record_column,) = [
+                name for name in table.column_names if name.startswith("_tag_record_id")
+            ]
+            expected = cast("list[dict[str, str | int]]", old_table.to_pylist())
+            for row in expected:
+                for name in (record_column, "_source_x", "_source_id_copy"):
+                    value = str(row[name])
+                    assert f"{label}:" in value
+                    row[name] = value.replace(f"{label}:", f"{renamed}:")
+            assert table.to_pylist() == expected
 
     def test_golden_values_move_exactly_where_a_label_feeds_them(self) -> None:
         """A golden value moves under renamed labels if and only if a label feeds it.
@@ -611,13 +656,11 @@ class TestNamesHoldBareDigests:
         labelled = node.content_hash().to_string()
         assert labelled.startswith("semantic_v1:")
 
-        # as_source() gives the DerivedSource default; the node path is not part
-        # of the id (ITL-957).
         from_node = node.as_source()
-        assert from_node.source_id == f"derived_v1:{labelled}"
+        assert from_node.source_id == f"derived_v1:label_rule_job:{labelled}"
 
         plain = DerivedSource(origin=node)
-        assert plain.source_id == f"derived_v1:{labelled}"
+        assert plain.source_id == from_node.source_id
 
     def test_source_info_token_of_a_function_output_holds_no_label(self) -> None:
         """A function output's source-info token starts with the bare function ``uri``."""
@@ -818,6 +861,7 @@ LABEL_DEFINITIONS = {
     "polars_series_v1": "hashing/semantic_hashing/builtin_handlers.py",
     "group_v1": "core/operators/group_by.py",
     "batch_v1": "core/operators/batch.py",
+    "derived_row_v1": "core/sources/derived_source.py",
 }
 
 

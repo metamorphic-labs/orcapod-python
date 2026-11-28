@@ -21,11 +21,15 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
-from orcapod.core.sources import DerivedSource, RootSource
+from orcapod.core.sources import CachedSource, DerivedSource, RootSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.utils.schema_utils import arrow_schema_identity
-from orcapod.errors import InputValidationError
-from orcapod.operators import Join
+from orcapod.errors import (
+    InputValidationError,
+    RowIdentifierError,
+    SourceSlotNameCollisionError,
+)
+from orcapod.operators import Join, SelectDataColumns
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.types import ColumnConfig
 from orcapod.sources import ArrowTableSource, DictSource, SQLiteTableSource
@@ -315,9 +319,10 @@ class TestProvenance:
         assert derived.source_id == full
         table = derived.as_table(all_info=True)
         (sid_col,) = _prefixed(table, "_tag_source_id")
+        (rid_col,) = _prefixed(table, "_tag_record_id")
         assert set(table[sid_col].to_pylist()) == {full}
         token = table["_source_session_start"][0].as_py()
-        assert token.split("::") == [full, "row_0", "session_start"]
+        assert token.split("::") == [full, table[rid_col][0].as_py(), "session_start"]
 
     def test_several_source_ids_give_several_sources(self):
         sources = [
@@ -376,13 +381,14 @@ class TestProvenance:
             "_source_task_id",
             "_source_session_start",
         }
+        (rid_col,) = _prefixed(table, "_tag_record_id")
         assert (
             table["_source_session_start"][0].as_py()
-            == f"{derived.source_id}::row_0::session_start"
+            == f"{derived.source_id}::{table[rid_col][0].as_py()}::session_start"
         )
         assert (
             table["_source_task_id"][4].as_py()
-            == f"{derived.source_id}::row_4::task_id"
+            == f"{derived.source_id}::{table[rid_col][4].as_py()}::task_id"
         )
 
     def test_record_id_column_gives_value_based_tokens(self):
@@ -408,7 +414,9 @@ class TestProvenance:
         recipe = ArrowTableSource(
             raw, tag_columns=EXPERIMENT_KEYS, tag_only_columns=True, source_id="exp"
         )
-        derived = DerivedSource(_experiment(), tags_as_data=COPY, source_id="exp")
+        derived = DerivedSource(
+            _experiment(), tags_as_data=COPY, source_id="exp", record_id_columns=()
+        )
         r_table = recipe.as_table(columns={"source": True, "system_tags": True})
         d_table = derived.as_table(columns={"source": True, "system_tags": True})
         assert d_table.column_names == r_table.column_names
@@ -426,7 +434,98 @@ class TestProvenance:
         assert derived.pipeline_hash() == recipe.pipeline_hash()
 
 
+class _SourceWithoutSystemTags(DictSource):
+    """An origin that returns user columns even when system tags are requested."""
+
+    def as_table(self, *, columns=None, all_info=False) -> pa.Table:
+        return super().as_table()
+
+    def head(self, n=10, *, columns=None, all_info=False):
+        return super().head(n)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "route", ["table", "head", "column_only_head", "nested_head", "preview", "async"]
+)
+@pytest.mark.parametrize(
+    "key_columns", [None, (), ("cohort",)], ids=["folded", "positional", "keyed"]
+)
+@pytest.mark.parametrize("problem", ["missing", "repeated"])
+async def test_source_lineage_is_required_for_every_key_policy(
+    problem: str, key_columns: tuple[str, ...] | None, route: str
+) -> None:
+    if problem == "missing":
+        origin = _SourceWithoutSystemTags(
+            [{"cohort": "a", "x": 5}], tag_columns=["cohort"], tag_only_columns=True
+        )
+        expected_error = "no complete system-tag pair"
+    else:
+        database = InMemoryArrowDatabase()
+
+        def cached(cohort: str, value: int) -> CachedSource:
+            return CachedSource(
+                DictSource(
+                    [{"id": 1, "cohort": cohort, "x": value}],
+                    record_id_columns=["id"],
+                    source_id="history",
+                    tag_columns=["id", "cohort"],
+                    tag_only_columns=True,
+                ),
+                cache_database=database,
+            )
+
+        cached("a", 5).as_table()
+        origin = cached("b", 7)
+        history = origin.as_table(columns={"system_tags": True})
+        (record_column,) = _prefixed(history, "_tag_record_id")
+        assert history[record_column].to_pylist() == ['{"id":1}'] * 2
+        expected_error = "not uniquely identified by their system tags"
+
+    derived = DerivedSource(
+        origin,
+        tags_as_data={"cohort": "cohort_copy"},
+        source_id="derived",
+        record_id_columns=key_columns,
+    )
+    if route == "preview":
+        assert expected_error in derived._repr_html_()
+        return
+
+    with pytest.raises(RowIdentifierError, match=expected_error):
+        if route == "table":
+            derived.as_table()
+        elif route == "head":
+            derived.head(1)
+        elif route == "column_only_head":
+            derived.head(0)
+        elif route == "nested_head":
+            DerivedSource(
+                derived, source_id="nested", tags_as_data={"cohort": "cohort_again"}
+            ).head(1)
+        else:
+            await anext(derived.async_iter_data())
+
+
 class TestIdentity:
+    def test_explicit_position_has_a_distinct_content_identity(self):
+        origin = _experiment()
+        folded = DerivedSource(origin, tags_as_data=COPY, source_id="exp")
+        positional = DerivedSource(
+            origin, tags_as_data=COPY, source_id="exp", record_id_columns=()
+        )
+        assert folded.source_id == positional.source_id
+        assert folded.pipeline_hash() == positional.pipeline_hash()
+        assert folded.content_hash() != positional.content_hash()
+        database = InMemoryArrowDatabase()
+        assert CachedSource(folded, cache_database=database).cache_path != (
+            CachedSource(positional, cache_database=database).cache_path
+        )
+        with pytest.raises(SourceSlotNameCollisionError):
+            with PipelineJob(name="twice", database=database):
+                SelectDataColumns(["session_start"])(folded, label="folded")
+                SelectDataColumns(["session_start"])(positional, label="positional")
+
     def test_pipeline_hash_is_schema_only(self):
         a = DerivedSource(
             _experiment("a"), tags_as_data=COPY, source_id="with_tags_as_data"
@@ -875,18 +974,14 @@ class TestNodeOrigin:
         stage2.run()
         assert stage2.nodes["j"].as_table().num_rows == 5
 
-    def test_plain_as_source_is_unchanged(self):
+    def test_plain_as_source_reads_the_origin_schema(self):
         job = _upper_job()
         job.run()
         node = job.nodes["upper"]
         plain = node.as_source()
         assert plain.keys() == node.keys()
-        assert plain.identity_structure() == (node.content_hash(),)
-        # No source_id is passed: the plain form takes the DerivedSource default,
-        # ``derived_v1:<algorithm label>:<hex>`` of the node's content hash (ITL-957,
-        # ITL-1425).
-        assert plain.source_id == f"derived_v1:{node.content_hash().to_string()}"
-        assert _prefixed(plain.as_table(all_info=True), "_tag_") == []
+        assert plain.source_id == f"derived_v1:stage1:{node.content_hash().to_string()}"
+        assert len(_prefixed(plain.as_table(all_info=True), "_tag_")) == 2
 
 
 class TestZeroRowOrigin:
@@ -1039,11 +1134,6 @@ class TestRequiredSourceIdOnNodes:
         assert a.keys() == b.keys()
         assert a.content_hash() == b.content_hash()
         assert a.as_table(all_info=True).equals(b.as_table(all_info=True))
-
-    def test_plain_as_source_keeps_its_default(self, make_node):
-        node = make_node()
-        expected = f"derived_v1:{node.content_hash().to_string()}"
-        assert node.as_source().source_id == expected
 
 
 PROBE_COPIES = {"name": "name_copy", "probe_id": "probe_copy"}

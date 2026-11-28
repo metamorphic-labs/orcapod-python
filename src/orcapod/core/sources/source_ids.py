@@ -8,7 +8,8 @@ Every source id is ``<kind>_v<N>:<name>`` (developer, November 23, 2026, ITL-142
   name as to a default. It never holds ``:``;
 * the **name**, the user's given ``source_id`` used exactly as given, or the default:
   ``<label>:<hex>`` of a hash (``hash_source_name``) or where the data lives, a file path,
-  a table name or a qualified table (``location_source_name``). A name may hold ``:``.
+  a table name or a qualified table (``location_source_name``). A job node's
+  derived source combines the job path and labelled node hash. A name may hold ``:``.
 
 A source id is split at its first ``:`` (``parse_source_id``). It never holds ``::``, the
 separator of the parts of a source-info token (``<source id>::<record id>::<column>``),
@@ -237,3 +238,31 @@ def joined_location(separator: str, *parts: str) -> str:
                 "the source a source_id"
             )
     return separator.join(parts)
+
+
+def derived_source_name(
+    job_name: tuple[str, ...] | None, node_hash: ContentHash
+) -> str:
+    """Return the default name of a source over a job node's stored rows.
+
+    Args:
+        job_name: The job name components used to scope the stored rows.
+        node_hash: The origin node's content hash.
+
+    Raises:
+        ValueError: If the job name is missing or a component is empty or contains
+            a separator. Give the source a ``source_id`` in these cases.
+    """
+    if not job_name:
+        raise ValueError(
+            "the node has no job name for the default derived source id; "
+            "give the source a source_id"
+        )
+    job_path = joined_location("/", *job_name)
+    # A colon separates the job path from the labelled hash.
+    if ":" in job_path:
+        raise ValueError(
+            f"the job path {job_path!r} contains ':', the separator of the "
+            "default derived source id; give the source a source_id"
+        )
+    return location_source_name(f"{job_path}:{hash_source_name(node_hash)}")

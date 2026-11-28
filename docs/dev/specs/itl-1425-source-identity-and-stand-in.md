@@ -1,5 +1,7 @@
 # Source identity, implementation versions and exact stand-ins (ITL-1425)
 
+ITL-1564 supersedes the plain derived-source id and content identity described in this historical document. See the [current hashing reference](../../reference/hashing.md#default-source-ids-and-row-identifiers).
+
 A decision document. Nothing is implemented. Every statement about today's behaviour is
 measured by a script in [`itl-1425-source-identity/scripts/`](itl-1425-source-identity/scripts/),
 run on `main` at `8ee6c6d4` (identity code unchanged at `83c54764`) with the public API, from

@@ -448,8 +448,8 @@ database. Each recorded step becomes a node, available afterwards as `job.nodes[
 listed under its `source_id`). A node is a
 stream, so `as_table()`, `iter_data()` and `output_schema()` all work on it.
 
-A job node shows the current run; `node.as_source()` shows everything stored for it
-(developer, November 13, 2026). After `job.run()`, a function node returns exactly the rows
+A job node shows the current run. `node.as_source()` reads the most recent readable
+stored result for each input lineage. After `job.run()`, a function node returns exactly the rows
 of that run's inputs, on either orchestrator. The database may hold more under the same
 node: results of an earlier run over other rows of the source stay stored and are reused
 when those rows come back, but they are not rows of this run. Before a run in this process
@@ -459,9 +459,9 @@ node has not run and points to `run()` and to `as_source()`. A run fills it, als
 result is read from the database and nothing is computed. A run that raised defines no rows,
 and so does `clear_cache()`; a node whose input changed since its run (an upstream node ran
 again, or a source was bound again) is stale and empty until it runs again. The stored view,
-`node.as_source()`, reads every record stored under the node's key, whether or not the node
-has run: the node's stored history, which keeps an entry's earlier result next to its
-recomputed one, where a run loads only the latest.
+`node.as_source()`, works whether or not the node ran in this process. It includes
+other inputs from earlier runs and selects the most recent readable record per lineage.
+Use `get_all_records()` to inspect all versions stored under the node's key.
 
 `InMemoryArrowDatabase` lasts only as long as the Python process. Use
 `DeltaTableDatabase("some/directory")` from `orcapod.databases` to keep results on disk
@@ -1130,7 +1130,8 @@ from that database, and no rows under that key is an empty result, not an error.
 - A function node's `as_source()` and `get_all_records()` return the rows stored under the
   saved run's key, with the types they were stored with: those of every run of that node
   over the same sources, not only the saved run's inputs. Rows come in the order the database
-  returns them; sort them if order matters. The node itself (`as_table()`, `iter_data()`,
+  returns them; sort them if order matters. `as_source()` selects the most recent
+  readable version per lineage. The node itself (`as_table()`, `iter_data()`,
   `head()`) is empty: it has not run in this process.
 - Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v2`.
   The saved file does not record an operator's cache mode (follow-up ITL-977), so attach a

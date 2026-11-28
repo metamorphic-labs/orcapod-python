@@ -624,7 +624,7 @@ class TestPipelineDbScoping:
             pipeline_database=db,
         )
         node1_a.run()
-        src_a = node1_a.as_source()
+        src_a = node1_a.as_source(source_id="a")
 
         # Pipeline B: stream(n=5) → node1_b → source_b → node2_b
         stream_b = make_int_stream(n=5)
@@ -634,7 +634,7 @@ class TestPipelineDbScoping:
             pipeline_database=db,
         )
         node1_b.run()
-        src_b = node1_b.as_source()
+        src_b = node1_b.as_source(source_id="b")
 
         # Same schema → same pipeline_hash → SAME full path (shared table)
         assert node1_a.node_identity_path == node1_b.node_identity_path

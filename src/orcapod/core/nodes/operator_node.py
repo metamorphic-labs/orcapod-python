@@ -1544,7 +1544,9 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             return None
         return self._filter_by_content_hash(records)
 
-    def _read_current_context_records(self) -> "pa.Table | None":
+    def _read_current_context_records(
+        self, *, include_recorded_at: bool = False
+    ) -> "pa.Table | None":
         """Read every row of this node's stored table written under the current data context.
 
         The rows of every run that shares the table, before ``_filter_by_content_hash``
@@ -1556,8 +1558,8 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         (``_stream_over_stored``).
 
         The columns a row is stored with beside its key, its entry id and its
-        insertion time (``_STORED_ONLY_COLUMNS``, ITL-1471), are dropped here, so no
-        read that serves rows shows them.
+        insertion time (``_STORED_ONLY_COLUMNS``, ITL-1471), are dropped here.
+        A derived source can retain the time to choose which stored row to serve.
 
         Returns:
             The rows, with ``HASH_COLUMN_NAME`` and ``NODE_CONTENT_HASH_COL`` and without
@@ -1582,9 +1584,11 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 self._pipeline_database.base_path + self._stored_table_path,
                 stored_rows - records.num_rows,
             )
-        return self._in_row_order_on_read(
-            records.drop([constants.DATA_CONTEXT_COL, *_STORED_ONLY_COLUMNS])
+        stored_only = (
+            (row_ids.ENTRY_ID_COL,) if include_recorded_at else _STORED_ONLY_COLUMNS
         )
+        drop = [constants.DATA_CONTEXT_COL, *stored_only]
+        return self._in_row_order_on_read(records.drop(drop))
 
     def _in_row_order_on_read(self, records: "pa.Table") -> "pa.Table":
         """Put a stored table's user columns in row order; bookkeeping stays in place.
@@ -1642,7 +1646,9 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             self.data_context.type_converter,
         )
 
-    def _read_run_records(self) -> "pa.Table | None":
+    def _read_run_records(
+        self, *, include_recorded_at: bool = False
+    ) -> "pa.Table | None":
         """Read the stored rows of this node's run: its content hash, current context.
 
         A loaded node names its run by the content hash its job file records (every
@@ -1652,7 +1658,9 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             The run's stored rows (``_read_stored_records``), or ``None`` when the table
             does not exist.
         """
-        stored = self._read_current_context_records()
+        stored = self._read_current_context_records(
+            include_recorded_at=include_recorded_at
+        )
         records = None if stored is None else self._filter_by_content_hash(stored)
         return records
 
@@ -2168,6 +2176,15 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
     # DB retrieval
     # ------------------------------------------------------------------
 
+    def _stored_rows_for_source(self) -> "pa.Table | None":
+        """Read the node's stored rows with their recording times for derivation."""
+        if self._pipeline_database is None:
+            return None
+        records = self._read_run_records(include_recorded_at=True)
+        if self._loaded:
+            self._check_expected_rows(0 if records is None else records.num_rows)
+        return records
+
     def get_all_records(
         self,
         columns: ColumnConfig | dict[str, Any] | None = None,
@@ -2245,20 +2262,20 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
     ):
         """Return a DerivedSource backed by the DB records of this node.
 
-        Without ``tags_as_data`` and ``source_id``, its ``source_id`` is the
-        ``DerivedSource`` default, ``derived_v1:<algorithm label>:<hex>`` of this
-        node's content hash.
+        The plain form's default id is
+        ``derived_v1:<job path>:<algorithm label>:<hex>``, using the job name and
+        this node's content hash.
 
         Args:
             tags_as_data: Maps a tag column of this node to the name of a data
                 column that receives a copy of it. When given, the result is a
                 new root source with its own provenance, which needs a
                 ``source_id``; see ``DerivedSource``.
-            source_id: The source's name. Required with ``tags_as_data``, which
-                has no default (ITL-1313).
+            source_id: The source's name. Required with ``tags_as_data`` or when
+                there is no usable job name.
 
         Raises:
-            ValueError: If ``tags_as_data`` is given without a ``source_id``.
+            ValueError: If neither an explicit name nor a default is available.
             RuntimeError: If no database is attached.
             InputValidationError: If ``tags_as_data`` is not valid for this
                 node's columns.
@@ -2268,9 +2285,6 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        # Without a source_id the plain form takes the DerivedSource default
-        # (``derived_v1:<algorithm label>:<hex>`` of this node's content hash); the
-        # ``tags_as_data`` form refuses to be built without one (ITL-1313).
         return DerivedSource(
             origin=self,
             source_id=source_id,

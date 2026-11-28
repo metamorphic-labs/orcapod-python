@@ -408,7 +408,7 @@ def test_derived_source_refuses_stored_null_in_its_direct_table_view(
         .slice(0, row_count)
         .append_column("__unused", pa.nulls(row_count))
     )
-    monkeypatch.setattr(node, "get_all_records", lambda *args, **kwargs: stored)
+    monkeypatch.setattr(node, "_stored_rows_for_source", lambda: stored)
     derived = node.as_source()
     with pytest.raises(
         InputValidationError, match=r"'__unused'.*declare a supported nullable type"

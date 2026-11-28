@@ -1,5 +1,7 @@
 # Hash Audit Reference Doc Implementation Plan
 
+ITL-1564 supersedes the plain derived-source id and content identity described in this historical document. See the [current hashing reference](../../reference/hashing.md#default-source-ids-and-row-identifiers).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Produce `docs/reference/hashing.md` — a developer reference documenting all 14 hash computation sites in the orcapod-python framework — and `superpowers/scripts/hash_audit_example.py` — a runnable script that prints concrete hash values for copy-paste into the reference doc.

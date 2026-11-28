@@ -1253,8 +1253,9 @@ class TestInputOfAnotherDataContext:
 
         assert node.head(10).status is ViewStatus.NOT_COMPUTED
         assert node.as_table().num_rows == 0
-        stored = node.as_source().as_table().to_pylist()
-        assert sorted(row["double"] for row in stored) == [2, 4]
+        stored = node.get_all_records()
+        assert stored is not None
+        assert sorted(row["double"] for row in stored.to_pylist()) == [2, 4]
 
     def test_add_pipeline_record_refuses_an_input_of_another_data_context(
         self, store: Store

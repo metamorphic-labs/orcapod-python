@@ -1255,8 +1255,8 @@ def schema_derived_source_tags_as_data() -> dict[str, Any]:
 
     Provisional: ``DerivedSource`` is (ITL-1331).
 
-    Two variants, each with its own source id, as this form requires (ITL-1313): by
-    position, and with a ``record_id_column``.
+    Two variants, each with its own source id, as this form requires (ITL-1313):
+    folded upstream lineage, and an explicit key column.
 
     Returns:
         Each variant's source id and stream summary.
@@ -3203,9 +3203,9 @@ def pipeline_drop_nulls_job() -> dict[str, Any]:
 def pipeline_default_source_ids() -> dict[str, Any]:
     """Pin the default source ids built from a hash (ITL-957).
 
-    A source built with no ``source_id`` is named ``<source kind>:<algorithm
-    label>:<hex>``; a source made with ``node.as_source()`` is named
-    ``derived:<algorithm label>:<hex>`` (provisional: ``pipeline_default_source_ids_as_source``).
+    A default id uses the versioned source kind and the labelled input hash.
+    The provisional ``pipeline_default_source_ids_as_source`` case covers
+    sources over stored job records.
     """
     import polars as pl
 
@@ -3237,8 +3237,7 @@ def pipeline_default_source_ids() -> dict[str, Any]:
 
 @case("pipeline", "default_source_ids", provisional=("DerivedSource",))
 def pipeline_default_source_ids_as_source() -> dict[str, Any]:
-    """The ``as_source[...]`` entries of ``default_source_ids``: provisional, as
-    ``DerivedSource`` is (ITL-1331)."""
+    """Pin the default ids and content hashes of provisional plain derived sources."""
     from orcapod import PipelineJob
     from orcapod.databases import InMemoryArrowDatabase
     from orcapod.operators import Join
@@ -3251,12 +3250,10 @@ def pipeline_default_source_ids_as_source() -> dict[str, Any]:
         joined = Join(label="joined")(_subjects(), _scans())
         golden_adjust.pod(joined, label="adjust")
     job.run()
-    out["as_source[operator_node].source_id"] = (
-        job.nodes["joined"].as_source().source_id
-    )
-    out["as_source[function_node].source_id"] = (
-        job.nodes["adjust"].as_source().source_id
-    )
+    for kind, label in (("operator_node", "joined"), ("function_node", "adjust")):
+        source = job.nodes[label].as_source()
+        out[f"as_source[{kind}].source_id"] = source.source_id
+        out[f"as_source[{kind}].content_hash"] = source.content_hash().to_string()
     return out
 
 

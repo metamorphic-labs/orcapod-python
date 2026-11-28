@@ -21,6 +21,7 @@ from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
 from orcapod import PipelineJob
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import GroupBy, Join
+from orcapod.core.sources.derived_source import DERIVED_ROW_FOLD_LABEL, DerivedSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.run_summary import RunSummary
@@ -28,9 +29,17 @@ from orcapod.system_constants import constants
 from orcapod.types import CacheMode, PodConfig
 
 from .checker import Layout
-from .fixtures import Sources, content_hash_column, keys_a, make_sources
+from .expectations import of_source
+from .fixtures import (
+    TAG_COLUMNS,
+    Sources,
+    content_hash_column,
+    keys_a,
+    make_sources,
+    schema_hash_of,
+)
 from .gate import GATE, gated_fragile, gated_scale, scale
-from .oracle import Origin
+from .oracle import Oracle, Origin, fold_values
 
 JOB_NAME = "alignment"
 
@@ -218,17 +227,49 @@ def layout(job: PipelineJob, view: View, config: dict[str, Any]) -> Layout:
         members=members,
         fold_label=GROUP_BY_FOLD_LABEL if view.node == "grouped" else None,
         content_hash_column=content_hash_column(config),
-        # ITL-1059: a plain DerivedSource has null source info and no system tags by
-        # design (for now).
-        null_tokens=view.call == "as_source",
-        no_system_tags=view.call == "as_source",
     )
+
+
+def scaled_source_oracle(source: DerivedSource, upstream: Oracle) -> Oracle:
+    """Recompute the scaled source's values and folded IDs from the fixture inputs."""
+    values = []
+    record_ids = []
+    for row in of_source(upstream, "A"):
+        values.append(
+            {
+                **{tag: row.values[tag] for tag in TAG_COLUMNS},
+                "y": upstream.expected_value("y", row),
+            }
+        )
+        record_column = constants.BLOCK_SEPARATOR.join(
+            (
+                constants.SYSTEM_TAG_RECORD_ID_PREFIX,
+                upstream.schema_hashes[row.source_id],
+            )
+        )
+        record_ids.append(
+            fold_values(
+                (record_column, row.source_id, row.record_id), DERIVED_ROW_FOLD_LABEL
+            )
+        )
+    oracle = Oracle()
+    oracle.add_source(
+        source.source_id,
+        pa.Table.from_pylist(values),
+        tag_columns=TAG_COLUMNS,
+        schema_hash=schema_hash_of(source),
+        tokens=record_ids,
+    )
+    return oracle
 
 
 def expected_rows(view: View, oracle: Any) -> list[Any]:
     """The rows ``view`` must hold, from the fixtures by each node's rule."""
     from .expectations import groups, pairs, rows
 
+    if view.call == "as_source":
+        (source_id,) = oracle.schema_hashes
+        return rows(oracle, source_id)
     if view.node == "scaled":
         return rows(oracle, "A")
     if view.node == "joined":

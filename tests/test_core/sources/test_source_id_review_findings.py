@@ -285,7 +285,10 @@ class TestFinding3CachedDefaultDerivedSource:
             reloaded = CachedSource.from_config(config)
             assert isinstance(reloaded.cached_source, SourceProxy)
             assert reloaded.source_id == cached.source_id
-            assert reloaded.source_id.startswith("derived_v1:semantic_v1:")
+            assert (
+                reloaded.source_id
+                == f"derived_v1:calc:{job.nodes['calc'].content_hash().to_string()}"
+            )
             # A slot over a source is named by its source_name (SourceJobNode.from_stream);
             # binding a cache over a proxy is refused for another reason, on main too
             # (its zero-row table has no system-tag columns), so the name is compared.

@@ -692,10 +692,12 @@ def check_pipeline_record_timestamp_tie(
     historical_values = (
         [expected[winner]] if available_results == "lesser" else [10, 20]
     )
-    assert (
-        sorted(node.as_source().as_table().column("result").to_pylist())
-        == historical_values
-    )
+    records = node.get_all_records()
+    assert records is not None
+    assert sorted(records.column("result").to_pylist()) == historical_values
+    assert node.as_source().as_table().column("result").to_pylist() == [
+        expected[winner]
+    ]
 
 
 @pytest.mark.parametrize(

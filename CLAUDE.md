@@ -636,15 +636,18 @@ algorithm produced it.**
   hex digest: `to_hex()`. A name later fed into a hash (the function `uri` in a pod's
   identity, system-tag column names in an entry-id table) is still a name.
 - Source ids: every source id is `<kind>_v<N>:<name>` (ITL-1425). A default name built from
-  a hash is `<label>:<hex>` (`derived_v1:semantic_v1:<hex>`, via `to_string()`, never a
-  label literal; built by `hash_source_name`). A value folded by an operation is
+  a hash is `<label>:<hex>` (via `to_string()`, never a label literal; built by
+  `hash_source_name`). A plain derived source prefixes the labelled node hash with the
+  job path, giving `derived_v1:<job path>:<label>:<hex>` (`derived_source_name`, ITL-1564).
+  A value folded by an operation is
   `<operation label>:<hex>` (`batch_v1:` / `group_v1:`, for the folded source id and record id
   alike).
 - Record ids (developer, November 16, 2026, ITL-1154): the record-id system tag holds the row
   identifier itself, as text (`large_string`): `row_<n>`, or the canonical JSON of the key
   columns in key order (`{"unit":"u1","time":1700000000}`, built only by
   `stream_builder.key_row_identifier`). It is not a hash, holds no source id and carries no
-  label; never build it with `uuid5`. A source-info token is `<source id>::<record id>::<column>`.
+  label; never build it with `uuid5`. Derived sources also use the labelled lineage fold
+  (ITL-1564). A source-info token is `<source id>::<record id>::<column>`.
 - A hash stored as a value in its own column or field carries its label: `to_string()` as
   text, `to_prefixed_digest()` in a binary column.
 - A random identifier (`uuid7`, `uuid4`) is not a hash and carries no label.
@@ -921,7 +924,18 @@ too. The given string is its name (`derived_v1:<name>` in system-tag values and 
 tokens, ITL-1425), and with the sorted mapping the source id is the source's identity (the
 origin enters only through the schema). The
 config type key stays `derived`. `DerivedSource` without `tags_as_data` (a job node's stored records)
-keeps its old identity; do not change it (ITL-956).
+uses the root source identity: full source id, Arrow schema identity and an empty key
+tuple. The default source id carries the job path and the node's labelled content hash
+(ITL-1564). A given source name also enters the content hash.
+
+Both forms stamp one pair and fresh tokens through SourceStreamBuilder. The default
+record id folds all upstream pairs with arrow_utils.fold_system_tag_values, sorting by
+full record-id column name and flattening each triple (record-id column name, source-id
+value, record-id value). DerivedSource defines the derived_row_v1 label once. An explicit
+record_id_columns for tags_as_data keeps its configured key policy. A job node serves the
+most recent readable stored record per lineage, breaking a function recording-time tie by
+the greater result UUIDv7. Other selection rules are planned. The source refuses missing
+or incomplete pairs and repeated lineages that survive selection.
 
 ### Two identity chains
 
@@ -1510,7 +1524,9 @@ data. The rules:
   `source_ids.build_source_id` and parsed only by `source_ids.parse_source_id` (split at the
   first `:`; the kind part never holds `:`, the name may). Bump a kind's version when a row
   read before a change could read differently after it (other values, Arrow types or record
-  id). A saved config holds `source_name`, `source_name_given` (given or default:
+  id). The provisional `DerivedSource` is an exception. It retains `derived_v1` when its
+  default record IDs move from positional IDs to folded upstream lineage (ITL-1564).
+  A saved config holds `source_name`, `source_name_given` (given or default:
   read back, never guessed, by `RootSource._from_saved_name`) and `source_version` apart (the kind is
   `source_type`); loaded where the class declares another version, the source has the
   installed version's id (`SourceVersionWarning`), never a rewritten one. A slot (a
@@ -1528,6 +1544,9 @@ data. The rules:
   default location. Tokens,
   system tags and `source_id` show the full id; a record id never holds the source id. A
   `DerivedSource` with `tags_as_data` has no default: it requires a `source_id` (ITL-1313).
+  The plain form takes the job path from PipelineJob.name, joining its components with
+  `/`. A missing or empty name or a component containing `/` or `:` requires an explicit
+  source_id. The database location does not enter the id (ITL-1564).
   A default name built from a hash is `<algorithm label>:<hex>`, built
   only by `core/sources/source_ids.hash_source_name` (an in-memory source hashes its table as
   given; `hash_in_key_order=True`, refused without key columns or with a `source_id`, hashes
@@ -1563,8 +1582,8 @@ data. The rules:
   origin's source id is never written into a default id. `SourceStreamBuilder.build` needs
   the kind part (`kind_part`) and takes the name (`source_name`) or makes the hash default.
 - `ArrowTableStream` requires at least one data column; raises `ValueError` otherwise.
-- A job node shows its current run; `node.as_source()` shows everything stored for it
-  (developer, November 13, 2026, ITL-1095). After a run, a `FunctionJobNode` returns exactly
+- A job node shows its current run. `node.as_source()` reads the most recent readable
+  stored row for each lineage (ITL-1564). After a run, a `FunctionJobNode` returns exactly
   the rows of that run's inputs, sync or async (ITL-1093). Before a run in this process (a
   fresh or loaded job), after a run that raised, after `clear_cache()`, and while stale, every
   function and operator job node reads empty (zero typed rows; `head()` is `not_computed` and

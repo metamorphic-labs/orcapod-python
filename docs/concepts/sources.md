@@ -82,6 +82,8 @@ A kind's version moves when a row read before a change of its implementation cou
 differently after it (other values, other Arrow types, another record id). Saved jobs keep
 each source's name and version apart; a job loaded where a kind's version moved rebuilds the
 source with the new version's id and warns (`SourceVersionWarning`).
+The provisional `DerivedSource` is an exception. It retains `derived_v1` when its default
+record IDs move from positional IDs to folded upstream lineage (ITL-1564).
 
 Two construction rules apply to every source and are the most common first errors:
 
@@ -429,8 +431,8 @@ names them. To see more rows, use `as_df()` with a `limit=` or `where=` source.
 same table, so two sources on one table have the same `source_id` and `content_hash`
 whatever their restrictions, and a row's result is computed once and shared. One
 consequence: with a shared store, reading a job node's stored records back
-(`get_all_records()`, `node.as_source()`) returns every row that any job with the same
-pipeline has read from that table, not only the rows of the latest restriction. The rows
+with `get_all_records()` includes rows from all restrictions read by jobs with that
+same pipeline. `node.as_source()` keeps the most recent readable version of each lineage. The rows
 sent downstream during a run are only the rows that run read.
 
 #### Restricting a source versus filtering in the pipeline
@@ -679,7 +681,7 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   `RestrictedAggregationWarning` listing each source and step in alphabetical order by slot
   name or direct source label, then by step label.
 - **Stored rows stay.** A run over a restricted source deletes nothing: a job node shows the
-  rows of its current run, and `node.as_source()` shows everything stored for it.
+  rows of its current run, and `node.as_source()` reads the latest stored row per lineage.
 
 `where()` copies the source and applies the restriction to the copy. ITL-1219 tracks exposing
 the two steps separately and extending restrictions to other source types.
@@ -786,11 +788,24 @@ forms: its identity may change in a later release.
 [`PipelineJob`](function-pods.md#pipelinejob-database-backed-cached-execution) that has run
 and presents them as a new source. You get one by calling `as_source()` on the node, for
 example `job.nodes["bmi"].as_source()`. This is useful for chaining pipeline stages: run a
-job, then use one of its outputs as the input of a new pipeline. The `as_source()` of a node
-downstream of a `Join` or `MergeJoin` of two sources cannot yet be bound as a source of a new
-`PipelineJob`: its schema is the node's, which declares a pair of system tags for each joined
-source, and binding accepts exactly one pair, so it is refused with `SourceSpecMismatchError`
-(support is planned, ITL-1127).
+job, then use one of its outputs as the input of a new pipeline.
+
+The default source id includes the job's name and the node's content hash, for example
+`derived_v1:analysis/nightly:semantic_v1:<hex>`. Job name components are joined with `/`.
+A missing or empty job name, or a name component containing `/` or `:`, requires an
+explicit `source_id`. Jobs with the same name and node content hash get the same default
+id across databases.
+
+The origin's stored tables keep their provenance. The derived source creates one system-tag
+pair from its own source id and the row's folded upstream system tags. Every data column
+gets a fresh source-info token from that pair. This also lets a source derived from a
+`Join` or `MergeJoin` bind to a new job as a source with one pair.
+
+When a node has stored several versions of the same input lineage, the default is to read
+the most recent readable version. A function node breaks recording-time ties by the greater
+result UUIDv7. An operator's tied rows are refused when they share one lineage, as can happen
+when one batch repeats those tags. Older rows of other lineages still appear. Other selection
+rules are planned. A nonempty origin read must supply complete, non-null source/record pairs.
 
 **Using a tag value as an input to a computation.** Tags identify a row and data is what a
 function computes on. A data-tag (the default for a declared tag) is both: a function
@@ -868,7 +883,13 @@ before. Things to know:
   default, and building one without it raises `ValueError` before the origin is read
   (ITL-1313); `as_source(tags_as_data=..., source_id=...)` takes it too. The source is
   identified by that name and the mapping, like any named source: the mapping is part of its
-  `content_hash`, so two mappings never share one.
+  `content_hash`, so two mappings never share one. Its record id folds the upstream
+  system tags by default, just like the plain form. Set `record_id_columns` to choose key
+  columns, or pass `()` to keep positional IDs. Explicit positional IDs have a different
+  content hash and default cache path from folded IDs. The pipeline hash is schema-only.
+- When the origin source holds several rows with the same lineage, derived reads refuse
+  them under every key policy. `head()` and the notebook preview validate all held rows
+  before showing any, even when the repeated row falls outside the displayed slice.
 - A saved job reloads a derived source whenever its origin can be reloaded (a CSV file, a
   Delta table, a database table). Over an in-memory source it is saved but not reloaded, like
   the in-memory source itself.
@@ -902,7 +923,7 @@ print(sorted(PROVISIONAL_SOURCES))
 | Source | What is still open |
 |---|---|
 | `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the declared schema (ITL-1316); it holds the source id (ITL-1425) |
-| `DerivedSource`, both forms | the plain form (`node.as_source()`) hashes only its origin's content hash and accepts a `source_id` its identity does not use; the `tags_as_data` form changed just before this release (ITL-1317) |
+| `DerivedSource`, both forms | the plain form (`node.as_source()`) hashes its full source id, Arrow schema identity and empty key tuple (ITL-1564); the `tags_as_data` form changed just before this release (ITL-1317) |
 
 So everything built on a `DerivedSource`, whether it came from `node.as_source()` or from
 `DerivedSource(origin, tags_as_data=...)`, is provisional too: every step downstream of it
@@ -1063,9 +1084,10 @@ print(len({s.source_id for s in as_given}))
 # 3
 ```
 
-A source given a `source_id` is an address: its content hash is built from its class, schema,
-`source_id` and key columns, never from its rows, so changing the rows changes it only when the
-schema changes (a column of another type). This holds for `ListSource` too (developer,
+A named root source uses the content hash recipe `(full source id, Arrow schema identity, key columns)`.
+The full ID includes the source kind and implementation version. With the same name and key
+columns, a change to the rows affects the content hash only if it changes the Arrow schema.
+This recipe applies to `ListSource` too (developer,
 November 21, 2026, ITL-1272): its elements and its tag function enter its identity only through
 its default `source_id` and its output schema.
 

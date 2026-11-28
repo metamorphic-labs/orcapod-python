@@ -17,9 +17,81 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = PROJECT_ROOT / "docs" / "reference" / "hashing.md"
 SITE = re.compile(r"`([\w/]+\.py:[\w.<>]+)`")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/concepts/sources.md",
+        "docs/reference/hashing.md",
+        "CLAUDE.md",
+        ".zed/rules",
+    ],
+)
+def test_source_version_guidance_documents_provisional_derived_exception(
+    path: str,
+) -> None:
+    """The approved fold changes record IDs under the same provisional source version."""
+    guidance = (PROJECT_ROOT / path).read_text(encoding="utf-8").replace("`", "")
+    assert (
+        "The provisional DerivedSource is an exception. It retains derived_v1 "
+        "when its default record IDs move from positional IDs to folded upstream lineage"
+    ) in " ".join(guidance.split())
+
+
+@pytest.mark.parametrize(
+    "path", ["docs/concepts/sources.md", "docs/concepts/identity.md"]
+)
+def test_named_root_source_identity_guidance_uses_qualified_id(path: str) -> None:
+    """The qualified ID already gives the kind and version of a named root source."""
+    guidance = " ".join((PROJECT_ROOT / path).read_text(encoding="utf-8").split())
+    assert "(full source id, Arrow schema identity, key columns)" in guidance
+
+
+def test_tagged_derived_source_identity_table_documents_positional_marker() -> None:
+    """The identity table lists the marker and the explicit empty tuple that adds it."""
+    identity_table = (
+        REFERENCE.read_text(encoding="utf-8")
+        .split("### 1a. ", 1)[1]
+        .split("### 1b. ", 1)[0]
+    )
+    (row,) = [
+        line
+        for line in identity_table.splitlines()
+        if line.startswith("| `DerivedSource` with `tags_as_data` |")
+    ]
+    recipe = row.split("|")[2]
+    assert '("record_id_policy", "position")' in recipe
+    assert "record_id_columns=()" in recipe
+
+
+def test_derived_source_docstring_documents_positional_marker() -> None:
+    """The class docstring gives the tagged form's identity as the reference table does."""
+    from orcapod.core.sources import DerivedSource
+
+    docstring = " ".join((DerivedSource.__doc__ or "").split())
+    assert (
+        'Explicit ``record_id_columns=()`` appends the marker ``("record_id_policy", '
+        '"position")``'
+    ) in docstring
+
+
+def test_job_guide_says_which_stored_records_a_derived_source_reads() -> None:
+    """``as_source()`` reads the latest record per lineage, not every stored record."""
+    guide = (PROJECT_ROOT / "docs" / "concepts" / "pipeline-job.md").read_text(
+        encoding="utf-8"
+    )
+    (entry,) = [
+        part for part in guide.split("\n- ") if part.startswith("**`as_source()`**")
+    ]
+    entry = " ".join(entry.split())
+    assert "the most recent readable stored record per input lineage" in entry
+    assert "over the same stored records" not in entry
 
 
 def _documented_sites() -> set[str]:

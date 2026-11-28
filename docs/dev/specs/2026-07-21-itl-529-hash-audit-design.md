@@ -1,5 +1,7 @@
 # Hash Audit Design — ITL-529
 
+ITL-1564 supersedes the plain derived-source id and content identity described in this historical document. See the [current hashing reference](../../reference/hashing.md#default-source-ids-and-row-identifiers).
+
 **Date:** 2026-07-21
 **Issue:** [ITL-529](https://linear.app/metamorphic/issue/ITL-529/audit-all-hash-computation-sites-document-inputs-algorithm-and)
 **Deliverable:** `docs/reference/hashing.md` — a new standalone reference document cataloguing every hash computation site in the orcapod-python framework.

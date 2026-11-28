@@ -1,5 +1,7 @@
 # ITL-1154 hash site inventory (draft, phase 1)
 
+ITL-1564 supersedes the plain derived-source id and content identity described in this historical document. See the [current hashing reference](../../reference/hashing.md#default-source-ids-and-row-identifiers).
+
 Draft for the coordinator's review. In phase 2 it moves into `docs/reference/hashing.md`.
 
 **One-line rule** (developer, November 15, 2026): a hash always carries its label, except

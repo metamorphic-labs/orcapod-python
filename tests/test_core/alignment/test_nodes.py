@@ -60,6 +60,7 @@ from .jobs import (
     natural_keys,
     produce,
     run_job,
+    scaled_source_oracle,
 )
 
 RunKey = tuple[str, str, str, str, str]
@@ -131,11 +132,6 @@ def run_view_params(keys: list[RunKey], views: tuple[View, ...] = VIEWS) -> list
     ]
 
 
-# A derived source's table has no system tags, so its rows have no record ids to be
-# matched by; its rows are checked by recomputation in the test above.
-KEYED_VIEWS = tuple(v for v in VIEWS if v.call != "as_source")
-
-
 def check_every_config(
     job: PipelineJob,
     view: View,
@@ -152,6 +148,9 @@ def check_every_config(
     failures: list[str] = []
     dropped = DROPPED_TAGS.get(view.node, ())
     node = job.nodes[view.node]
+    if view.call == "as_source":
+        oracle = scaled_source_oracle(node.as_source(), oracle)
+        tokens = None
     kept = set(node.keys()[0]) | set(node.keys()[1]) | set(node.output_schema()[0])
     if present := [t for t in dropped if t in kept]:
         failures.append(f"the dropped tags {present} are in keys() or the schema")
@@ -216,7 +215,7 @@ def test_stored_records_are_aligned(key: RunKey, runs: Callable[[RunKey], Run]) 
 
 @pytest.mark.parametrize(
     ("key", "view"),
-    run_view_params([k for k in all_run_keys() if is_async(k)], KEYED_VIEWS),
+    run_view_params([k for k in all_run_keys() if is_async(k)]),
 )
 def test_async_equals_sync_row_by_row(
     key: RunKey, view: View, runs: Callable[[RunKey], Run]
@@ -225,6 +224,7 @@ def test_async_equals_sync_row_by_row(
     scenario, input_order, _, _, store_kind = key
     sync = runs((scenario, input_order, "sync", "natural", store_kind))
     run = runs(key)
+    ignore = () if view.call == "as_source" else PER_RUN_COLUMNS
     failures = []
     compared = 0
     for name, config in COLUMN_CONFIGS.items():
@@ -234,7 +234,7 @@ def test_async_equals_sync_row_by_row(
         compared += 1
         try:
             assert_same_rows_by_identity(
-                expected, produce(run.job, view, config), ignore=PER_RUN_COLUMNS
+                expected, produce(run.job, view, config), ignore=ignore
             )
         except AssertionError as exc:
             failures.append(f"[{name}]: {exc}")
