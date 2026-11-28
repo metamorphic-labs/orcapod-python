@@ -662,7 +662,7 @@ class _FunctionPodBase(TraceableBase):
         """Streaming async execution with per-data concurrency control.
 
         Each input (tag, data) is dispatched as an independent async task.
-        A semaphore limits how many tasks are in-flight concurrently.
+        A semaphore limits in-flight tasks unless the effective limit is ``None``.
         Observer hooks fire per item: ``on_data_start`` before processing,
         ``on_data_end(cached=False)`` on success, ``on_data_crash`` on error.
 
@@ -1014,7 +1014,7 @@ class FunctionPod(_FunctionPodBase):
             "pod_config": None,
             "ctx_arg_name": self.ctx_arg_name,
         }
-        if self._pod_config.max_concurrency is not None:
+        if self._pod_config.max_concurrency != "inherit":
             config["pod_config"] = {
                 "max_concurrency": self._pod_config.max_concurrency,
             }

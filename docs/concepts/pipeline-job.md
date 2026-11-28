@@ -70,6 +70,12 @@ the run then does is undefined (ITL-1369). `load_only=True` fills the nodes
 from what is already stored and computes nothing; see
 [Loading without computing](function-pods.md#loading-without-computing-runload_onlytrue).
 
+Use `await job.run_async()` or pass an `AsyncPipelineOrchestrator` to `job.run()` to
+execute nodes concurrently. Each function pod defaults to a limit based on the usable
+CPU count, clamped to 1–16 in-flight calls during an async run. The
+[function pod concurrency settings](function-pods.md#limiting-in-flight-calls) show how
+to choose a limit for a particular pod.
+
 ## Nodes
 
 Each recorded step, and each source, is a **node**. `job.nodes` maps a node's name to the
@@ -488,7 +494,11 @@ result database's, when one was given) and how each source was configured. `Pipe
 Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
 is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
 at a database that has moved, and `PipelineJob.load(path, result_database=...)` at a result
-database. The file records each node's own Arrow types, so saving types
+database. A connector database (SQLite, PostgreSQL, SpiralDB) is never rebuilt from the
+file: pass it, built over your connector, or the load raises an error that names what to
+pass. Saving a loaded job writes the database actually bound, the one you passed, in place of
+the recorded one. The recorded one is kept only while nothing is bound in its slot, which
+happens when a database of another kind could not be rebuilt and none was passed. The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that
 preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
 previews.

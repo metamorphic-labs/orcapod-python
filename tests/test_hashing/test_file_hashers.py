@@ -179,7 +179,7 @@ class TestCachedFileHasher:
 
         path = UPath(sample_file).resolve()
         stat = path.stat()
-        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size)
+        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, "sha256")
         cached_value = cacher.get(key)
 
         assert cached_value is not None
@@ -212,28 +212,6 @@ class TestCachedFileHasher:
 
         assert restored.method == original.method
         assert restored.digest == original.digest
-
-    def test_different_algorithms_share_cache_key(self, tmp_path):
-        """Two CachedFileHashers with different algorithms but same path+mtime+size
-        share the same cache entry — second gets the first's result.
-
-        This is a known limitation: the cache key does not include the algorithm.
-        """
-        f = tmp_path / "file.txt"
-        f.write_text("test content")
-
-        cacher = InMemoryHashCacher()
-
-        sha_inner = FileHasher(algorithm="sha256")
-        sha_cached = CachedFileHasher(file_hasher=sha_inner, cacher=cacher)
-        sha_result = sha_cached.hash_file(f)
-
-        md5_inner = FileHasher(algorithm="md5")
-        md5_cached = CachedFileHasher(file_hasher=md5_inner, cacher=cacher)
-        md5_result = md5_cached.hash_file(f)
-
-        assert md5_result.method == "sha256"
-        assert md5_result.digest == sha_result.digest
 
     def test_modified_content_invalidates_cache(self, cached_file_hasher, tmp_path):
         """Cache is automatically invalidated when file content changes.
@@ -293,7 +271,9 @@ class TestCachedFileHasher:
             # then verify a cache hit via the public get() API.
             resolved = url_path.resolve()
             stat = resolved.stat()
-            expected_key = FileHashKey(resolved, stat.st_mtime_ns, stat.st_size)
+            expected_key = FileHashKey(
+                resolved, stat.st_mtime_ns, stat.st_size, "sha256"
+            )
             assert cacher.get(expected_key) is not None, (
                 "Expected a cache hit for the URL-form path key"
             )

@@ -23,7 +23,6 @@ from unittest import mock
 import pyarrow as pa
 import pytest
 
-from orcapod import function_pod
 from orcapod.channels import Channel
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes import FunctionJobNode
@@ -35,7 +34,7 @@ from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.streams import ViewStatus
-from orcapod.types import CacheMode
+from orcapod.types import CacheMode, PodConfig
 
 # The input order of A's rows (not in tag order), and the order the async rows complete
 # in when the gate is armed: the reverse.
@@ -109,13 +108,17 @@ class _ReverseGate:
 GATE = _ReverseGate()
 
 
-@function_pod(output_keys="y")
 async def scale(id_: int, x: int) -> int:
     """Return ``10 * x``, completing in the gate's order; counts every call."""
     await GATE.wait_turn(id_)
     CALLS.append(x)
     GATE.finish(id_)
     return 10 * x
+
+
+SCALE_POD = FunctionPod.from_fn(
+    scale, output_keys="y", pod_config=PodConfig(max_concurrency=len(COMPLETION_ORDER))
+)
 
 
 @pytest.fixture(autouse=True)
@@ -170,7 +173,7 @@ def _job(store: ArrowDatabaseProtocol) -> PipelineJob:
     )
     job = PipelineJob(name="itl1042", database=store)
     with job:
-        scaled = scale.pod(a, label="scaled")
+        scaled = SCALE_POD(a, label="scaled")
         Join()(scaled, b, label="joined")
         GroupBy(by=["g"])(scaled, label="grouped")
     # OperatorNode.attach_databases is the public way to store an operator's rows.
@@ -320,10 +323,8 @@ def test_a_function_node_is_stamped_before_its_output_closes(with_store: bool) -
         tag_only_columns=True,
     )
     store = InMemoryArrowDatabase() if with_store else None
-    pod = scale.pod
-    assert isinstance(pod, FunctionPod)
     node = FunctionJobNode(
-        pod,
+        SCALE_POD,
         source,
         pipeline_database=store,
         result_database=store,

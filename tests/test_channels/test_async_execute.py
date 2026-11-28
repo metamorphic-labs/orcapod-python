@@ -669,7 +669,7 @@ class TestFunctionPodConcurrency:
             return x * 2
 
         pf = PythonDataFunction(double, output_keys="result")
-        pod = FunctionPod(pf)  # PodConfig default (None)
+        pod = FunctionPod(pf)
         pipeline_cfg = PipelineConfig(default_max_concurrency=2)
 
         stream = make_stream(4)
