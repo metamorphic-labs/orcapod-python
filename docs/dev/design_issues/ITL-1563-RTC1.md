@@ -17,4 +17,7 @@ error, in either order.
 `ResultCache.store`, the one place every result write goes through, refuses
 (`InputValidationError`, naming the column and both types) a row whose token column
 has another type, before anything is written. Custom token types are not supported.
+A row with no token column for an output gets it as a `large_string` null, so every
+stored row has every declared token column on every database; a token column that names
+no output of the row is refused.
 No stored column, path, record id or hash moved.

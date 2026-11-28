@@ -266,3 +266,138 @@ def test_an_ordinary_pod_in_a_job_stores_and_reads_back(
     ]
     stored_again = database.get_all_records(results[0])
     assert stored_again is not None and stored_again.num_rows == 3
+
+
+# ---------------------------------------------------------------------------
+# A missing token column is stored as a large_string null (ITL-1563, round 2)
+# ---------------------------------------------------------------------------
+
+# Which outputs of a hand-built row have a token; the others have no column at all.
+PARTIAL_TOKENS: tuple[tuple[str, ...], ...] = ((), ("total",), ("label",))
+
+
+def _partial_output(keys: tuple[str, ...], with_token: tuple[str, ...]) -> Data:
+    return _output(keys, {key: f"custom::id::{key}" for key in with_token})
+
+
+def _expected_columns(keys: tuple[str, ...]) -> list[str]:
+    return [*keys, *(f"{constants.SOURCE_PREFIX}{key}" for key in keys)]
+
+
+def _output_and_token_columns(function: CachedDataFunction) -> list[str]:
+    table = function.get_all_cached_outputs()
+    assert table is not None
+    return [name for name in table.column_names if not name.startswith("__")]
+
+
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+@pytest.mark.parametrize("with_token", PARTIAL_TOKENS)
+def test_a_row_without_a_token_column_has_none_before_it_is_stored(
+    keys: tuple[str, ...], with_token: tuple[str, ...]
+) -> None:
+    """The case under test: the hand-built row lacks the column, not only the value."""
+    table = _partial_output(keys, with_token).as_table(columns={"source": True})
+    assert [n for n in table.column_names if n not in keys] == [
+        f"{constants.SOURCE_PREFIX}{key}" for key in keys if key in with_token
+    ]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+@pytest.mark.parametrize("with_token", PARTIAL_TOKENS)
+@pytest.mark.parametrize("other", ("call", "custom"))
+@pytest.mark.parametrize("missing_first", (True, False))
+def test_a_missing_token_column_is_stored_as_a_null_in_either_order(
+    backend: str,
+    keys: tuple[str, ...],
+    with_token: tuple[str, ...],
+    other: str,
+    missing_first: bool,
+    tmp_path: Path,
+) -> None:
+    """Without the column then with it, and the reverse: one table, every column."""
+    function = _function(_database(backend, tmp_path), keys)
+    partial_input, full_input = Data({"x": 3, "y": 4}), Data({"x": 1, "y": 2})
+
+    def write_partial() -> None:
+        function.record_data(partial_input, _partial_output(keys, with_token))
+
+    def write_full() -> None:
+        if other == "call":
+            assert function.call(full_input) is not None
+        else:
+            function.record_data(full_input, _output(keys, _string_tokens(keys)))
+
+    for write in (
+        (write_partial, write_full) if missing_first else (write_full, write_partial)
+    ):
+        write()
+        assert _output_and_token_columns(function) == _expected_columns(keys)
+        assert set(_token_types(function).values()) == {"large_string"}
+
+    assert _stored_rows(function) == 2
+    found = function.get_cached_output_for_data(partial_input)
+    assert found is not None
+    assert found.source_info() == {
+        key: f"custom::id::{key}" if key in with_token else None for key in keys
+    }
+    assert function.get_cached_output_for_data(full_input) is not None
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+@pytest.mark.parametrize("with_token", PARTIAL_TOKENS)
+def test_a_missing_token_column_alone_gives_every_declared_column(
+    backend: str, keys: tuple[str, ...], with_token: tuple[str, ...], tmp_path: Path
+) -> None:
+    function = _function(_database(backend, tmp_path), keys)
+    function.record_data(Data({"x": 3, "y": 4}), _partial_output(keys, with_token))
+    table = function.get_all_cached_outputs()
+    assert table is not None and table.num_rows == 1
+    assert _output_and_token_columns(function) == _expected_columns(keys)
+    for key in keys:
+        field = table.schema.field(f"{constants.SOURCE_PREFIX}{key}")
+        assert (field.type, field.nullable) == (pa.large_string(), True)
+        assert table.column(field.name).to_pylist() == [
+            f"custom::id::{key}" if key in with_token else None
+        ]
+
+
+class _WithStrayToken(Data):
+    """An output whose row carries a token column for a name that is no output."""
+
+    def as_table(self, *args: Any, **kwargs: Any) -> pa.Table:
+        table = super().as_table(*args, **kwargs)
+        return table.append_column(
+            f"{constants.SOURCE_PREFIX}other",
+            pa.array(["custom::id::other"], type=pa.large_string()),
+        )
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("keys", KEY_ORDERS)
+@pytest.mark.parametrize("stored_first", (True, False))
+def test_a_token_column_for_a_name_that_is_no_output_is_refused(
+    backend: str, keys: tuple[str, ...], stored_first: bool, tmp_path: Path
+) -> None:
+    function = _function(_database(backend, tmp_path), keys)
+    if stored_first:
+        assert function.call(Data({"x": 1, "y": 2})) is not None
+    before = function.get_all_cached_outputs()
+    values: dict[str, Any] = {"total": 7, "label": "3+4"}
+    stray = _WithStrayToken(
+        {key: values[key] for key in keys}, source_info=_string_tokens(keys)
+    )
+    with pytest.raises(InputValidationError) as error:
+        function.record_data(Data({"x": 3, "y": 4}), stray)
+    message = str(error.value)
+    assert f"{constants.SOURCE_PREFIX}other" in message
+    for key in keys:
+        assert repr(key) in message
+    after = function.get_all_cached_outputs()
+    assert (
+        (after is None)
+        if before is None
+        else (after is not None and after.equals(before))
+    )
+    assert function.get_cached_output_for_data(Data({"x": 3, "y": 4})) is None

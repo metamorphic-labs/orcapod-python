@@ -97,34 +97,65 @@ RESULT_TOKEN_COLUMN = StoredColumn(
 Stated once, for every function: the column is a nullable ``large_string`` whatever a
 write holds, and a null token is a ``large_string`` null. ``ResultCache.store`` refuses
 a row whose token column has any other type, so a table's token type never follows
-the values of a write. Custom token types are not supported.
+the values of a write, and stores a null for an output whose row has no token column,
+so every stored row has every declared token column. A token column that names no
+output of the row is refused. Custom token types are not supported.
 """
 
 
-def _require_declared_token_columns(schema: pa.Schema) -> None:
-    """Refuse a result row whose source-info token column is not the declared type.
+def _with_declared_token_columns(
+    data_table: pa.Table, output_keys: tuple[str, ...]
+) -> pa.Table:
+    """Give a result row exactly its declared token columns, in output order.
+
+    Every output has one token column, ``RESULT_TOKEN_COLUMN``. A row that has none
+    for an output gets it as a null; the columns are laid out as an ordinary result
+    row is, the outputs and then their token columns in output order.
 
     Args:
-        schema: The schema of the output row, with its source-info columns.
+        data_table: The output row, with the source-info columns it has.
+        output_keys: The row's output keys, in order.
+
+    Returns:
+        The row with one token column per output.
 
     Raises:
         InputValidationError: If a ``_source_<key>`` column has another type than
-            ``RESULT_TOKEN_COLUMN`` declares, naming each such column and both types.
+            ``RESULT_TOKEN_COLUMN`` declares (naming each such column and both
+            types), or names no output of the row.
     """
+    prefix = constants.SOURCE_PREFIX
+    token_fields = [f for f in data_table.schema if f.name.startswith(prefix)]
     other = [
         field
-        for field in schema
-        if field.name.startswith(constants.SOURCE_PREFIX)
-        and str(field.type) != RESULT_TOKEN_COLUMN.arrow_type
+        for field in token_fields
+        if str(field.type) != RESULT_TOKEN_COLUMN.arrow_type
     ]
-    if not other:
-        return
-    columns = ", ".join(f"{field.name!r} is {field.type}" for field in other)
-    raise InputValidationError(
-        "A function result's source-info token is one string: every token column "
-        f"of a result table is {RESULT_TOKEN_COLUMN.arrow_type} (nullable), but "
-        f"{columns}. Nothing was written. Give each output one string token, or "
-        "none (a null token)."
+    if other:
+        columns = ", ".join(f"{field.name!r} is {field.type}" for field in other)
+        raise InputValidationError(
+            "A function result's source-info token is one string: every token "
+            f"column of a result table is {RESULT_TOKEN_COLUMN.arrow_type} "
+            f"(nullable), but {columns}. Nothing was written. Give each output one "
+            "string token, or none (a null token)."
+        )
+    declared = [f"{prefix}{key}" for key in output_keys]
+    stray = [field.name for field in token_fields if field.name not in declared]
+    if stray:
+        raise InputValidationError(
+            f"A function result has one source-info token column per output, but "
+            f"{stray} name no output of the result (its outputs are "
+            f"{list(output_keys)}). Nothing was written."
+        )
+    token_type = pa.large_string()
+    for name in declared:
+        if name not in data_table.column_names:
+            data_table = data_table.append_column(
+                pa.field(name, token_type, nullable=RESULT_TOKEN_COLUMN.nullable),
+                pa.nulls(data_table.num_rows, type=token_type),
+            )
+    return data_table.select(
+        [n for n in data_table.column_names if n not in declared] + declared
     )
 
 
@@ -383,15 +414,16 @@ class ResultCache:
 
         Raises:
             InputValidationError: If a source-info token column of ``output_data``
-                is not a ``large_string`` (``RESULT_TOKEN_COLUMN``); nothing is
-                written.
+                is not a ``large_string`` (``RESULT_TOKEN_COLUMN``) or names no
+                output of ``output_data``; nothing is written. An output with no
+                token column is stored with a null token.
         """
         require_same_data_context(input_data.data_context_key, data_context_key)
         require_same_data_context(output_data.data_context_key, data_context_key)
         self._account_for_stale_tables(data_context_key)
 
         data_table = output_data.as_table(columns={"source": True})
-        _require_declared_token_columns(data_table.schema)
+        data_table = _with_declared_token_columns(data_table, output_data.keys())
 
         # Add variation and execution columns with prefixes.
         # Use a running counter for insertion position since add_column shifts indices.

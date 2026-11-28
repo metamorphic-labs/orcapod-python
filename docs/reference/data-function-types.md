@@ -149,6 +149,11 @@ other type (a hand-built output given to `CachedDataFunction.record_data` with a
 token) is refused with `InputValidationError`, naming the column and both types, before
 anything is written. A token type of your own cannot be declared.
 
+Every stored row has the token column of every output. A hand-built output that gives no
+token for an output (its row has no `_source_<key>` column) is stored with a null token
+there, on every database, in either order of the writes. A token column that names no
+output of the result is refused the same way, before anything is written.
+
 ```python
 stored = types_store.get_all_records(next(p for p in types_store.list_sources() if "_result" in p))
 print([name for name in stored.column_names if not name.startswith("__pf_")])
