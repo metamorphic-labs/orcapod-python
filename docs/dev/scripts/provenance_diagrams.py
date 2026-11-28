@@ -81,6 +81,7 @@ def render() -> dict[str, str]:
                 tag_columns=["subject_id", "session", "probe", "unit"],
                 tag_only_columns=True,
                 source_id="units",
+                label="units",
             )
 
         def sessions() -> CSVSource:
@@ -89,6 +90,7 @@ def render() -> dict[str, str]:
                 tag_columns=["subject_id", "session"],
                 tag_only_columns=True,
                 source_id="sessions",
+                label="sessions",
             )
 
         job = PipelineJob(name="workshop", database=database)

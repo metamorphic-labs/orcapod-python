@@ -221,7 +221,10 @@ def test_source_nodes() -> None:
     source = _source()
     bound = SourceJobNode(name="nums", bound_source=source)
     assert bound.head().table.equals(source.head().table)
-    assert bound.head().header() == "SourceJobNode[nums] — first 10 of 25 rows"
+    assert (
+        bound.head().header()
+        == "SourceJobNode[nums (arrow_table_v1:nums)] — first 10 of 25 rows"
+    )
 
 
 def _operator_node(
@@ -316,7 +319,11 @@ def test_head_keeps_the_tag_arrow_type_of_the_input(
         with job:
             _ = triple.pod(
                 ArrowTableSource(
-                    table, tag_columns=["id"], tag_only_columns=True, source_id="narrow"
+                    table,
+                    tag_columns=["id"],
+                    tag_only_columns=True,
+                    label="narrow",
+                    source_id="narrow",
                 ),
                 label="triple",
             )

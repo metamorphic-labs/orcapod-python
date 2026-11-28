@@ -67,6 +67,7 @@ def _arrow(cls: type[ArrowTableSource], tags: list[str], layout: list[str] | Non
         record_id_columns=KEY,
         tag_only_columns=True,
         source_id="subjects",
+        label="subjects",
     )
 
 
@@ -76,6 +77,7 @@ def _csv(path: Path, tags: list[str]) -> CSVSource:
         tag_columns=tags,
         record_id_columns=KEY,
         tag_only_columns=True,
+        label="subjects",
         source_id="subjects",
         schema=SCHEMA,
     )
@@ -169,7 +171,7 @@ class TestInAJob:
         assert (
             first.nodes["ratio"].content_hash() == second.nodes["ratio"].content_hash()
         )
-        # The slot is named by the source's name, not its full id.
+        # All fixtures assign the same slot label across source kinds.
         assert set(first.sources) == set(second.sources) == {"subjects"}
         stored = second.nodes["ratio"].as_source().as_table()
         assert stored.num_rows == len(ROWS)

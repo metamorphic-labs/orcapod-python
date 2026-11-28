@@ -208,6 +208,7 @@ def _source_table() -> pa.Table:
         [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     return source.as_table(columns={"source": True, "system_tags": True})
@@ -313,6 +314,7 @@ def _batched_job(database: InMemoryArrowDatabase) -> PipelineJob:
         [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name="source_info_types", database=database)
@@ -371,6 +373,7 @@ def test_a_source_with_a_nullable_system_tag_is_not_bound() -> None:
         [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name="nullable_system_tag", database=InMemoryArrowDatabase())

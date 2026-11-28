@@ -8,6 +8,7 @@ import pytest
 
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 
 
@@ -251,6 +252,59 @@ class TestSourceJobNode:
         )
         job_node.bound_source = src
         assert job_node.bound_source is src
+
+    @pytest.mark.parametrize(
+        "length", [1, 2, 3], ids=["direct", "one_projection", "two_projections"]
+    )
+    def test_slot_binding_refuses_cycles(
+        self, tag_schema: Schema, data_schema: Schema, length: int
+    ) -> None:
+        from orcapod.core.sources.dict_source import DictSource
+        from orcapod.operators import SelectDataColumns
+
+        source = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
+        target = SourceJobNode(
+            name="target",
+            tag_schema=tag_schema,
+            data_schema=data_schema,
+            bound_source=source,
+        )
+        upstream: StreamProtocol = target
+        for _ in range(length - 1):
+            upstream = SelectDataColumns(["value"])(upstream)
+        previous_modified = target.last_modified
+
+        with pytest.raises(
+            SourceSpecMismatchError, match=r"slot 'target'.*slot 'target'.*ITL-1559"
+        ):
+            target.bound_source = upstream
+
+        assert target.bound_source is source
+        assert target.last_modified == previous_modified
+        assert target.as_table().equals(source.as_table())
+
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_slot_binding_accepts_slot_free_source_and_unbinding(
+        self, tag_schema: Schema, data_schema: Schema, cached: bool
+    ) -> None:
+        from orcapod.core.sources.dict_source import DictSource
+        from orcapod.databases import InMemoryArrowDatabase
+
+        source = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
+        binding = source.cached(InMemoryArrowDatabase()) if cached else source
+        target = SourceJobNode(
+            name="slot", tag_schema=tag_schema, data_schema=data_schema
+        )
+        target.bound_source = binding
+
+        assert target.bound_source is binding
+        assert target.as_table().equals(source.as_table())
+        target.bound_source = None
+        assert target.bound_source is None
 
     def test_bound_source_setter_clears_content_hash_cache(
         self, tag_schema, data_schema
@@ -529,24 +583,16 @@ class TestFromStreamNonRootSource:
         table = pa.table({"id": [1, 2], "value": [1.0, 2.0]})
         return ArrowTableStream(table, tag_columns=["id"])
 
-    def test_source_node_from_stream_slot_name_uses_full_hash(self):
-        """SourceNode.from_stream(non-RootSource) builds name as label + full content hash."""
+    def test_raw_stream_requires_an_explicit_slot_declaration(self):
         from orcapod.core.nodes.source_node import SourceNode
 
         stream = self._make_arrow_stream()
-        node = SourceNode.from_stream(stream)
+        with pytest.raises(ValueError, match="ArrowTableSource .*ITL-1559"):
+            SourceNode.from_stream(stream)
+        assert SourceNode.from_stream(stream, name="input").name == "input"
 
-        expected_name = f"{stream.label}:{stream.content_hash().to_hex()}"
-        assert node.name == expected_name
-        # Confirm the hash is full-length — SHA-256 produces a 64-character hex digest.
-        assert len(stream.content_hash().to_hex()) == 64
-
-    def test_source_job_node_from_stream_slot_name_uses_full_hash(self):
-        """SourceJobNode.from_stream(non-RootSource) builds name as label + full content hash."""
+    def test_prebuilt_step_is_not_an_implicit_slot(self):
         from orcapod.core.nodes.source_node import SourceJobNode
-
-        # A stream derived from a source: not a RootSource, and it carries the one
-        # system-tag pair a bound stream must have (ITL-1126; a raw stream has none).
         from orcapod.core.operators import MapData
         from orcapod.core.sources import DictSource
 
@@ -554,9 +600,5 @@ class TestFromStreamNonRootSource:
             [{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
         )
         stream = MapData({"value": "v"})(source)
-        job_node = SourceJobNode.from_stream(stream)
-
-        expected_name = f"{stream.label}:{stream.content_hash().to_hex()}"
-        assert job_node.name == expected_name
-        # Confirm the hash is full-length — SHA-256 produces a 64-character hex digest.
-        assert len(stream.content_hash().to_hex()) == 64
+        with pytest.raises(ValueError, match=r"node\.as_source\(\).*ITL-1559"):
+            SourceJobNode.from_stream(stream)

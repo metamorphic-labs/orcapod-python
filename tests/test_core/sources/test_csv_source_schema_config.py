@@ -247,7 +247,7 @@ def test_a_job_over_a_schema_it_cannot_save_fails_to_save(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="metadata") as info:
         job.save(tmp_path / "job.json")
     notes = info.value.__notes__
-    assert any("source 'ab'" in n or "'ab'" in n for n in notes), notes
+    assert any("source 'CSVSource'" in n for n in notes), notes
     assert any(str(tmp_path / "m.csv") in n for n in notes), notes
     assert not (tmp_path / "job.json").exists()
 
@@ -417,7 +417,13 @@ def _overlap_source(tmp_path: Path) -> CSVSource:
             pa.field("ab", pa.int64(), nullable=False),
         ]
     )
-    return CSVSource(str(path), schema=schema, tag_columns=["a"], source_id="overlap")
+    return CSVSource(
+        str(path),
+        schema=schema,
+        tag_columns=["a"],
+        label="overlap",
+        source_id="overlap",
+    )
 
 
 @MALFORMED

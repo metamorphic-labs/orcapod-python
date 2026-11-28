@@ -331,7 +331,8 @@ def run_job_node(
 ) -> None:
     """Run a job node as its ``run()`` does (developer, November 13, 2026; ITL-1095).
 
-    Every source feeding the node is first checked for new data (``check_sources``,
+    Source registrations are checked as in ``job.run()`` before reading new data. Every
+    source feeding the node is first checked for new data (``check_sources``,
     ITL-1102). Nothing runs when the node then holds a current run
     (``holds_current_run``). Otherwise a node that depends on job nodes runs with them
     (``run_with_dependencies``) and one built over streams outside a job runs alone
@@ -350,11 +351,13 @@ def run_job_node(
         check_sources,
         depends_on_job_nodes,
         refuse_unloadable_inputs,
+        require_run_source_consistency,
         run_with_dependencies,
     )
     from orcapod.pipeline.restrictions import refuse_restriction_conflicts
     from orcapod.pipeline.run_summary import warn_row_failures
 
+    require_run_source_consistency(node)
     # A source read under two restrictions, or a caching operator over a restricted
     # source, is refused before any source is checked and before anything is
     # computed or written (ITL-1218).
@@ -4343,6 +4346,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 compute (loaded without a function pod, or a placeholder pod) and
                 ``load_only`` is false; or if its input is unavailable
                 (``CACHE_ONLY``): read its stored rows with ``as_source()``.
+            InconsistentSourceError: If distinct source objects share a content
+                hash, sources with one ID differ in schema or key columns, or
+                two slots have the same live source identity.
         """
         from orcapod.pipeline.serialization import LoadStatus
 

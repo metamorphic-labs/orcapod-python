@@ -612,28 +612,26 @@ class UnboundSourceError(RuntimeError):
 
 
 class SourceSpecMismatchError(InputValidationError, ValueError):
-    """Raised when a concrete source's schema differs from a source slot's declared schema.
+    """Raised when a source does not fit its slot or depends on a bindable slot.
 
     A source fits a slot when its tag and data columns have the slot's names, roles and
     Python types (ITL-1112): those are what every downstream pipeline hash, and so every
     stored path, is built from. The message names the slot and the column, and for a type
-    difference both types. Raised by ``PipelineJob.bind(sources=...)`` and by assigning a
-    source node's ``bound_source``, before anything is bound.
+    difference both types. For a slot-dependent source, the message names both slots
+    (ITL-1559). Raised before the binding is installed.
     """
 
 
 class InconsistentSourceError(ValueError):
-    """Raised when two source nodes in the same pipeline share a name but differ in schema.
+    """Raised when sources conflict in a pipeline or job.
 
-    Source node names are identity-forming: the same name in a given pipeline
-    must always refer to the same input slot (same schema).  If ``compile()``
-    finds two source nodes with identical names but different schemas — which
-    can happen when two ``RootSource`` objects share the same ``source_id`` but
-    produce different column sets — it raises this error rather than silently
-    renaming one of them.
+    Each content hash can be registered by one source object. Sources
+    sharing a ``source_id`` must have the same schema and key columns
+    (ITL-1506). Two different schemas competing for one input slot also
+    raise this error.
 
-    Resolution: assign distinct ``source_id`` values to the conflicting sources
-    so each slot has a unique, stable identity.
+    Build a source once and reuse that object, or give each source its
+    own ``source_id``.
     """
 
 
@@ -833,13 +831,7 @@ class CachedSourceIdMismatchError(ValueError):
 
 
 class SourceSlotNameCollisionError(ValueError):
-    """Two different sources would take one slot name in a job (ITL-1425).
-
-    A job slot is named by its source's name, without the kind part, so two
-    different sources (another kind, another version or another id) whose names are
-    equal would share one slot and one would replace the other. The job refuses
-    them; give one of them its own name (``source_id=`` when it is built).
-    """
+    """Two graph nodes would take the same source slot label (ITL-1565)."""
 
 
 class RestrictedAggregationWarning(UserWarning):

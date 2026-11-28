@@ -328,7 +328,7 @@ class StaticOutputOperatorPod(TraceableBase):
             upstreams=streams,
             label=label,
         )
-        return output_stream
+        return output_stream._mark_recorded(self.tracker_manager)
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this operator to a JSON-compatible config dict.

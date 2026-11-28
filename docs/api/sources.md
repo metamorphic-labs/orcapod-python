@@ -42,3 +42,5 @@ source id and hashes are not frozen with data context v1 (`PROVISIONAL_SOURCES`)
 ::: orcapod.core.sources.SourceRegistry
 
 ::: orcapod.core.sources.RootSource
+
+::: orcapod.core.sources.RootSource.as_slot

@@ -238,7 +238,10 @@ def test_job_warns_once(run_async: bool) -> None:
         warnings.simplefilter("always")
         job = PipelineJob(name="semijoin_warns_once", database=InMemoryArrowDatabase())
         with job:
-            _ = SemiJoin(label="sj")(left_source(), right_same_tag_other_y())
+            _ = SemiJoin(label="sj")(
+                left_source().as_slot("left_readings"),
+                right_same_tag_other_y().as_slot("matching_readings"),
+            )
         if run_async:
             from orcapod.pipeline import AsyncPipelineOrchestrator
 

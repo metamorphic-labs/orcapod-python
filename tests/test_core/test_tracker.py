@@ -192,8 +192,8 @@ class TestSourceNode:
     def test_label_set_explicitly(self):
         stream = _make_source()
         node = self._make_job_node(stream, name="my_source")
-        node._label = "explicit"
-        assert node.label == "explicit"
+        node.label = "explicit"
+        assert node.label == node.name == "explicit"
 
     def test_label_defaults_to_name(self):
         stream = _make_source()
@@ -420,7 +420,7 @@ class TestPipelineRecording:
     def test_record_function_pod_creates_function_node(self):
         pf = PythonDataFunction(_double, output_keys="result")
         pod = FunctionPod(data_function=pf)
-        stream = _make_stream()
+        stream = _make_source()
         mgr = BasicTrackerManager()
 
         with _make_pipeline(tracker_manager=mgr) as tracker:
@@ -436,7 +436,7 @@ class TestPipelineRecording:
     def test_record_function_pod_stores_edge(self):
         pf = PythonDataFunction(_double, output_keys="result")
         pod = FunctionPod(data_function=pf)
-        stream = _make_stream()
+        stream = _make_source()
         mgr = BasicTrackerManager()
 
         with _make_pipeline(tracker_manager=mgr) as tracker:
@@ -452,13 +452,13 @@ class TestPipelineRecording:
     def test_record_function_pod_stores_upstream_stream(self):
         pf = PythonDataFunction(_double, output_keys="result")
         pod = FunctionPod(data_function=pf)
-        stream = _make_stream()
+        stream = _make_source()
         mgr = BasicTrackerManager()
 
         with _make_pipeline(tracker_manager=mgr) as tracker:
             tracker.record_function_pod_invocation(pod, stream)
 
-        # Raw stream is preserved in _source_streams during/after recording
+        # The concrete source is preserved in _source_streams during recording
         stream_hash = stream.content_hash().to_string()
         assert stream_hash in tracker._source_streams
         assert tracker._source_streams[stream_hash] is stream
@@ -471,7 +471,7 @@ class TestPipelineRecording:
         assert isinstance(tracker._upstreams[stream_hash], SourceNode)
 
     def test_record_operator_pod_creates_operator_node(self):
-        stream = _make_stream()
+        stream = _make_source()
         op = SelectTagColumns(columns=["id"])
         mgr = BasicTrackerManager()
 
@@ -486,8 +486,13 @@ class TestPipelineRecording:
         assert op_node.node_type == "operator"
 
     def test_record_operator_pod_stores_edges(self):
-        stream_a = _make_stream()
-        stream_b = _make_y_stream()
+        stream_a = _make_source()
+        stream_b = ArrowTableSource(
+            _make_y_stream().as_table(),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            label="other",
+        )
         op = Join()
         mgr = BasicTrackerManager()
 
@@ -504,7 +509,7 @@ class TestPipelineRecording:
         pod = FunctionPod(data_function=pf)
 
         with _make_pipeline(tracker_manager=mgr) as tracker:
-            tracker.record_function_pod_invocation(pod, _make_stream())
+            tracker.record_function_pod_invocation(pod, _make_source())
 
         # compile() populates _nodes; .nodes returns a dict copy
         tracker.compile()
@@ -517,7 +522,7 @@ class TestPipelineRecording:
         """reset() is a no-op — recording state is additive across with-blocks."""
         pf = PythonDataFunction(_double, output_keys="result")
         pod = FunctionPod(data_function=pf)
-        stream = _make_stream()
+        stream = _make_source()
         mgr = BasicTrackerManager()
 
         with _make_pipeline(tracker_manager=mgr) as tracker:
@@ -905,7 +910,7 @@ class TestManagerBroadcast:
         """BasicTrackerManager broadcasts recordings to all active trackers."""
         pf = PythonDataFunction(_double, output_keys="result")
         pod = FunctionPod(data_function=pf)
-        stream = _make_stream()
+        stream = _make_source()
         mgr = BasicTrackerManager()
 
         tracker1 = _make_pipeline(tracker_manager=mgr)

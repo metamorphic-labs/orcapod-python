@@ -77,6 +77,7 @@ def _units(source_id: str = "units") -> ArrowTableSource:
         table,
         tag_columns=["session", "unit"],
         tag_only_columns=True,
+        label=source_id,
         source_id=source_id,
     )
 
@@ -89,7 +90,11 @@ def _probes(source_id: str = "probes") -> ArrowTableSource:
         }
     )
     return ArrowTableSource(
-        table, tag_columns=["session"], tag_only_columns=True, source_id=source_id
+        table,
+        tag_columns=["session"],
+        tag_only_columns=True,
+        label=source_id,
+        source_id=source_id,
     )
 
 
@@ -186,7 +191,7 @@ class TestSectionFiveCases:
             )
         text = job.nodes["clean"].explain().text()
         assert text.splitlines()[1:] == [
-            "  source 'arrow_table_v1:units' (ArrowTableSource)",
+            "  slot 'units' (ArrowTableSource, source id: 'arrow_table_v1:units')",
             "    applied by the source: nothing (the whole table is read)",
             "    applied after reading: t >= 1.0 (Filter[late]); no null in rate, t "
             "(DropNulls[clean])",
@@ -315,7 +320,11 @@ class TestStepsThatDropRows:
             ),
         )
         source = ArrowTableSource(
-            table, tag_columns=["k"], tag_only_columns=True, source_id="lists"
+            table,
+            tag_columns=["k"],
+            tag_only_columns=True,
+            label="lists",
+            source_id="lists",
         )
         steps = Index("xs", 1)(source).explain().sources[0].steps
         assert [s.text for s in steps] == [
@@ -622,18 +631,20 @@ class TestSecondReviewOfPr503:
             tag_columns=["k"],
             data_schema={"k": int, "m": dict[str, int]},
             tag_only_columns=True,
+            label="maps",
             source_id="maps",
         )
         (step,) = source.pick("m", "a").explain().sources[0].steps
         assert step.text == "rows whose 'm' has no key 'a' are dropped"
 
-    def test_a_slot_is_named_by_its_name_not_its_label(self):
+    def test_a_slot_uses_its_label_as_its_name(self):
         tag_schema, data_schema = _units().output_schema()
         slot = SourceNode(
             name="units", tag_schema=tag_schema, data_schema=data_schema, label="shown"
         )
         (reading,) = Filter(col("t") >= 1.0)(slot).explain().sources
-        assert reading.name == "units"
+        assert reading.name == "shown"
+        assert slot.name == slot.label == "shown"
 
 
 class _LoudName(str):
@@ -714,6 +725,7 @@ class TestReviewOfPr498:
             table,
             tag_columns=other_tags or ["probe_session"],
             tag_only_columns=True,
+            label="probes",
             source_id="probes",
         )
         by_name = {r.name: r for r in SemiJoin()(_units(), probes).explain().sources}

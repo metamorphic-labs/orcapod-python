@@ -79,6 +79,7 @@ def _other(n_rows: int, data_column: str) -> ArrowTableSource:
         tag_columns=["t"],
         tag_only_columns=True,
         source_id=f"other_{data_column}",
+        label=f"other_{data_column}",
     )
 
 

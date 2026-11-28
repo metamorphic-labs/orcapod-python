@@ -75,7 +75,11 @@ def _source_a() -> ArrowTableSource:
         ),
     )
     return ArrowTableSource(
-        table, tag_columns=["id", "grp"], tag_only_columns=True, source_id="a"
+        table,
+        tag_columns=["id", "grp"],
+        tag_only_columns=True,
+        label="a",
+        source_id="a",
     )
 
 
@@ -94,7 +98,7 @@ def _source_b() -> ArrowTableSource:
         ),
     )
     return ArrowTableSource(
-        table, tag_columns=["id"], tag_only_columns=True, source_id="b"
+        table, tag_columns=["id"], tag_only_columns=True, label="b", source_id="b"
     )
 
 
@@ -115,7 +119,11 @@ def _source_c() -> ArrowTableSource:
         ),
     )
     return ArrowTableSource(
-        table, tag_columns=["id", "grp"], tag_only_columns=True, source_id="c"
+        table,
+        tag_columns=["id", "grp"],
+        tag_only_columns=True,
+        label="c",
+        source_id="c",
     )
 
 
@@ -331,6 +339,7 @@ def test_operator_failure_preserves_exception_type_and_message(
             {"x": pa.array([[1]], type=pa.large_list(pa.int8()))},
             schema=pa.schema([pa.field("x", pa.large_list(pa.int8()), nullable=False)]),
         ),
+        label="index_failure",
         source_id="index_failure",
     )
 
@@ -368,6 +377,7 @@ def test_concurrent_operator_and_forwarding_failures_stay_grouped() -> None:
             {"x": pa.array([[1], []], type=pa.large_list(pa.int8()))},
             schema=pa.schema([pa.field("x", pa.large_list(pa.int8()), nullable=False)]),
         ),
+        label="concurrent_failure",
         source_id="concurrent_failure",
     )
     node = OperatorJobNode(
@@ -659,7 +669,11 @@ def _rerun_source(ids: list[int], groups: list[str]) -> ArrowTableSource:
         }
     )
     return ArrowTableSource(
-        table, tag_columns=["id", "grp"], tag_only_columns=True, source_id="a"
+        table,
+        tag_columns=["id", "grp"],
+        tag_only_columns=True,
+        label="a",
+        source_id="a",
     )
 
 

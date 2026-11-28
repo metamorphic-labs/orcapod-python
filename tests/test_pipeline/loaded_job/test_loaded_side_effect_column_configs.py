@@ -40,6 +40,7 @@ def _left() -> DictSource:
         [{"k": i, "g": i % 2, "x": i} for i in range(ROWS)],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="left",
         source_id="left",
     )
 
@@ -50,6 +51,7 @@ def _right() -> DictSource:
         [{"k": i, "z": 10 * i} for i in range(ROWS)],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="right",
         source_id="right",
     )
 

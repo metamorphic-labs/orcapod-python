@@ -59,6 +59,7 @@ def _source(
         tag_columns=tag_order,
         tag_only_columns=True,
         record_id_columns=["k"],
+        label="input",
         source_id="input",
     )
 

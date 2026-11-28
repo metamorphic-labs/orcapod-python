@@ -158,7 +158,7 @@ class TestFinding1CacheUnderAnotherVersion:
     def test_the_same_version_reads_its_cache(self, tmp_path, csv_path):
         cache_dir = tmp_path / "cache"
         cached = CachedSource(
-            _csv(csv_path, source_id="subjects"),
+            _csv(csv_path, source_id="subjects", label="subjects"),
             cache_database=DeltaTableDatabase(cache_dir),
         )
         cached.as_table()
@@ -220,6 +220,8 @@ class TestFinding2SourcesSharingASlotName:
         )
         if order == "reversed":
             sources = sources[::-1]
+        for source in sources:
+            source.label = "shared_role"
         job = PipelineJob(name="collide", database=InMemoryArrowDatabase())
         with pytest.raises(SourceSlotNameCollisionError) as caught:
             with job:
@@ -227,7 +229,7 @@ class TestFinding2SourcesSharingASlotName:
                 ratio.pod(sources[1], label="second")
         for source in sources:
             assert repr(source.source_id) in str(caught.value)
-        assert "source_id=" in str(caught.value)
+        assert "as_slot" in str(caught.value)
 
     @pytest.mark.parametrize("orchestrator", ORCHESTRATORS, ids=["sync", "async"])
     def test_given_names_keep_both_sources_and_their_rows(self, tmp_path, orchestrator):
@@ -239,8 +241,11 @@ class TestFinding2SourcesSharingASlotName:
             tag_columns=KEY,
             tag_only_columns=True,
             source_id="from_sqlite",
+            label="from_sqlite",
         )
-        csv_source = _csv(tmp_path / "data.db:main.records", source_id="from_csv")
+        csv_source = _csv(
+            tmp_path / "data.db:main.records", source_id="from_csv", label="from_csv"
+        )
         job = PipelineJob(name="named", database=DeltaTableDatabase(tmp_path / "db"))
         with job:
             ratio.pod(sqlite_source, label="first")
@@ -286,11 +291,11 @@ class TestFinding3CachedDefaultDerivedSource:
             assert isinstance(reloaded.cached_source, SourceProxy)
             assert reloaded.source_id == cached.source_id
             assert reloaded.source_id.startswith("derived_v1:semantic_v1:")
-            # A slot over a source is named by its source_name (SourceJobNode.from_stream);
+            # The cached dataset ID is independent of the default slot label.
             # binding a cache over a proxy is refused for another reason, on main too
             # (its zero-row table has no system-tag columns), so the name is compared.
             assert reloaded.source_name == cached.source_name
-            assert SourceJobNode.from_stream(cached).name == reloaded.source_name
+            assert SourceJobNode.from_stream(cached).name == "CachedSource"
             assert reloaded.as_table().num_rows == rows == len(ROWS)
 
 
@@ -317,14 +322,18 @@ class TestFinding4LegacyConfigInAJobFile:
         path.write_text(json.dumps(data))
 
     def test_the_unedited_file_loads(self, tmp_path, csv_path):
-        path = self._saved_job(tmp_path, _csv(csv_path, source_id="subjects"))
+        path = self._saved_job(
+            tmp_path, _csv(csv_path, source_id="subjects", label="subjects")
+        )
         loaded = PipelineJob.load(path, database=DeltaTableDatabase(tmp_path / "db"))
         reloaded = loaded.sources["subjects"]
         assert isinstance(reloaded, CSVSource)
         assert reloaded.source_id == "csv_v1:subjects"
 
     def test_a_legacy_source_config_is_refused(self, tmp_path, csv_path):
-        path = self._saved_job(tmp_path, _csv(csv_path, source_id="subjects"))
+        path = self._saved_job(
+            tmp_path, _csv(csv_path, source_id="subjects", label="subjects")
+        )
         self._edit(path, _legacy)
         with pytest.raises(ValueError, match="source_name"):
             PipelineJob.load(path, database=DeltaTableDatabase(tmp_path / "db"))
@@ -333,7 +342,7 @@ class TestFinding4LegacyConfigInAJobFile:
         self, tmp_path, csv_path
     ):
         cached = CachedSource(
-            _csv(csv_path, source_id="subjects"),
+            _csv(csv_path, source_id="subjects", label="subjects"),
             cache_database=DeltaTableDatabase(tmp_path / "cache"),
         )
         path = self._saved_job(tmp_path, cached)
@@ -490,7 +499,7 @@ class TestSecondReview1ExplicitNameOverAnUnusableLocation:
         location = _write_csv(tmp_path / "bad::location.csv", ROWS)
         job = PipelineJob(name="sep", database=DeltaTableDatabase(tmp_path / "db"))
         with job:
-            ratio.pod(_csv(location, source_id="units"), label="ratio")
+            ratio.pod(_csv(location, source_id="units", label="units"), label="ratio")
         job.run()
         saved = tmp_path / "job.json"
         job.save(saved)
@@ -548,7 +557,7 @@ class TestSecondReview2GivenOrDefaultIsSaved:
 
 class TestSecondReview3Claims:
     def test_one_name_with_two_schemas_names_both_full_ids(self):
-        from orcapod.errors import InconsistentSourceError
+        from orcapod.errors import SourceSlotNameCollisionError
         from orcapod.sources import DictSource
 
         arrow = ArrowTableSource(
@@ -557,6 +566,7 @@ class TestSecondReview3Claims:
             record_id_columns=KEY,
             tag_only_columns=True,
             source_id="units",
+            label="units",
         )
         other = DictSource(
             [{"subject": "s1", "session": 1, "weight": 1.5, "label": "a"}],
@@ -564,6 +574,7 @@ class TestSecondReview3Claims:
             record_id_columns=KEY,
             tag_only_columns=True,
             source_id="units",
+            label="units",
         )
 
         @function_pod(output_keys="tagged")
@@ -571,7 +582,7 @@ class TestSecondReview3Claims:
             return weight
 
         job = PipelineJob(name="schemas", database=InMemoryArrowDatabase())
-        with pytest.raises(InconsistentSourceError) as caught:
+        with pytest.raises(SourceSlotNameCollisionError) as caught:
             with job:
                 tagged.pod(arrow, label="first")
                 tagged.pod(other, label="second")
@@ -582,7 +593,7 @@ class TestSecondReview3Claims:
         self, tmp_path, csv_path, monkeypatch
     ):
         cached = CachedSource(
-            _csv(csv_path, source_id="subjects"),
+            _csv(csv_path, source_id="subjects", label="subjects"),
             cache_database=DeltaTableDatabase(tmp_path / "cache"),
         )
         cached.as_table()
@@ -609,7 +620,7 @@ class TestThirdReview:
         self, tmp_path, csv_path, monkeypatch
     ):
         cached = CachedSource(
-            _csv(csv_path, source_id="subjects"),
+            _csv(csv_path, source_id="subjects", label="subjects"),
             cache_database=DeltaTableDatabase(tmp_path / "cache"),
         )
         cached.as_table()

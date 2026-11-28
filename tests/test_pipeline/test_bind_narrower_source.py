@@ -23,6 +23,7 @@ import pytest
 
 import orcapod
 from orcapod import PipelineJob, function_pod
+from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
 from orcapod.core.operators import Join, MapData
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -56,6 +57,7 @@ def _arrow_source(
         pa.table({"id": ids, "x": xs}, schema=schema),
         tag_columns=["id"],
         tag_only_columns=True,
+        label="same",
         source_id="same",
     )
 
@@ -151,6 +153,7 @@ def test_a_narrower_source_is_accepted_and_moves_nothing(
             [{"id": 0, "x": 1}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="d",
             source_id="d",
         ),
     )
@@ -316,6 +319,7 @@ def test_zero_rows_have_the_types_of_rows(tmp_path: pathlib.Path) -> None:
                 [{"id": 0, "v": 1}],
                 tag_columns=["id"],
                 tag_only_columns=True,
+                label="o",
                 source_id="o",
             ),
             label="same",
@@ -372,7 +376,11 @@ def _csv_job(tmp_path: pathlib.Path, text: str) -> str:
     with job:
         _ = MapData({"x": "y"})(
             CSVSource(
-                str(csv), tag_columns=["id"], tag_only_columns=True, source_id="csv"
+                str(csv),
+                tag_columns=["id"],
+                tag_only_columns=True,
+                label="csv",
+                source_id="csv",
             ),
             label="renamed",
         )
@@ -411,6 +419,7 @@ def test_loaded_csv_of_another_type_is_left_unbound(
                 str(tmp_path / "fixed.csv"),
                 tag_columns=["id"],
                 tag_only_columns=True,
+                label="csv",
                 source_id="csv",
             )
         }
@@ -529,7 +538,11 @@ def test_columns_follow_the_declared_order(a_type: Any) -> None:
 def _mapped_stream() -> Any:
     """Return a stream (not a root source): a DictSource with ``q`` renamed to ``x``."""
     source = DictSource(
-        [{"id": 0, "q": 1}], tag_columns=["id"], tag_only_columns=True, source_id="m"
+        [{"id": 0, "q": 1}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        label="m",
+        source_id="m",
     )
     return MapData({"q": "x"})(source)
 
@@ -588,19 +601,18 @@ def test_meta_columns_of_a_narrower_stream_are_kept() -> None:
         """Return ``v``."""
         return v
 
-    origin = PipelineJob(name="origin", database=InMemoryArrowDatabase())
-    with origin:
-        _ = same.pod(
-            DictSource(
-                [{"id": 0, "v": 1}],
-                tag_columns=["id"],
-                tag_only_columns=True,
-                source_id="o",
-            ),
-            label="same",
-        )
-    _ = origin.run()
-    stream = origin.nodes["same"]
+    stream = FunctionJobNode(
+        same.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod type is not declared as FunctionPodProtocol
+        DictSource(
+            [{"id": 0, "v": 1}],
+            tag_columns=["id"],
+            tag_only_columns=True,
+            label="o",
+            source_id="o",
+        ),
+        pipeline_database=InMemoryArrowDatabase(),
+    )
+    _ = stream.run()
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
         _ = MapData({"x": "y"})(_slot(int | None), label="renamed")
@@ -791,20 +803,16 @@ def test_a_refused_joined_stream_keeps_the_previous_binding() -> None:
 
 
 def test_a_pipeline_built_over_a_raw_stream_is_refused() -> None:
-    """A raw stream as a pipeline's input is refused, telling the user what to do.
-
-    Developer, November 14, 2026: refuse a pipeline built directly over a stream
-    without system tags until a raw stream is captured into a source (ITL-1127).
-    """
+    """A raw stream as a pipeline's input is refused with a source remedy."""
     raw = _raw_stream(x_nullable=True)
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
-    with pytest.raises(SourceSpecMismatchError) as raised:
+    with pytest.raises(ValueError) as raised:
         with job:
             _ = MapData({"x": "y"})(raw, label="renamed")
     message = str(raised.value)
-    assert "exactly one source-id and one record-id" in message
-    assert "ArrowTableSource(stream.as_table(), tag_columns=[...])" in message
-    assert "ITL-1127" in message
+    assert "node.as_source()" in message
+    assert "ArrowTableSource" in message
+    assert "ITL-1559" in message
 
 
 def test_a_raw_streams_table_wrapped_as_the_error_advises_runs() -> None:
@@ -986,6 +994,7 @@ def test_a_structural_class_of_the_same_identity_is_accepted(
         tag_columns=["id"],
         tag_only_columns=True,
         data_schema={"id": int, "p": _PointB},
+        label="b",
         source_id="b",
     )
     assert source.output_schema()[1]["p"] is not _PointA

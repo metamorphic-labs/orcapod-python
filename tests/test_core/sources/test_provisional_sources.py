@@ -215,6 +215,7 @@ def _origin(source_id: str = "people") -> Any:
         table,
         tag_columns=["subject", "session"],
         tag_only_columns=True,
+        label=source_id,
         source_id=source_id,
     )
 
@@ -227,9 +228,10 @@ def _ran_job() -> Any:
     from orcapod.operators import SelectDataColumns
 
     job = PipelineJob(name="derived", database=InMemoryArrowDatabase())
+    origin = _origin()
     with job:
-        _total.pod(_origin(), label="total")
-        SelectDataColumns(["age", "weight"])(_origin(), label="picked")
+        _total.pod(origin, label="total")
+        SelectDataColumns(["age", "weight"])(origin, label="picked")
     job.run()
     return job
 
@@ -240,11 +242,12 @@ AS_DATA = {"session": "session_value", "subject": "subject_value"}
 # kinds.
 DERIVED_FORMS: dict[str, Any] = {
     "tags_as_data over a source": lambda job: DerivedSource(
-        _origin(), tags_as_data=AS_DATA, source_id="copied"
+        _origin(), tags_as_data=AS_DATA, label="copied", source_id="copied"
     ),
     "tags_as_data, reversed mapping": lambda job: DerivedSource(
         _origin(),
         tags_as_data=dict(reversed(list(AS_DATA.items()))),
+        label="copied",
         source_id="copied",
     ),
     "plain over the function node": lambda job: job.nodes["total"].as_source(),
@@ -304,7 +307,10 @@ def test_derived_source_from_config_warns(tmp_path: Any) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         config = DerivedSource(
-            _csv_origin(tmp_path), tags_as_data=AS_DATA, source_id="copied"
+            _csv_origin(tmp_path),
+            tags_as_data=AS_DATA,
+            label="copied",
+            source_id="copied",
         ).to_config()
     reset_provisional_use_warnings()
     with warnings.catch_warnings(record=True) as caught:
@@ -325,7 +331,10 @@ def test_a_loaded_job_reading_a_derived_source_warns(tmp_path: Any) -> None:
         job = PipelineJob(name="over_derived", database=InMemoryArrowDatabase())
         with job:
             derived = DerivedSource(
-                _csv_origin(tmp_path), tags_as_data=AS_DATA, source_id="copied"
+                _csv_origin(tmp_path),
+                tags_as_data=AS_DATA,
+                label="copied",
+                source_id="copied",
             )
             _ = derived.select_data_columns(["age", "subject_value"], label="picked")
         path = tmp_path / "job.json"
@@ -466,7 +475,10 @@ def _consumer_job(tmp_path: Any, build: Any) -> Any:
         derived = build(_ran_job()) if build is not None else None
         if derived is None:
             derived = DerivedSource(
-                _csv_origin(tmp_path), tags_as_data=AS_DATA, source_id="copied"
+                _csv_origin(tmp_path),
+                tags_as_data=AS_DATA,
+                label="copied",
+                source_id="copied",
             )
         job = PipelineJob(name="consumer", database=InMemoryArrowDatabase())
         with job:

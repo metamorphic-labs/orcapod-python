@@ -75,13 +75,13 @@ _SCRIPT = textwrap.dedent(
             tag_columns=["id"],
             tag_only_columns=True,
             data_schema={"id": int, "p": cls},
-            source_id="s1",
+            source_id="s1", label="s1",
         )
         s2 = DictSource(
             [{"id": 1, "r": 5}, {"id": 2, "r": 6}],
             tag_columns=["id"],
             tag_only_columns=True,
-            source_id="s2",
+            source_id="s2", label="s2",
         )
         return s1, s2
 
@@ -273,7 +273,7 @@ _NULLABLE_SCRIPT = textwrap.dedent(
             tag_columns=["id"],
             tag_only_columns=True,
             data_schema={"id": int, "p": cls | None},
-            source_id="s",
+            source_id="s", label="s",
         )
 
 
@@ -467,7 +467,7 @@ _PRECISE_SCRIPT = textwrap.dedent(
             table.select(columns),
             tag_columns=tags,
             tag_only_columns=tag_only,
-            source_id="s",
+            source_id="s", label="s",
         )
 
 

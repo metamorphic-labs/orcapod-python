@@ -55,18 +55,21 @@ def build_job(store_root: Path) -> Any:
         data=[{"k": k, "x": v} for k, v in ARRAYS.items()],
         tag_columns=["k"],
         source_id="arrays",
+        label="arrays",
         tag_only_columns=True,
     )
     ints = DictSource(
         data=[{"k": k, "n": i} for i, k in enumerate(ARRAYS)],
         tag_columns=["k"],
         source_id="ints",
+        label="ints",
         tag_only_columns=True,
     )
     mixed = DictSource(
         data=[{"k": k, "x": v, "n": i} for i, (k, v) in enumerate(ARRAYS.items())],
         tag_columns=["k"],
         source_id="mixed",
+        label="mixed",
         tag_only_columns=True,
     )
     job = PipelineJob(name="v02", database=DeltaTableDatabase(base_path=store_root))

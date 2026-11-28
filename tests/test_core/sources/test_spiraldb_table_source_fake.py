@@ -172,8 +172,12 @@ class TestWorkshopPath:
         job = PipelineJob(name="workshop", database=DeltaTableDatabase(store))
         with job:
             joined = Join()(
-                SpiralDBTableSource(_PROJECT, "session", tag_only_columns=True),
-                SpiralDBTableSource(_PROJECT, "experiment", tag_only_columns=True),
+                SpiralDBTableSource(
+                    _PROJECT, "session", tag_only_columns=True, label="session"
+                ),
+                SpiralDBTableSource(
+                    _PROJECT, "experiment", tag_only_columns=True, label="experiment"
+                ),
                 label="joined",
             )
             trials = SelectDataColumns(["correct_trials", "total_trials"])(
@@ -318,7 +322,11 @@ class TestSourceId:
         # nullability record, because key fields are hashed as non-nullable.
         """An unrecorded table reads all-optional, with its pinned hashes."""
         source = SpiralDBTableSource(
-            "edi-sample-a", "unrecorded", source_id="subject", tag_only_columns=True
+            "edi-sample-a",
+            "unrecorded",
+            label="subject",
+            source_id="subject",
+            tag_only_columns=True,
         )
         assert source.output_schema() == (
             Schema({"subject_id": str | None}),
@@ -348,7 +356,11 @@ class TestSourceId:
         # hashes are those of the table as written.
         """A recorded table with a given source id keeps its pinned hashes."""
         source = SpiralDBTableSource(
-            "edi-sample-a", "subject", source_id="subject", tag_only_columns=True
+            "edi-sample-a",
+            "subject",
+            label="subject",
+            source_id="subject",
+            tag_only_columns=True,
         )
         # The content hash and the token moved once for ITL-1425 (the source id gained
         # its kind part, and the class name left the identity).
@@ -545,8 +557,12 @@ class TestNonNullableColumns:
         job = PipelineJob(name="strict", database=DeltaTableDatabase(store))
         with job:
             joined = Join()(
-                SpiralDBTableSource(_PROJECT, "session", tag_only_columns=True),
-                SpiralDBTableSource(_PROJECT, "unit", tag_only_columns=True),
+                SpiralDBTableSource(
+                    _PROJECT, "session", tag_only_columns=True, label="session"
+                ),
+                SpiralDBTableSource(
+                    _PROJECT, "unit", tag_only_columns=True, label="unit"
+                ),
                 label="joined",
             )
             trials = SelectDataColumns(["total_trials", "weight"])(

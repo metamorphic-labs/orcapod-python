@@ -62,7 +62,11 @@ def _source(column: str, tag_nullable: bool, data_nullable: bool) -> ArrowTableS
     )
     table = pa.table({"id": [0, 1], column: [1, 2]}, schema=schema)
     return ArrowTableSource(
-        table, tag_columns=["id"], source_id=f"src_{column}", tag_only_columns=True
+        table,
+        tag_columns=["id"],
+        label=f"src_{column}",
+        source_id=f"src_{column}",
+        tag_only_columns=True,
     )
 
 
@@ -348,6 +352,7 @@ def test_a_store_holding_only_other_runs_rows_gives_an_empty_result(
                 ),
             ),
             tag_columns=["id"],
+            label="other_a",
             source_id="other_a",
             tag_only_columns=True,
         )
@@ -416,7 +421,11 @@ def _run_empty_join(store: ArrowDatabaseProtocol) -> PipelineJob:
         )
         table = pa.table({"id": ids, column: [1] * len(ids)}, schema=schema)
         return ArrowTableSource(
-            table, tag_columns=["id"], source_id=source_id, tag_only_columns=True
+            table,
+            tag_columns=["id"],
+            label=source_id,
+            source_id=source_id,
+            tag_only_columns=True,
         )
 
     job = PipelineJob(name=JOB_NAME, database=store)

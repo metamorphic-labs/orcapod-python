@@ -35,7 +35,11 @@ if TYPE_CHECKING:
 
     import pyarrow as pa
 
-    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.protocols.core_protocols import (
+        DataProtocol,
+        StreamProtocol,
+        TagProtocol,
+    )
 
 
 class SourceProxy(RootSource):
@@ -94,6 +98,19 @@ class SourceProxy(RootSource):
     def delegate(self) -> SourceProtocol | None:
         """The bound live source, or ``None`` if no source has been bound."""
         return self._delegate
+
+    @property
+    def live_source_inputs(self) -> tuple[StreamProtocol, ...]:
+        """A bound proxy reads its delegate live."""
+        return () if self._delegate is None else (self._delegate,)
+
+    @property
+    @override
+    def _resolved_key_columns(self) -> tuple[str, ...] | None:
+        """The bound source's key columns, or ``None`` while unbound."""
+        if isinstance(self._delegate, RootSource):
+            return self._delegate._resolved_key_columns
+        return None
 
     @property
     def is_bound(self) -> bool:

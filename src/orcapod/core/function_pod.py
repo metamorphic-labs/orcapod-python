@@ -37,7 +37,11 @@ from orcapod.core.streams.view import (
     StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.errors import OrcapodDatabaseError, TypeIdentityError
+from orcapod.errors import (
+    InconsistentSourceError,
+    OrcapodDatabaseError,
+    TypeIdentityError,
+)
 from orcapod.utils.database_errors import keep_database_error, note_callback_failure
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
@@ -851,7 +855,12 @@ class _FunctionPodBase(TraceableBase):
             # The select is Orcapod's own step: the data-tags it turns into
             # plain tags are not reported (ITL-1023).
             with materialization_diagnostic_off():
-                input_stream = SelectDataColumns(columns=kept)(input_stream)
+                try:
+                    input_stream = SelectDataColumns(columns=kept)(input_stream)
+                except InconsistentSourceError as exc:
+                    raise InconsistentSourceError(
+                        f"While capturing step {label or self.label!r}: {exc}"
+                    ) from exc
         if fall_through_pod is not None and data_tags:
             return FallThroughPod(fall_through_pod, data_tags).process(
                 input_stream, label=label
@@ -976,7 +985,7 @@ class FunctionPod(_FunctionPodBase):
             input_stream=input_stream,
             label=label,
         )
-        return output_stream
+        return output_stream._mark_recorded(self.tracker_manager)
 
     def __call__(
         self,
@@ -2190,7 +2199,7 @@ class FallThroughPod(WrappedFunctionPod):
         )
         return FunctionPodStream(
             function_pod=self, input_stream=input_stream, label=label
-        )
+        )._mark_recorded(self.tracker_manager)
 
     def process_data(
         self,

@@ -207,6 +207,7 @@ def make_source(
         table,
         tag_columns=list(arrangement.tag_order),
         source_id=source_id or spec.source_id,
+        label=source_id or spec.source_id,
         tag_only_columns=tag_only,
     )
 

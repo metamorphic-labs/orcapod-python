@@ -216,6 +216,7 @@ def make_sources(scenario: str, input_order: str = "shuffled") -> Sources:
             table,
             tag_columns=list(TAG_COLUMNS),
             source_id=name,
+            label=name,
             record_id_columns=record_id_column,
             tag_only_columns=True,
         )

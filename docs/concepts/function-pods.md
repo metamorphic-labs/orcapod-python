@@ -428,7 +428,7 @@ db = InMemoryArrowDatabase()
 
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -477,7 +477,7 @@ mice.append({"subject_id": "mouse_03", "weight": 27.8, "height": 0.11})
 
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -549,7 +549,7 @@ from orcapod.pipeline import AsyncPipelineOrchestrator
 
 job = PipelineJob(name="bmi_async", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run(orchestrator=AsyncPipelineOrchestrator())
@@ -588,7 +588,7 @@ import asyncio
 
 job = PipelineJob(name="bmi_awaited", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     compute_bmi.pod(source, label="bmi")
 
 
@@ -664,7 +664,7 @@ Running the same job again computes nothing new, and the summary says so:
 ```python
 job = PipelineJob(name="bmi_demo", database=db)
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     compute_bmi.pod(source, label="bmi")
 
 summary = job.run()
@@ -686,7 +686,7 @@ def careless_bmi(weight: float, height: float) -> float:
 
 job = PipelineJob(name="bmi_typo", database=InMemoryArrowDatabase())
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     careless_bmi.pod(source, label="bmi")
 
 summary = job.run()
@@ -729,7 +729,7 @@ more_mice = mice + [{"subject_id": "mouse_04", "weight": 30.0, "height": 0.12}]
 
 load_job = PipelineJob(name="bmi_demo", database=db)
 with load_job:
-    source = DictSource(data=more_mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    source = DictSource(data=more_mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     compute_bmi.pod(source, label="bmi")
 
 print(load_job.nodes["bmi"].as_table().num_rows)  # not run in this process: empty
@@ -830,7 +830,7 @@ from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
     job = PipelineJob(name="bmi_typo_fast", database=InMemoryArrowDatabase())
     with job:
-        source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+        source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
         careless_bmi.pod(source, label="bmi")
     try:
         job.run(orchestrator=orchestrator(error_policy="fail_fast"))
@@ -1036,7 +1036,7 @@ def notify(ctx, weight: float, height: float) -> None:
 
 notify_job = PipelineJob(name="notify_demo", database=InMemoryArrowDatabase())
 with notify_job:
-    mice_source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    mice_source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     SideEffectPod(notify)(mice_source, label="notify")
 
 notify_job.run()
@@ -1088,7 +1088,7 @@ workdir = Path(tempfile.mkdtemp())  # any directory you keep
 
 job = PipelineJob(name="bmi_demo", database=DeltaTableDatabase(workdir / "store"))
 with job:
-    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    source = DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
     compute_bmi.pod(source, label="bmi")
 
 job.run()
@@ -1114,7 +1114,7 @@ the results stored for those inputs. Nodes below a source that is not available 
 `node.run(load_only=True)` does the same for one node and what it depends on.
 
 ```python
-loaded.bind(sources={"mice": DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")})
+loaded.bind(sources={"mice": DictSource(data=mice, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")})
 summary = loaded.run(load_only=True)
 print(loaded.nodes["bmi"].as_table().num_rows, summary.nodes["bmi"].not_stored)
 # 3 0

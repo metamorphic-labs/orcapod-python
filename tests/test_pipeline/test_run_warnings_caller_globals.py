@@ -237,10 +237,10 @@ def _restricted_job() -> PipelineJob:
     job = PipelineJob(name="restricted", database=InMemoryArrowDatabase())
     with job:
         events = SpiralDBTableSource(
-            _PROJECT, "event", source_id="events", tag_only_columns=True
+            _PROJECT, "event", label="events", source_id="events", tag_only_columns=True
         ).where(subject_id="m1")
         trials = SpiralDBTableSource(
-            _PROJECT, "trial", source_id="trials", tag_only_columns=True
+            _PROJECT, "trial", label="trials", source_id="trials", tag_only_columns=True
         ).where(subject_id="m2")
         _ = events.group_by(["subject_id"], label="by_subject")
         _ = trials.batch(2, label="pairs")
@@ -257,6 +257,7 @@ def _unchecked_job() -> PipelineJob:
             tag_columns=["k"],
             tag_only_columns=True,
             source_id="left",
+            label="left",
         )
         right = _FailingCheck(
             OSError("disk gone"),
@@ -264,6 +265,7 @@ def _unchecked_job() -> PipelineJob:
             tag_columns=["k"],
             tag_only_columns=True,
             source_id="right",
+            label="right",
         )
         _ = double.pod(left, label="doubled")
         _ = right.drop_nulls(label="present")
@@ -275,7 +277,11 @@ def _failing_job() -> PipelineJob:
     job = PipelineJob(name="failing", database=InMemoryArrowDatabase())
     with job:
         source = DictSource(
-            data=_rows(4), tag_columns=["k"], tag_only_columns=True, source_id="rows"
+            data=_rows(4),
+            tag_columns=["k"],
+            tag_only_columns=True,
+            label="rows",
+            source_id="rows",
         )
         evens: Any = even_only.pod(source, label="evens")
         _ = never.pod(source, label="broken")

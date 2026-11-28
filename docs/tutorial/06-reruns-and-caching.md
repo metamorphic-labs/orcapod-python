@@ -25,7 +25,7 @@ calls = []
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
     tag_columns=["subject_id", "session"], tag_only_columns=True,
-    source_id="sessions",
+    source_id="sessions", label="sessions",
 )
 
 
@@ -34,7 +34,7 @@ def run(pod, units_file="units.csv"):
     units = CSVSource(
         str(data_dir / units_file),
         tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
-        source_id="units",
+        source_id="units", label="units",
     )
     job = PipelineJob(name="workshop", database=database)
     with job:
@@ -192,12 +192,12 @@ content. Every stream carries two of them, a pipeline hash and a content hash:
 units = CSVSource(
     str(data_dir / "units.csv"),
     tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
-    source_id="units",
+    source_id="units", label="units",
 )
 units_more = CSVSource(
     str(data_dir / "units_more.csv"),
     tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
-    source_id="units",
+    source_id="units", label="units",
 )
 
 print(units.pipeline_hash() == units_more.pipeline_hash())

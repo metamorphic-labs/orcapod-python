@@ -65,6 +65,7 @@ def _source(source_id: str = "s", data_prefix: str = "") -> ArrowTableSource:
         tag_columns=["k", "g", "tb"],
         tag_only_columns=True,
         source_id=source_id,
+        label=source_id,
     )
 
 

@@ -738,6 +738,7 @@ def _delta_source(role: str, order: int, layout: str, tmp: Path) -> Any:
         path,
         tag_columns=list(MAIN.tag_orders()[order]),
         tag_only_columns=tag_only(MAIN, role),
+        label="delta",
         source_id="delta",
     )
 
@@ -769,6 +770,7 @@ def _sqlite_source(role: str, order: int, layout: str, tmp: Path) -> Any:
         "m",
         tag_columns=list(MAIN.tag_orders()[order]),
         tag_only_columns=tag_only(MAIN, role),
+        label="sqlite",
         source_id="sqlite",
     )
 
@@ -791,6 +793,7 @@ def _derived_source(role: str, order: int, layout: str, _tmp: Path) -> Any:
     return DerivedSource(
         source(MAIN, role, order, layout),
         tags_as_data={"t1": "x1", "t3": "x3"},
+        label="with_tags_as_data",
         source_id="with_tags_as_data",
     )
 
@@ -945,7 +948,10 @@ def test_the_order_of_tags_as_data_items_changes_nothing(role: str) -> None:
     results = {}
     for order in itertools.permutations(items):
         derived = DerivedSource(
-            origin, tags_as_data=dict(order), source_id="with_tags_as_data"
+            origin,
+            tags_as_data=dict(order),
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         results[repr(order)] = {
             **identity(derived),
@@ -1254,10 +1260,14 @@ def test_explicit_suffixes_remain_addressable_in_every_definition_order(
         job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
         with job:
             for name, value, label in order:
-                source = ListSource("reading", [value], source_id=name)
+                role = "step_2" if name == "step_1" else name
+                source = ListSource("reading", [value], label=role, source_id=name)
                 _ = _double_reading.pod(source, label=label)
         summary = job.run()
-        assert set(summary.nodes) == {"step_1", "step_2", "step_3"}
+        generated = (
+            {"step_3", "step_4"} if first_source == "step_1" else {"step_2", "step_3"}
+        )
+        assert set(summary.nodes) == {"step_1", *generated}
         assert job.nodes["step_1"].as_table()["doubled"].to_pylist() == [6]
         results["".join(name for name, _, _ in order)] = {
             "labels": list(job.nodes),
@@ -1275,7 +1285,7 @@ def test_identical_invocations_keep_the_smallest_explicit_label(
 ) -> None:
     """Invocations deduplicate whichever label was recorded first."""
     for order in (labels, labels[::-1]):
-        source = ListSource("reading", [2], source_id="readings")
+        source = ListSource("reading", [2], label="readings", source_id="readings")
         job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
         with job:
             for label in order:
@@ -1298,7 +1308,7 @@ def _restricted_job_run(root: Path, names: Sequence[str]) -> None:
 
         bindings: dict[str, StreamProtocol] = {
             name: SpiralDBTableSource(
-                "synthetic", name, source_id=name, tag_only_columns=True
+                "synthetic", name, label=name, source_id=name, tag_only_columns=True
             ).where(subject="a")
             for name in names
         }

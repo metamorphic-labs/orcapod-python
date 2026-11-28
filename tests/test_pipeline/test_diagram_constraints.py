@@ -45,6 +45,7 @@ def _source(name: str, tags: list[str], *data: str) -> DictSource:
         [{**dict.fromkeys(tags, f"t{i}"), **dict.fromkeys(data, i)} for i in range(3)],
         tag_columns=tags,
         tag_only_columns=True,
+        label=name,
         source_id=name,
     )
 

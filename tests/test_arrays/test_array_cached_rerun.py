@@ -46,12 +46,14 @@ SCRIPT = textwrap.dedent(
         tag_columns=["k"],
         tag_only_columns=True,
         source_id="every",
+        label="every",
     )
     numeric = DictSource(
         data=[{"k": k, "x": ARRAYS[k]} for k in NUMERIC],
         tag_columns=["k"],
         tag_only_columns=True,
         source_id="numeric",
+        label="numeric",
     )
     job = PipelineJob(name="rerun", database=DeltaTableDatabase(base_path=store))
     with job:

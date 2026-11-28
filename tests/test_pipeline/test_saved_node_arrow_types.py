@@ -71,6 +71,7 @@ def _source(arrow_type: pa.DataType, first: list[Any], second: list[Any]) -> Any
         pa.Table.from_arrays(list(columns.values()), schema=schema),
         tag_columns=["k1", "k2"],
         tag_only_columns=True,
+        label="typed",
         source_id="typed",
     )
 
@@ -176,6 +177,7 @@ def _decimal_source(arrangement: str) -> ArrowTableSource:
         table,
         tag_columns=["t32", "t64"],
         tag_only_columns=True,
+        label="decimals",
         source_id="decimals",
     )
 

@@ -99,6 +99,7 @@ def _experiment(source_id: str = "experiment", **kwargs) -> ArrowTableSource:
         _experiment_table(**kwargs),
         tag_columns=EXPERIMENT_KEYS,
         tag_only_columns=True,
+        label=source_id,
         source_id=source_id,
     )
 
@@ -109,6 +110,7 @@ def _session() -> ArrowTableSource:
         _session_table(),
         tag_columns=SESSION_KEYS,
         tag_only_columns=True,
+        label="session",
         source_id="session",
     )
 
@@ -138,7 +140,10 @@ def name_length(name_copy: str) -> int:
 class TestColumns:
     def test_is_a_root_source_with_no_upstreams(self):
         derived = DerivedSource(
-            _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment(),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         assert isinstance(derived, RootSource)
         assert derived.upstreams == ()
@@ -147,7 +152,10 @@ class TestColumns:
     def test_tags_are_the_origins_and_copy_is_appended_to_data(self):
         origin = _experiment()
         derived = DerivedSource(
-            origin, tags_as_data=COPY, source_id="with_tags_as_data"
+            origin,
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         assert derived.keys() == (
             tuple(EXPERIMENT_KEYS),
@@ -162,14 +170,20 @@ class TestColumns:
 
     def test_copy_values_equal_the_tag_values(self):
         table = DerivedSource(
-            _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment(),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         ).as_table()
         assert table["session_start"].equals(table["session_start_datetime"])
         assert table.num_rows == 5
 
     def test_iter_data_carries_the_value_in_tag_and_data(self):
         derived = DerivedSource(
-            _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment(),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         pairs = list(derived.iter_data())
         assert len(pairs) == 5
@@ -180,6 +194,7 @@ class TestColumns:
         derived = DerivedSource(
             _experiment(),
             tags_as_data={"experiment_index": "idx", "subject_id": "subject"},
+            label="with_tags_as_data",
             source_id="with_tags_as_data",
         )
         assert derived.keys()[1] == (
@@ -201,7 +216,10 @@ class TestColumns:
             origin.as_table(all_info=True),
         )
         DerivedSource(
-            origin, tags_as_data=COPY, source_id="with_tags_as_data"
+            origin,
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         ).as_table()
         assert origin.content_hash() == before[0]
         assert origin.pipeline_hash() == before[1]
@@ -213,7 +231,10 @@ class TestArrowTypesPreserved:
     def test_not_null_tag_gives_not_null_copy_of_same_type(self):
         origin = _experiment()
         table = DerivedSource(
-            origin, tags_as_data=COPY, source_id="with_tags_as_data"
+            origin,
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         ).as_table()
         tag_field = origin.as_table().schema.field("session_start_datetime")
         copy_field = table.schema.field("session_start")
@@ -224,6 +245,7 @@ class TestArrowTypesPreserved:
         derived = DerivedSource(
             _experiment(nullable_keys=True),
             tags_as_data=COPY,
+            label="with_tags_as_data",
             source_id="with_tags_as_data",
         )
         assert derived.as_table().schema.field("session_start").nullable is True
@@ -233,6 +255,7 @@ class TestArrowTypesPreserved:
         derived = DerivedSource(
             _experiment(),
             tags_as_data={"experiment_index": "idx"},
+            label="with_tags_as_data",
             source_id="with_tags_as_data",
         )
         assert derived.as_table().schema.field("idx").type == pa.uint32()
@@ -245,10 +268,14 @@ class TestArrowTypesPreserved:
             ],
             tag_columns=["file"],
             tag_only_columns=True,
+            label="files",
             source_id="files",
         )
         derived = DerivedSource(
-            origin, tags_as_data={"file": "file_path"}, source_id="with_tags_as_data"
+            origin,
+            tags_as_data={"file": "file_path"},
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         table = derived.as_table()
         assert (
@@ -272,10 +299,14 @@ class TestArrowTypesPreserved:
             pa.table({"k": [1, 2], "x": [10, 20]}, schema=schema),
             tag_columns=["k"],
             tag_only_columns=True,
+            label="meta",
             source_id="meta",
         )
         table = DerivedSource(
-            origin, tags_as_data={"k": "k_copy"}, source_id="with_tags_as_data"
+            origin,
+            tags_as_data={"k": "k_copy"},
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         ).as_table()
         copy_field = table.schema.field("k_copy")
         assert copy_field.type == pa.int8()
@@ -304,13 +335,17 @@ class TestProvenance:
             DerivedSource(Untouchable(), tags_as_data=COPY)  # pyright: ignore[reportArgumentType]
 
     def test_config_key_names_the_class(self):
-        derived = DerivedSource(_experiment(), tags_as_data=COPY, source_id="exp")
+        derived = DerivedSource(
+            _experiment(), tags_as_data=COPY, label="exp", source_id="exp"
+        )
         assert derived.to_config()["source_type"] == DerivedSource.SOURCE_KIND
         assert DerivedSource.SOURCE_KIND == "derived"
 
     @pytest.mark.parametrize("given", ["exp_t0", "experiment:with_start", "a.b"])
     def test_source_id_is_used_as_is_in_values_and_tokens(self, given):
-        derived = DerivedSource(_experiment(), tags_as_data=COPY, source_id=given)
+        derived = DerivedSource(
+            _experiment(), tags_as_data=COPY, label=given, source_id=given
+        )
         full = f"derived_v1:{given}"
         assert derived.source_id == full
         table = derived.as_table(all_info=True)
@@ -321,7 +356,7 @@ class TestProvenance:
 
     def test_several_source_ids_give_several_sources(self):
         sources = [
-            DerivedSource(_experiment(), tags_as_data=COPY, source_id=name)
+            DerivedSource(_experiment(), tags_as_data=COPY, label=name, source_id=name)
             for name in ("first", "second", "third")
         ]
         assert len({s.content_hash() for s in sources}) == 3
@@ -329,11 +364,14 @@ class TestProvenance:
 
     def test_record_id_columns_change_the_identity_not_the_source_id(self):
         origin = _experiment()
-        by_position = DerivedSource(origin, tags_as_data=COPY, source_id="exp")
+        by_position = DerivedSource(
+            origin, tags_as_data=COPY, label="exp", source_id="exp"
+        )
         by_value = DerivedSource(
             origin,
             tags_as_data=COPY,
             record_id_columns="experiment_start_timestamp",
+            label="exp",
             source_id="exp",
         )
         assert by_value.source_id == by_position.source_id == "derived_v1:exp"
@@ -341,7 +379,9 @@ class TestProvenance:
         assert by_value.pipeline_hash() == by_position.pipeline_hash()
 
     def test_explicit_source_id_replaces_the_default(self):
-        derived = DerivedSource(_experiment(), tags_as_data=COPY, source_id="exp_t0")
+        derived = DerivedSource(
+            _experiment(), tags_as_data=COPY, label="exp_t0", source_id="exp_t0"
+        )
         assert derived.source_id == "derived_v1:exp_t0"
         table = derived.as_table(all_info=True)
         (sid_col,) = _prefixed(table, "_tag_source_id")
@@ -353,7 +393,10 @@ class TestProvenance:
     def test_system_tags_are_its_own(self):
         origin = _experiment()
         derived = DerivedSource(
-            origin, tags_as_data=COPY, source_id="with_tags_as_data"
+            origin,
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         o_table = origin.as_table(all_info=True)
         d_table = derived.as_table(all_info=True)
@@ -368,7 +411,10 @@ class TestProvenance:
 
     def test_every_data_column_has_a_token_naming_the_derived_source(self):
         derived = DerivedSource(
-            _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment(),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         table = derived.as_table(all_info=True)
         assert set(_prefixed(table, "_source_")) == {
@@ -389,6 +435,7 @@ class TestProvenance:
         derived = DerivedSource(
             _experiment(),
             tags_as_data=COPY,
+            label="exp",
             source_id="exp",
             record_id_columns="experiment_start_timestamp",
         )
@@ -406,9 +453,15 @@ class TestProvenance:
             raw["session_start_datetime"],
         )
         recipe = ArrowTableSource(
-            raw, tag_columns=EXPERIMENT_KEYS, tag_only_columns=True, source_id="exp"
+            raw,
+            tag_columns=EXPERIMENT_KEYS,
+            tag_only_columns=True,
+            label="exp",
+            source_id="exp",
         )
-        derived = DerivedSource(_experiment(), tags_as_data=COPY, source_id="exp")
+        derived = DerivedSource(
+            _experiment(), tags_as_data=COPY, label="exp", source_id="exp"
+        )
         r_table = recipe.as_table(columns={"source": True, "system_tags": True})
         d_table = derived.as_table(columns={"source": True, "system_tags": True})
         assert d_table.column_names == r_table.column_names
@@ -429,26 +482,37 @@ class TestProvenance:
 class TestIdentity:
     def test_pipeline_hash_is_schema_only(self):
         a = DerivedSource(
-            _experiment("a"), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment("a"),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         b = DerivedSource(
-            _experiment("b"), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment("b"),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         assert a.pipeline_hash() == b.pipeline_hash()
         assert a.pipeline_hash() != _experiment("a").pipeline_hash()
 
     def test_content_hash_follows_source_id_and_mapping(self):
         """A given source id is an address: the origin enters only through the schema."""
-        base = DerivedSource(_experiment(), tags_as_data=COPY, source_id="exp")
+        base = DerivedSource(
+            _experiment(), tags_as_data=COPY, label="exp", source_id="exp"
+        )
         same_name_other_rows = DerivedSource(
-            _experiment("other"), tags_as_data=COPY, source_id="exp"
+            _experiment("other"), tags_as_data=COPY, label="exp", source_id="exp"
         )
         assert same_name_other_rows.content_hash() == base.content_hash()
-        renamed = DerivedSource(_experiment(), tags_as_data=COPY, source_id="exp2")
+        renamed = DerivedSource(
+            _experiment(), tags_as_data=COPY, label="exp2", source_id="exp2"
+        )
         assert renamed.content_hash() != base.content_hash()
         remapped = DerivedSource(
             _experiment(),
             tags_as_data={"session_start_datetime": "t0"},
+            label="exp",
             source_id="exp",
         )
         assert remapped.content_hash() != base.content_hash()
@@ -457,7 +521,10 @@ class TestIdentity:
     def test_content_hash_is_the_root_source_rule_plus_the_mapping(self):
         """The identity structure is the root source rule followed by the sorted mapping."""
         derived = DerivedSource(
-            _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment(),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         # identity_structure is the non-public entry point this test is about: the
         # structure is the root source rule followed by the sorted mapping items.
@@ -489,10 +556,18 @@ class TestIdentity:
             }
         )
         base = ArrowTableSource(
-            table, tag_columns=["a", "b"], tag_only_columns=True, source_id="two_tags"
+            table,
+            tag_columns=["a", "b"],
+            tag_only_columns=True,
+            label="two_tags",
+            source_id="two_tags",
         )
-        from_a = DerivedSource(base, source_id="same", tags_as_data={"a": "k"})
-        from_b = DerivedSource(base, source_id="same", tags_as_data={"b": "k"})
+        from_a = DerivedSource(
+            base, label="same", source_id="same", tags_as_data={"a": "k"}
+        )
+        from_b = DerivedSource(
+            base, label="same", source_id="same", tags_as_data={"b": "k"}
+        )
         assert from_a.output_schema() == from_b.output_schema()
         assert from_a.source_id == from_b.source_id
         assert from_a.pipeline_hash() == from_b.pipeline_hash()
@@ -513,11 +588,13 @@ class TestIdentity:
         """The mapping enters the identity sorted, so its order does not matter."""
         a = DerivedSource(
             _experiment(),
+            label="s",
             source_id="s",
             tags_as_data={"subject_id": "p", "experiment_index": "q"},
         )
         b = DerivedSource(
             _experiment(),
+            label="s",
             source_id="s",
             tags_as_data={"experiment_index": "q", "subject_id": "p"},
         )
@@ -532,7 +609,10 @@ class TestIdentity:
 class TestDownstream:
     def test_elapsed_time_pod_then_join_with_session(self):
         derived = DerivedSource(
-            _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment(),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         onsets = onset_s.pod(
             derived.select_data_columns(["session_start", "experiment_start_timestamp"])
@@ -561,7 +641,10 @@ class TestDownstream:
     def test_join_with_the_original_needs_distinct_data_columns(self):
         origin = _experiment()
         derived = DerivedSource(
-            origin, tags_as_data=COPY, source_id="with_tags_as_data"
+            origin,
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         with pytest.raises(InputValidationError):
             Join()(derived, origin)
@@ -570,7 +653,10 @@ class TestDownstream:
 
     def test_copy_is_plain_data_downstream(self):
         derived = DerivedSource(
-            _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment(),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         renamed = derived.map_data({"session_start": "t0"})
         assert renamed.keys()[0] == tuple(EXPERIMENT_KEYS)
@@ -588,6 +674,7 @@ class TestValidation:
             DerivedSource(
                 _experiment(),
                 tags_as_data={"no_such_tag": "x"},
+                label="with_tags_as_data",
                 source_id="with_tags_as_data",
             )
 
@@ -596,6 +683,7 @@ class TestValidation:
             DerivedSource(
                 _experiment(),
                 tags_as_data={"task_id": "x"},
+                label="with_tags_as_data",
                 source_id="with_tags_as_data",
             )
 
@@ -604,6 +692,7 @@ class TestValidation:
             DerivedSource(
                 _experiment(),
                 tags_as_data={"session_start_datetime": "subject_id"},
+                label="with_tags_as_data",
                 source_id="with_tags_as_data",
             )
 
@@ -612,6 +701,7 @@ class TestValidation:
             DerivedSource(
                 _experiment(),
                 tags_as_data={"session_start_datetime": "task_id"},
+                label="with_tags_as_data",
                 source_id="with_tags_as_data",
             )
 
@@ -620,6 +710,7 @@ class TestValidation:
             DerivedSource(
                 _experiment(),
                 tags_as_data={"session_start_datetime": "x", "subject_id": "x"},
+                label="with_tags_as_data",
                 source_id="with_tags_as_data",
             )
 
@@ -628,6 +719,7 @@ class TestValidation:
             DerivedSource(
                 _experiment(),
                 tags_as_data={"session_start_datetime": "_hidden"},
+                label="with_tags_as_data",
                 source_id="with_tags_as_data",
             )
 
@@ -637,7 +729,12 @@ class TestValidation:
 
     def test_empty_mapping_re_roots_a_source_unchanged(self):
         origin = _experiment()
-        derived = DerivedSource(origin, tags_as_data={}, source_id="with_tags_as_data")
+        derived = DerivedSource(
+            origin,
+            tags_as_data={},
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
+        )
         assert derived.keys() == origin.keys()
         assert derived.as_table().equals(origin.as_table())
         assert derived.source_id == "derived_v1:with_tags_as_data"
@@ -675,6 +772,7 @@ def _probe_job(db_path: str, name: str = "probes") -> PipelineJob:
         derived = DerivedSource(
             SQLiteTableSource(db_path, "probe", tag_only_columns=True),
             tags_as_data={"name": "name_copy"},
+            label="with_tags_as_data",
             source_id="with_tags_as_data",
         )
         name_length.pod(derived.select_data_columns(["name_copy"]), label="len")
@@ -697,15 +795,18 @@ class TestPipelineJob:
         with job:
             probe = SQLiteTableSource(db_path, "probe", tag_only_columns=True)
             derived = DerivedSource(
-                probe, tags_as_data={"name": "name_copy"}, source_id="with_tags_as_data"
+                probe,
+                tags_as_data={"name": "name_copy"},
+                label="with_tags_as_data",
+                source_id="with_tags_as_data",
             )
             lengths = name_length.pod(
                 derived.select_data_columns(["name_copy"]), label="len"
             )
             Join()(lengths, probe, label="back")
         job.run()
-        # A slot is named by its source's name, the id without the kind part.
-        assert set(job.sources) == {f"{db_path}:main.probe", derived.source_name}
+        # A slot is named by the source label.
+        assert set(job.sources) == {probe.label, derived.label}
         assert job.nodes["back"].as_table().num_rows == 3
 
     def test_saved_job_reloads_the_derived_source(self, tmp_path):
@@ -734,6 +835,7 @@ class TestPipelineJob:
         derived = DerivedSource(
             SQLiteTableSource(db_path, "probe", tag_only_columns=True),
             tags_as_data={"name": "name_copy"},
+            label="probe_named",
             source_id="probe_named",
             record_id_columns="name",
         )
@@ -751,7 +853,10 @@ class TestPipelineJob:
         job = PipelineJob(name="memory", database=InMemoryArrowDatabase())
         with job:
             derived = DerivedSource(
-                _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+                _experiment(),
+                tags_as_data=COPY,
+                label="with_tags_as_data",
+                source_id="with_tags_as_data",
             )
             onset_s.pod(
                 derived.select_data_columns(
@@ -769,7 +874,10 @@ class TestPipelineJob:
 class TestStore:
     def test_job_store_holds_nothing_for_the_source_and_cached_saves_it(self):
         derived = DerivedSource(
-            _experiment(), tags_as_data=COPY, source_id="with_tags_as_data"
+            _experiment(),
+            tags_as_data=COPY,
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         db = InMemoryArrowDatabase()
         cached = derived.cached(db)
@@ -902,10 +1010,14 @@ class TestZeroRowOrigin:
             tag_columns=["k"],
             tag_only_columns=True,
             data_schema=schema,
+            label="empty",
             source_id="empty",
         )
         derived = DerivedSource(
-            origin, tags_as_data={"k": "k_copy"}, source_id="with_tags_as_data"
+            origin,
+            tags_as_data={"k": "k_copy"},
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         assert derived.keys() == (("k",), ("x", "k_copy"))
         table = derived.as_table(all_info=True)
@@ -935,7 +1047,10 @@ def test_the_order_of_the_mapping_changes_nothing_not_even_the_column_order(
     results = set()
     for order in itertools.permutations(items):
         source = DerivedSource(
-            origin, tags_as_data=dict(order), source_id="with_tags_as_data"
+            origin,
+            tags_as_data=dict(order),
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         tag_keys, data_keys = source.keys()
         assert data_keys[-3:] == ("x3", "y2", "z1")
@@ -964,7 +1079,10 @@ def test_the_exported_config_is_a_copy_in_new_name_order(roles: str) -> None:
     items = (("t1", "z1"), ("t2", "y2"), ("t3", "x3"))
     for order in itertools.permutations(items):
         source = DerivedSource(
-            origin, tags_as_data=dict(order), source_id="with_tags_as_data"
+            origin,
+            tags_as_data=dict(order),
+            label="with_tags_as_data",
+            source_id="with_tags_as_data",
         )
         before = source.keys()
         exported = source.to_config()["tags_as_data"]
@@ -1059,6 +1177,7 @@ class TestRequiredSourceIdConfig:
         derived = DerivedSource(
             SQLiteTableSource(db_path, "probe", tag_only_columns=True),
             tags_as_data=mapping,
+            label="probe_copies",
             source_id="probe_copies",
         )
         config = derived.to_config()
@@ -1073,6 +1192,7 @@ class TestRequiredSourceIdConfig:
         config = DerivedSource(
             SQLiteTableSource(db_path, "probe", tag_only_columns=True),
             tags_as_data=PROBE_COPIES,
+            label="probe_copies",
             source_id="probe_copies",
         ).to_config()
         config["source_name"] = None
@@ -1100,11 +1220,13 @@ def _two_copies_job(db_path: str) -> PipelineJob:
         by_name = DerivedSource(
             SQLiteTableSource(db_path, "probe", tag_only_columns=True),
             tags_as_data={"name": "name_copy"},
+            label="copies_a",
             source_id="copies_a",
         )
         by_probe = DerivedSource(
             SQLiteTableSource(db_path, "probe", tag_only_columns=True),
             tags_as_data={"probe_id": "probe_copy"},
+            label="copies_b",
             source_id="copies_b",
         )
         name_length.pod(by_name.select_data_columns(["name_copy"]), label="len")
@@ -1156,10 +1278,14 @@ class TestLoadRefusesASavedTagsAsDataSourceWithoutASourceId:
             inner = DerivedSource(
                 SQLiteTableSource(db_path, "probe", tag_only_columns=True),
                 tags_as_data={"name": "name_copy"},
+                label="inner",
                 source_id="inner",
             )
             outer = DerivedSource(
-                inner, tags_as_data={"probe_id": "probe_copy"}, source_id="outer"
+                inner,
+                tags_as_data={"probe_id": "probe_copy"},
+                label="outer",
+                source_id="outer",
             )
             name_length.pod(outer.select_data_columns(["name_copy"]), label="len")
         path = tmp_path / "job.json"
@@ -1183,6 +1309,7 @@ class TestLoadRefusesASavedTagsAsDataSourceWithoutASourceId:
             inner = DerivedSource(
                 SQLiteTableSource(db_path, "probe", tag_only_columns=True),
                 tags_as_data={"name": "name_copy"},
+                label="inner",
                 source_id="inner",
             )
             cached = inner.cached(InMemoryArrowDatabase())
@@ -1191,7 +1318,10 @@ class TestLoadRefusesASavedTagsAsDataSourceWithoutASourceId:
                 name_length.pod(top.select_data_columns(["name_copy"]), label="len")
             else:
                 top = DerivedSource(
-                    cached, tags_as_data={"probe_id": "probe_copy"}, source_id="outer"
+                    cached,
+                    tags_as_data={"probe_id": "probe_copy"},
+                    label="outer",
+                    source_id="outer",
                 )
                 name_length.pod(top.select_data_columns(["name_copy"]), label="len")
         path = tmp_path / "job.json"

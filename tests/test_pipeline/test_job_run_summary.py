@@ -107,7 +107,11 @@ def make_job(store: Any, pod: Any, label: str, n_rows: int = 4) -> PipelineJob:
     job = PipelineJob(name="summary_demo", database=store)
     with job:
         source = DictSource(
-            data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
+            data=rows,
+            tag_columns=["k"],
+            tag_only_columns=True,
+            label="rows",
+            source_id="rows",
         )
         pod.pod(source, label=label)
     return job
@@ -294,6 +298,7 @@ def test_equal_inputs_report_the_work_each_source_did(
                 tag_columns=arrangement.tag_order,
                 tag_only_columns=tag_only[roles],
                 source_id=source_id,
+                label=source_id,
             )
             _ = format_reading.pod(source, label=f"reading_{source_id}")
 
@@ -345,7 +350,11 @@ def test_node_with_empty_input_counts_zero_rows(store: Any, orchestrator: Any) -
     job = PipelineJob(name="summary_chain", database=store)
     with job:
         source = DictSource(
-            data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
+            data=rows,
+            tag_columns=["k"],
+            tag_only_columns=True,
+            label="rows",
+            source_id="rows",
         )
         broken = always_fails.pod(source, label="broken")
         plus_one.pod(broken, label="after")

@@ -821,10 +821,14 @@ def test_rejoin_over_job_nodes_with_rows_of_two_data_contexts(
     raw = ArrowTableStream(
         table, tag_columns=["k"], system_tag_columns=["source_id::a", "record_id::a"]
     )
+    from orcapod.core.nodes.source_node import SourceNode
+
+    slot = SourceNode.from_stream(raw, name="input")
     job = PipelineJob(name="rejoin-contexts", database=InMemoryArrowDatabase())
     with job:
-        branch = operators.MapData({"x": "u", "y": "v"})(raw, label="branch")
-        _ = operators.Rejoin()(raw, branch, label="rejoin")
+        branch = operators.MapData({"x": "u", "y": "v"})(slot, label="branch")
+        _ = operators.Rejoin()(slot, branch, label="rejoin")
+    job.bind(sources={"input": raw})
     _ = job.run(orchestrator=SyncPipelineOrchestrator())
     rejoin = job.nodes["rejoin"]
     assert rejoin.as_table().num_rows == 2

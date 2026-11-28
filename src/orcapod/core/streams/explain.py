@@ -14,6 +14,8 @@ whatever order the sources, the inputs or an argument's items were given in.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -91,7 +93,7 @@ def _beneath(
     return "inputs", upstreams
 
 
-_ReadingKey = tuple[str, str, bool, bool, Condition, "int | None"]
+_ReadingKey = tuple[str, str, str, bool, bool, Condition, "int | None"]
 """A source as an explanation tells sources apart: name, kind, whether it says what it
 reads, whether it is bound, and its restriction (two restrictions of one table are two
 readings)."""
@@ -99,6 +101,7 @@ readings)."""
 
 def _reading_key(reading: SourceReading) -> _ReadingKey:
     return (
+        reading.slot_name or "",
         reading.name,
         reading.kind,
         reading.known,
@@ -108,9 +111,10 @@ def _reading_key(reading: SourceReading) -> _ReadingKey:
     )
 
 
-def _sort_key(key: _ReadingKey) -> tuple[str, str, bool, bool, str, int]:
-    name, kind, known, bound, condition, limit = key
+def _sort_key(key: _ReadingKey) -> tuple[str, str, str, bool, bool, str, int]:
+    slot_name, name, kind, known, bound, condition, limit = key
     return (
+        slot_name or name,
         name,
         kind,
         known,
@@ -137,6 +141,7 @@ def _reach(stream: StreamProtocol, memo: dict[int, _Reach]) -> _Reach:
     (and its text, as a ``SemiJoin`` drops differently on each input), so a step reached
     by several paths is listed once, at its shortest distance from the source.
     """
+    from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.operators.semijoin import SemiJoin
 
     known = memo.get(id(stream))
@@ -155,6 +160,9 @@ def _reach(stream: StreamProtocol, memo: dict[int, _Reach]) -> _Reach:
         step = _step_of(stream, producer, position, inputs, reaches)
         chooses_only = isinstance(producer, SemiJoin) and position == 1
         for key, (reading, distance, steps) in reach.items():
+            if isinstance(stream, SourceJobNode):
+                reading = replace(reading, slot_name=stream.name)
+                key = _reading_key(reading)
             here = None if distance is None else distance + 1
             _, kept, merged = result.get(key, (reading, None, {}))
             merged = dict(merged)
@@ -188,7 +196,11 @@ def _step_of(
     if not isinstance(producer, StaticOutputOperatorPod):
         return None
     others = sorted(
-        ", ".join(sorted({reading.name for reading, _, _ in reach.values()}))
+        ", ".join(
+            sorted(
+                {reading.slot_name or reading.name for reading, _, _ in reach.values()}
+            )
+        )
         for i, reach in enumerate(reaches)
         if i != position
     )
@@ -225,6 +237,7 @@ def explain(stream: StreamProtocol) -> Explanation:
                 condition=reading.condition,
                 limit=reading.limit,
                 steps=tuple(step for _, step in ordered),
+                slot_name=reading.slot_name,
             )
         )
     return Explanation(stream=stream_name(stream), sources=tuple(sources))

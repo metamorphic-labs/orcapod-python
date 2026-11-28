@@ -422,11 +422,26 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             if node_type == "source":
                 source_type = source_config.get("source_type")
                 if source_type == "node":
-                    node_name = source_config.get("name") or source_config.get(
-                        "node_name"
+                    names = (
+                        source_config.get("name"),
+                        source_config.get("node_name"),
+                        descriptor.get("label"),
                     )
-                    if not node_name:
-                        node_name = descriptor.get("label") or "unknown"
+                    recorded = [name for name in names if name is not None]
+                    if not recorded or any(
+                        not isinstance(name, str) or not name for name in recorded
+                    ):
+                        raise ValueError(
+                            "A saved source slot requires a non-empty name."
+                        )
+                    node_name = recorded[0]
+                    uri = descriptor.get("node_uri")
+                    if any(name != node_name for name in recorded) or (
+                        uri is not None and uri != ["source_node", node_name]
+                    ):
+                        raise ValueError(
+                            f"Saved source slot {node_name!r} has contradictory names."
+                        )
                     # Which columns may be null: recorded (``require_nullability_records``).
                     saved_nullable: dict[str, list[str]]
                     if "tag_schema" in source_config and "data_schema" in source_config:
@@ -484,10 +499,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         saved_types={"tag": saved_tag, "data": saved_data},
                         nullable=saved_nullable,
                     )
-                    # Restore label from descriptor if set explicitly
-                    stored_label = descriptor.get("label")
-                    if stored_label and stored_label != node_name:
-                        node._label = stored_label
+                    node.freeze_slot_name()
                 else:
                     raise ValueError(
                         f"Unknown source_type {source_type!r} in pipeline descriptor."
@@ -631,6 +643,12 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         for node in reconstructed.values():
             if node.label:
                 if node.label in nodes_by_label:
+                    if isinstance(node, SourceNodeClass) or isinstance(
+                        nodes_by_label[node.label], SourceNodeClass
+                    ):
+                        raise ValueError(
+                            f"Saved source slot {node.label!r} has a duplicate label."
+                        )
                     logger.warning(
                         "Label collision in loaded pipeline: %r. "
                         "The first node with this label wins.",
@@ -698,6 +716,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         # Shared read-only structural state (recording + compiled)
         clone._name = self._name
         clone._invocation_lut = self._invocation_lut
+        clone._invocation_input_keys = self._invocation_input_keys
         clone._source_streams = self._source_streams
         clone._node_lut = self._node_lut
         clone._upstreams = self._upstreams
