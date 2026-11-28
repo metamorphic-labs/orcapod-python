@@ -901,10 +901,10 @@ def test_a_source_in_another_data_context_hands_on_its_own_rows() -> None:
 
 
 class _AddSystemTag:
-    """``SelectDataColumns`` whose result carries one more system tag, ``int16``."""
+    """``SelectDataColumns`` whose result carries one more string system tag."""
 
     @staticmethod
-    def operator(values: list[int | None], exact: bool) -> Any:
+    def operator(values: list[str], exact: bool) -> Any:
         from orcapod.operators import SelectDataColumns
         from orcapod.system_constants import constants
 
@@ -919,14 +919,14 @@ class _AddSystemTag:
                 table = out.as_table(columns={"source": True, "system_tags": True})
                 table = table.append_column(
                     f"{constants.SYSTEM_TAG_PREFIX}region",
-                    pa.array(values[: table.num_rows], pa.int16()),
+                    pa.array(values[: table.num_rows], pa.large_string()),
                 )
                 return kind(table, tag_columns=["k"])
 
         return AddSystemTag(["x"])
 
 
-def _system_tag_job(values: list[int | None], exact: bool) -> tuple[Any, Any]:
+def _system_tag_job(values: list[str], exact: bool) -> tuple[Any, Any]:
     database = InMemoryArrowDatabase()
     job = PipelineJob(name="system_tag", database=database)
     with job:
@@ -943,41 +943,29 @@ def _system_tag_job(values: list[int | None], exact: bool) -> tuple[Any, Any]:
     return job, database
 
 
-def test_a_narrow_raw_system_tag_is_stored_with_its_declared_field() -> None:
+def test_a_nullable_raw_system_tag_is_stored_with_its_declared_field() -> None:
     """Both the exact stream and the fallback row path keep the declared field."""
     from orcapod.system_constants import constants
 
     name = f"{constants.SYSTEM_TAG_PREFIX}region"
     stored: dict[bool, Any] = {}
     for exact in (True, False):
-        job, database = _system_tag_job([1, 2], exact)
+        job, database = _system_tag_job(["a", "b"], exact)
         job.run()
         node: Any = job.nodes["marked"]
         kept = node.as_table(columns={"system_tags": True}).schema.field(name)
-        assert kept.equals(pa.field(name, pa.int16()), check_metadata=True)
+        assert kept.equals(pa.field(name, pa.large_string()), check_metadata=True)
         stored[exact] = database.at("log").get_all_records(
             node._stored_table_path,  # pyright: ignore[reportPrivateUsage]  # the raw LOG table
             record_id_column="_record_hash",
         )
     for table in stored.values():
         field = table.schema.field(name)
-        assert field.equals(pa.field(name, pa.int16()), check_metadata=True)
+        assert field.equals(pa.field(name, pa.large_string()), check_metadata=True)
     assert (
         stored[True]["_record_hash"].to_pylist()
         == stored[False]["_record_hash"].to_pylist()
     )
-
-
-def test_an_operator_keeps_null_values_in_a_nullable_raw_system_tag() -> None:
-    """A nullable declared field lets rows with and without a value share a table."""
-    job, _ = _system_tag_job([None, 2], exact=True)
-    observer = _NodeEvents()
-    job.run(observer=observer)
-    assert ("start", "marked") in observer.events
-    assert ("end", "marked") in observer.events
-    table = job.nodes["marked"].as_table(columns={"system_tags": True})
-    assert table.schema.field("_tag_region").equals(pa.field("_tag_region", pa.int16()))
-    assert table.column("_tag_region").to_pylist() == [None, 2]
 
 
 def test_a_source_refuses_a_non_text_custom_system_tag() -> None:

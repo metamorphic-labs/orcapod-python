@@ -149,12 +149,14 @@ def _raw_stream() -> ArrowTableStream:
     its own source info.
     """
     system_tag = f"{constants.SYSTEM_TAG_PREFIX}source_id::abc"
+    record_id = f"{constants.SYSTEM_TAG_PREFIX}record_id::abc"
     member = pa.field("member", pa.large_string(), nullable=False)
     table = pa.table(
         {
             "k": pa.array([1, 2], pa.int64()),
             "j": pa.array(["a", "b"], pa.large_string()),
             system_tag: pa.array(["s1", "s2"], pa.large_string()),
+            record_id: pa.array(["r1", "r2"], pa.large_string()),
             # A list token needs list data (the token-shape rule, ITL-1491).
             "x": pa.array([[1.0, float("nan")], [2.0]], pa.large_list(pa.float64())),
             "z": pa.array([3, None], pa.int8()),
@@ -466,11 +468,7 @@ def test_a_job_over_tokens_no_value_could_type_alike_completes(
 
 
 def test_a_source_with_a_nullable_system_tag_is_not_bound() -> None:
-    """A system-tag field with a null never reaches a job: a slot refuses the source.
-
-    So F never meets one; ``_rows_to_table`` could not build its rows (two rows would
-    give the field two nullability flags).
-    """
+    """A slot rejects a nullable ID declaration even when all values are present."""
     from orcapod import PipelineJob
     from orcapod.databases import InMemoryArrowDatabase
     from orcapod.errors import SourceSpecMismatchError
@@ -495,7 +493,7 @@ def test_a_source_with_a_nullable_system_tag_is_not_bound() -> None:
     with_null = table.set_column(
         position,
         pa.field(record_id, pa.large_string(), nullable=True),
-        pa.array(["row_0", None], pa.large_string()),
+        pa.array(["row_0", "row_1"], pa.large_string()),
     )
     slot = next(label for label in job.nodes if label != "selected")
     with pytest.raises(SourceSpecMismatchError, match="record_id"):

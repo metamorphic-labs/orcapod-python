@@ -130,7 +130,7 @@ def test_a_shared_tag_that_differs_on_some_rows_matches_only_where_equal() -> No
 
 
 def _hand_branch(
-    data: str, *, origin: list[str | None], tag: list[int | None]
+    data: str, *, origin: list[str], tag: list[int | None]
 ) -> ArrowTableStream:
     """A hand-built branch: tag ``k``, one system tag, data column ``data``."""
     n = len(origin)
@@ -147,12 +147,13 @@ def _hand_branch(
     )
 
 
-def test_a_null_system_tag_matches_nothing_and_a_null_tag_equals_a_null() -> None:
-    # Rows rebuilt from datagrams cannot hold a null system tag (provenance is never
-    # null), so the oracle here is the sync path over the raw streams, and the
-    # kernel is fed their tables.
-    left = _hand_branch("a", origin=["r1", None, "r3", "r4"], tag=[1, 2, None, 4])
-    right = _hand_branch("b", origin=["r1", None, "r3", "r4"], tag=[1, 2, None, 5])
+def test_different_origin_rows_do_not_match_and_a_null_tag_equals_a_null() -> None:
+    left = _hand_branch(
+        "a", origin=["r1", "left-only", "r3", "r4"], tag=[1, 2, None, 4]
+    )
+    right = _hand_branch(
+        "b", origin=["r1", "right-only", "r3", "r4"], tag=[1, 2, None, 5]
+    )
     for inputs in ((left, right), (right, left)):
         expected = _transport(Rejoin().static_process(*inputs))
         assert sorted(expected.column("k").to_pylist(), key=str) == [1, None]

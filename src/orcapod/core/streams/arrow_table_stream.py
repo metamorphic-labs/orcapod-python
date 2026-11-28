@@ -9,6 +9,7 @@ import pyarrow as pa
 
 from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
+from orcapod.errors import InputValidationError
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -42,6 +43,9 @@ class ArrowTableStream(StreamBase):
     stream, so every source (each builds its stream here, from a user's Arrow table
     too) and every operator result presents large types. Width, nullability, field
     metadata and logical types are kept; large and non-large variants hash identically.
+
+    System tags contain only non-null strings. A source-id or record-id column
+    must be paired with its counterpart at the same provenance path.
     """
 
     # The table's rows are held, not computed: a run() view says "all N rows", as
@@ -82,14 +86,14 @@ class ArrowTableStream(StreamBase):
                 Also if a source-info token column does not have the shape of its
                 data column, or a token with a list layer is null
                 (``schema_utils.token_layers_fit``, ITL-1491).
+                Also if a system-tag column is not a string, contains
+                null values, or lacks its matching source-id or record-id column.
         """
         super().__init__(**kwargs)
 
         self._producer = producer
         self._upstreams = upstreams
 
-        # Every table Orcapod presents is in its large variants (ITL-1122).
-        table = arrow_utils.normalize_table_to_large_types(table, keep_null=True)
         # Dictionary-encoded columns are not currently supported (ITL-1264,
         # ITL-1277): every source and operator result becomes a stream here, so this
         # refuses them all, tags and data alike.
@@ -104,6 +108,15 @@ class ArrowTableStream(StreamBase):
             raise schema_utils.schema_hash_rejected_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
+
+        system_tag_renames = {
+            name: f"{constants.SYSTEM_TAG_PREFIX}{name}" for name in system_tag_columns
+        }
+        # Check validity before a large-variant cast can reject a null under a
+        # non-nullable field with an Arrow error that omits the column name.
+        self._require_valid_system_tags(table, system_tag_renames)
+        # Every table Orcapod presents is in its large variants (ITL-1122).
+        table = arrow_utils.normalize_table_to_large_types(table, keep_null=True)
 
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]
@@ -137,13 +150,9 @@ class ArrowTableStream(StreamBase):
         self._system_tag_columns = tuple(
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
         )
-        if len(system_tag_columns) > 0:
-            # rename system_tag_columns
-            column_name_map = {
-                c: f"{constants.SYSTEM_TAG_PREFIX}{c}" for c in system_tag_columns
-            }
+        if system_tag_renames:
             table = table.rename_columns(
-                [column_name_map.get(c, c) for c in table.column_names]
+                [system_tag_renames.get(c, c) for c in table.column_names]
             )
 
             self._system_tag_columns += tuple(
@@ -230,6 +239,58 @@ class ArrowTableStream(StreamBase):
 
         self._cached_elements: list[tuple[TagProtocol, Data]] | None = None
         self._update_modified_time()  # set modified time to now
+
+    @staticmethod
+    def _require_valid_system_tags(table: pa.Table, renames: dict[str, str]) -> None:
+        """Require non-null string values and complete provenance pairs.
+
+        Args:
+            table: The input table, before normalization.
+            renames: The final names of nominated system-tag columns.
+
+        Raises:
+            InputValidationError: Naming a non-string, null or unpaired system tag.
+        """
+        names = {
+            renames.get(name, name)
+            for name in table.column_names
+            if name != constants.CONTEXT_KEY
+        }
+        source_prefix = (
+            constants.SYSTEM_TAG_SOURCE_ID_PREFIX + constants.BLOCK_SEPARATOR
+        )
+        record_prefix = (
+            constants.SYSTEM_TAG_RECORD_ID_PREFIX + constants.BLOCK_SEPARATOR
+        )
+        for index, field in enumerate(table.schema):
+            name = renames.get(field.name, field.name)
+            if name not in names or not name.startswith(constants.SYSTEM_TAG_PREFIX):
+                continue
+            if not (
+                pa.types.is_string(field.type)
+                or pa.types.is_large_string(field.type)
+                or pa.types.is_string_view(field.type)
+            ):
+                raise InputValidationError(
+                    f"System-tag column {name!r} must be a string, got {field.type}."
+                )
+            if table.column(index).null_count:
+                raise InputValidationError(
+                    f"System-tag column {name!r} contains null values."
+                )
+
+            kind, sep, path = name.partition(constants.BLOCK_SEPARATOR)
+            prefix = kind + sep
+            if prefix == source_prefix:
+                partner = record_prefix + path
+            elif prefix == record_prefix:
+                partner = source_prefix + path
+            else:
+                continue
+            if partner not in names:
+                raise InputValidationError(
+                    f"System-tag column {name!r} requires matching column {partner!r}."
+                )
 
     def identity_structure(self) -> Any:
         if self._producer is not None:

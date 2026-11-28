@@ -917,7 +917,7 @@ def test_join_keeps_nullable_tied_raw_system_tag_fields() -> None:
             tag_columns=["k"],
             data_tags=["k"],
         )
-        for source, record in (("a", None), ("b", "r"), ("c", "s"))
+        for source, record in (("a", "q"), ("b", "r"), ("c", "s"))
     )
     assert len({stream.pipeline_hash() for stream in inputs}) == 1
     columns = {"system_tags": True}
@@ -1535,7 +1535,7 @@ def test_merge_join_preserves_system_tag_declarations(matched: list[int]) -> Non
             [
                 pa.array([1, 2]),
                 pa.array([3, 4]),
-                pa.array(["one", None], fields[0].type),
+                pa.array(["one", "two"], fields[0].type),
                 pa.array(["a", "b"], fields[1].type),
             ],
             schema=pa.schema(
@@ -1619,7 +1619,7 @@ def test_filtering_join_kernels_preserve_system_tag_fields(
     field = pa.field(
         name, pa.large_string(), nullable=nullable, metadata={b"owner": b"raw"}
     )
-    values = pa.array(["selected", None if nullable else "another"], field.type)
+    values = pa.array(["selected", "another"], field.type)
     left = ArrowTableStream(
         pa.Table.from_arrays(
             [pa.array([1, 2]), pa.array([10, 20]), values],

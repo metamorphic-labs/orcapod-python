@@ -508,6 +508,7 @@ def test_batch_takes_nullable_token_fields_across_arrivals() -> None:
 # --- The row-built form, F (stage 2, ITL-1360) ---------------------------------------------
 
 SYSTEM_TAG = "_tag_source_id::abc"
+RECORD_ID_TAG = "_tag_record_id::abc"
 
 
 def test_the_provenance_columns_have_the_row_built_schema() -> None:
@@ -518,6 +519,7 @@ def test_the_provenance_columns_have_the_row_built_schema() -> None:
         [
             pa.field("k", pa.int64()),
             pa.field(SYSTEM_TAG, pa.large_string(), metadata={"m": "1"}),
+            pa.field(RECORD_ID_TAG, pa.large_string(), nullable=False),
             # A list token needs list data (the token-shape rule, ITL-1491).
             pa.field("x", pa.large_list(pa.int64())),
             pa.field("z", pa.int64()),
@@ -533,6 +535,7 @@ def test_the_provenance_columns_have_the_row_built_schema() -> None:
             [
                 pa.array([1, 2], pa.int64()),
                 pa.array(["s", "s"], pa.large_string()),
+                pa.array(["r1", "r2"], pa.large_string()),
                 pa.array([[1], [2]], pa.large_list(pa.int64())),
                 pa.array([3, 4], pa.int64()),
                 pa.array([5, 6], pa.int64()),
@@ -672,12 +675,13 @@ def test_empty_source_info_lists_keep_their_columns_type(layout: str) -> None:
 
 
 def test_a_raw_nullable_system_tag_keeps_its_field_in_a_job_and_channel() -> None:
-    """The stream's nullable string field applies to rows with and without a value."""
+    """The stream keeps its nullable string field when both rows have a value."""
     raw = ArrowTableStream(
         pa.table(
             {
                 "k": pa.array([1, 2], pa.int64()),
-                SYSTEM_TAG: pa.array(["s", None], pa.large_string()),
+                SYSTEM_TAG: pa.array(["s", "t"], pa.large_string()),
+                RECORD_ID_TAG: pa.array(["r1", "r2"], pa.large_string()),
                 "x": pa.array([1, 2], pa.int64()),
                 "z": pa.array([3, 4], pa.int64()),
             }

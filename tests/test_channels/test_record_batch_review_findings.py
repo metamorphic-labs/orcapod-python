@@ -941,8 +941,8 @@ def test_a_nested_null_under_a_non_nullable_field_is_refused(case: str) -> None:
     asyncio.run(write())
 
 
-def test_a_system_tag_cannot_hold_a_null_in_a_required_struct_child() -> None:
-    name = "_tag_extra"
+def test_a_user_tag_cannot_hold_a_null_in_a_required_struct_child() -> None:
+    name = "extra"
     kind = pa.struct(
         [pa.field("required", pa.int64(), nullable=False, metadata={b"unit": b"m"})]
     )
@@ -954,7 +954,7 @@ def test_a_system_tag_cannot_hold_a_null_in_a_required_struct_child() -> None:
                 name: pa.array([{"required": 1}, None], type=kind),
             }
         ),
-        tag_columns=["k"],
+        tag_columns=["k", name],
     )
     (good,) = pa.Table.from_batches(batches_of(stream)).combine_chunks().to_batches()
     index = good.schema.get_field_index(name)
@@ -966,7 +966,7 @@ def test_a_system_tag_cannot_hold_a_null_in_a_required_struct_child() -> None:
 
     async def write() -> None:
         output = OutputChannel(stream)
-        with pytest.raises(ValueError, match=r"_tag_extra.*required.*not nullable"):
+        with pytest.raises(ValueError, match=r"extra.*required.*not nullable"):
             await output.send(bad)
         await output.send(good)
         await output.close()
