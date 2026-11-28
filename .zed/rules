@@ -1500,6 +1500,9 @@ data. The rules:
   holds two contents for one record id (written outside the rule) is still read as it is
   (open, see the design entry `ITL-1396-CS1`); tests build that state with
   `tests/test_core/sources/cache_versions.write_outside_the_rule`.
+  Nested caches also validate before writing through source proxies and keyed derivations.
+  A positional derivation instead uses its origin's database order, so its origin cache
+  may commit before an enclosing cache refuses a changed row (open, `ITL-1396-CS1`).
   A row built by `Data` still gives an untyped null the `large_string` type.
   PolarsFilter is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (arrow_utils.restore_column_types and
@@ -1712,7 +1715,8 @@ data. The rules:
   each source feeding them (node_run.check_sources) before the state rule judges any node;
   head() and the preview never do. A source that finds new data takes it in and moves its
   modified time to NOW (never to a time the data reports, such as a cursor's modified_at);
-  one that finds nothing moves nothing. A check that raises warns once
+  one that finds nothing moves nothing. A `CachedSourceChangedRowError` fails the run
+  (ITL-1396). Any other failing check warns once
   (SourceCheckFailedWarning), keeps the source's data and modified time, lists the source
   in RunSummary.unchecked_sources, and the run proceeds (a PollingSource a run reads
   is polled again by that read, and a failing poll raises: ITL-1139). A SourceJobNode's run() checks

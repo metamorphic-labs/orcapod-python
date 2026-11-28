@@ -9,7 +9,9 @@ column no read presents and no hash covers.
 
 from __future__ import annotations
 
+import asyncio
 import time
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -26,6 +28,7 @@ from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.errors import (
     CachedSourceChangedRowError,
     InputValidationError,
+    SourceCheckFailedWarning,
     UnstorableColumnError,
 )
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -625,6 +628,125 @@ def test_checking_for_new_data_leaves_a_nested_delivery_for_the_read(
         _ = outer.as_table()
     assert _stored_cache(inner, inner_db).equals(inner_before)
     assert _stored_cache(outer, outer_db).equals(outer_before)
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+@pytest.mark.parametrize("depth", [2, 3])
+def test_a_nested_conflict_refuses_every_job_rerun(
+    tmp_path: Path, orchestrator: str, depth: int
+) -> None:
+    path = tmp_path / "readings.csv"
+    _write(path, ROWS)
+    caches: list[tuple[CachedSource, InMemoryArrowDatabase]] = []
+    source = _csv(path)
+    for _ in range(depth):
+        cache = InMemoryArrowDatabase()
+        source = source.cached(cache)
+        caches.append((source, cache))
+
+    database = InMemoryArrowDatabase()
+    job = _job(source, database)
+
+    def run() -> None:
+        if orchestrator == "async":
+            _ = asyncio.run(job.run_async())
+        else:
+            _ = job.run()
+
+    run()
+    before = [_stored_cache(source, cache) for source, cache in caches]
+    stored_before = _stored_tables(database)
+    CALLS.clear()
+    _write(path, _changed(ROWS, ("s1", 2)))
+
+    for _ in range(2):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SourceCheckFailedWarning)
+            with pytest.raises(CachedSourceChangedRowError, match='"session":2'):
+                run()
+        assert CALLS == []
+        assert _stored_tables(database) == stored_before
+        for (source, cache), snapshot in zip(caches, before, strict=True):
+            assert _stored_cache(source, cache).equals(snapshot)
+
+    _write(path, ROWS)
+    run()
+    assert CALLS == []
+
+
+def test_a_refused_keyed_derivation_leaves_its_origin_cache_unchanged() -> None:
+    inner_db, outer_db = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+
+    def nested(value: int, database: InMemoryArrowDatabase) -> DerivedSource:
+        origin = ArrowTableSource(
+            pa.table({"id": [1], "site": ["lab"], "value": [value]}),
+            source_id="origin",
+            record_id_columns="id",
+            tag_columns=["id", "site"],
+            tag_only_columns=True,
+        ).cached(database)
+        return DerivedSource(
+            origin,
+            source_id="derived",
+            tags_as_data={"site": "copied_site"},
+            record_id_columns="id",
+        )
+
+    seed = nested(10, InMemoryArrowDatabase()).cached(outer_db)
+    assert seed.as_table()["value"].to_pylist() == [10]
+    before = _stored_cache(seed, outer_db)
+    incoming = nested(20, inner_db)
+    outer = incoming.cached(outer_db)
+
+    for _ in range(2):
+        with pytest.raises(CachedSourceChangedRowError, match='"id":1'):
+            _ = outer.as_table()
+        assert _stored_cache(outer, outer_db).equals(before)
+        assert list(inner_db.list_table_paths(())) == []
+
+    accepted = incoming.cached(InMemoryArrowDatabase())
+    assert accepted.as_table()["value"].to_pylist() == [20]
+    assert len(list(inner_db.list_table_paths(()))) == 1
+
+
+@function_pod(output_keys=("total", "extra"))
+def _with_extra(value: int | None) -> tuple[int, int | None]:
+    return value or 0, 42
+
+
+@function_pod(output_keys="total")
+def _without_extra(value: int | None) -> int:
+    return value or 0
+
+
+@pytest.mark.parametrize("omit_on_append", [True, False], ids=["omitted", "added"])
+def test_a_nested_delta_cache_preserves_schema_evolution(
+    tmp_path: Path, omit_on_append: bool
+) -> None:
+    def source(key: int, *, extra: bool) -> DerivedSource:
+        origin = ArrowTableSource(
+            pa.table({"id": [key], "value": [10]}),
+            source_id="origin",
+            record_id_columns="id",
+            tag_columns="id",
+            tag_only_columns=True,
+        )
+        job = PipelineJob(name="origin", database=InMemoryArrowDatabase())
+        with job:
+            (_with_extra if extra else _without_extra).pod(origin, label="values")
+        _ = job.run()
+        return DerivedSource(job.nodes["values"], source_id="plain")
+
+    database = DeltaTableDatabase(tmp_path)
+    seed = source(1, extra=omit_on_append).cached(database, cache_path=("fixed",))
+    assert seed.as_table()["id"].to_pylist() == [1]
+    inner = source(2, extra=not omit_on_append).cached(database, cache_path=("fixed",))
+    outer = inner.cached(InMemoryArrowDatabase())
+
+    result = outer.as_table().sort_by("id")
+    assert result["id"].to_pylist() == [1, 2]
+    assert result["extra"].to_pylist() == ([42, None] if omit_on_append else [None, 42])
+    assert inner.as_table().sort_by("id").equals(result)
 
 
 @pytest.mark.xfail(

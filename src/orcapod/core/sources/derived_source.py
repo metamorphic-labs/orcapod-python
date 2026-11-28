@@ -15,6 +15,7 @@ from orcapod.core.data_tags import (
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.cached_source import has_unpublished_cache_reads
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_name
@@ -628,6 +629,13 @@ class DerivedSource(RootSource):
         )
         return result.stream
 
+    @property
+    def keyed_source_origin(self) -> RootSource | None:
+        """The source origin when this derivation gives rows key-based record IDs."""
+        if self._record_id_columns and isinstance(self._origin, RootSource):
+            return self._origin
+        return None
+
     def _get_stream(self) -> ArrowTableStream:
         # Every read of rows notes the provisional use, also of rows kept from an
         # earlier read (ITL-1331), as a provisional operator's stream does.
@@ -635,8 +643,11 @@ class DerivedSource(RootSource):
         if self._tags_as_data is not None:
             if self._cached_stream is not None:
                 return self._cached_stream
-            self._origin_seen = self._origin.last_modified
+            seen = self._origin.last_modified
             stream, has_rows = self._build_derived_stream(self._tags_as_data)
+            if has_unpublished_cache_reads():
+                return stream
+            self._origin_seen = seen
             if has_rows:
                 # An origin node that has not run yet is not cached, so the rows
                 # appear on this object once it has.
@@ -699,7 +710,11 @@ class DerivedSource(RootSource):
             self._origin_seen = seen
             if unchanged:
                 return False
-            self._cached_stream = stream if has_rows else None
+            # A freshness check can compare a preview, but a consuming read
+            # must build its stream from the rows the origin actually publishes.
+            self._cached_stream = (
+                stream if has_rows and not has_unpublished_cache_reads() else None
+            )
         else:
             records = self._origin_records()
             read = self._empty_origin_table() if records is None else records

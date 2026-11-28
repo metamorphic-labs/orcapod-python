@@ -800,8 +800,10 @@ one row, so the cache never takes a second, different row under a record id it h
   any stored value of the row differs: a tag, a data column, a system tag or a source-info
   token.
 
-When cached sources are nested, every cache in the chain checks the delivery before any
-of them writes rows. This includes caches connected by a bound source proxy.
+Nested caches check the delivery at every level before writing rows, including through a
+bound source proxy or a `DerivedSource(tags_as_data=...)` with explicit record key columns.
+A positional derivation uses its origin cache's read order, so its origin may write rows
+before an enclosing cache refuses them.
 
 Changed data is another dataset. Give the source a new `source_id`, or keep a new cache for
 it (another `cache_path` or cache database).
@@ -1008,8 +1010,9 @@ its nullable type (where nullability is inferred from the rows: a CSV file read 
 `schema=`, a database whose connector gives no column information), so it is not a
 change of columns.
 
-A check that raises does not fail the run. The run issues one `SourceCheckFailedWarning` per
-source, naming the source and the error; the source keeps its data and modified time; the
+A `CachedSourceChangedRowError` during a freshness check fails the run (ITL-1396).
+For other check failures, the run issues one `SourceCheckFailedWarning` per source,
+naming the source and the error. The source keeps its data and modified time, the
 run proceeds with the data the source already holds, and its `RunSummary` lists the source
 in `unchecked_sources` ("sources not checked for new data (see the warning): ..."). A job
 node's `run()` that then runs nothing (the node holds a current run) makes no summary and

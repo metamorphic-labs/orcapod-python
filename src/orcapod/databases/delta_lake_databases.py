@@ -3156,10 +3156,23 @@ class DeltaTableDatabase:
         if len(parts) == 1:
             table = parts[0]
         else:
-            table = pa.concat_tables(
-                [self._large_layout(t) for t in parts], promote_options="default"
-            )
+            table = self._concat_read_parts(parts)
         return self._handle_record_id_column(table, record_id_column)
+
+    def preview_appended_rows(self, stored: pa.Table, incoming: pa.Table) -> pa.Table:
+        """Combine stored rows with new, deduplicated rows without queuing an append."""
+        if not self.allow_schema_evolution:
+            # MERGE without schema evolution leaves unknown columns out.
+            incoming = incoming.select(
+                [name for name in stored.column_names if name in incoming.column_names]
+            )
+        return self._concat_read_parts([stored, incoming])
+
+    def _concat_read_parts(self, parts: list[pa.Table]) -> pa.Table:
+        """Combine read parts in Delta's large layout with typed nulls for omissions."""
+        return pa.concat_tables(
+            [self._large_layout(table) for table in parts], promote_options="default"
+        )
 
     @staticmethod
     def _large_layout(table: pa.Table) -> pa.Table:

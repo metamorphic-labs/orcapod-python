@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from collections.abc import Iterator, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, cast
@@ -83,9 +83,23 @@ class _PreparedCacheRead:
     reads_prepared_cache: bool
 
 
-_PREPARED_CACHE_READS: ContextVar[list[_PreparedCacheRead] | None] = ContextVar(
+@dataclass
+class _CacheReadPreparation:
+    """The cache reads for one delivery, collected before any of them publish."""
+
+    reads: list[_PreparedCacheRead] = field(default_factory=list)
+    publishing: bool = False
+
+
+_PREPARED_CACHE_READS: ContextVar[_CacheReadPreparation | None] = ContextVar(
     "prepared_source_cache_reads", default=None
 )
+
+
+def has_unpublished_cache_reads() -> bool:
+    """Whether the current read has used rows from an unpublished cache delivery."""
+    preparation = _PREPARED_CACHE_READS.get()
+    return bool(preparation and preparation.reads and not preparation.publishing)
 
 
 def _recorded_at_field() -> "pa.Field[pa.DataType]":
@@ -440,14 +454,19 @@ class CachedSource(RootSource):
         """The source this cache reads and keeps the rows of."""
         return self._source
 
-    def _wraps_cache(self) -> bool:
-        """Whether the wrapped source passes through another cache's rows unchanged."""
+    def _can_read_cache_preview(self) -> bool:
+        """Whether the wrapped source can use a preview of an inner cache's rows."""
+        from orcapod.core.sources.derived_source import DerivedSource
         from orcapod.core.sources.source_proxy import SourceProxy
 
-        source = self._source
-        while isinstance(source, SourceProxy) and source.delegate is not None:
-            source = source.delegate
-        return isinstance(source, CachedSource)
+        source: RootSource | SourceProtocol | None = self._source
+        while True:
+            if isinstance(source, SourceProxy):
+                source = source.delegate
+            elif isinstance(source, DerivedSource):
+                source = source.keyed_source_origin
+            else:
+                return isinstance(source, CachedSource)
 
     def _live_records(self) -> pa.Table:
         """Read the wrapped source's rows, each with its record hash in front.
@@ -460,10 +479,11 @@ class CachedSource(RootSource):
 
         refuse_restricted_cache_input(self._source)
         require_same_data_context(self._source.data_context_key, self.data_context_key)
-        # Only transparent wrappers can use a would-be cache snapshot here. A
-        # source that creates new rows or IDs may depend on its origin's actual
-        # read-back order (for example, DerivedSource's positional record IDs).
-        token = None if self._wraps_cache() else _PREPARED_CACHE_READS.set(None)
+        # A derivation with positional record IDs depends on the database's
+        # read-back order. Leave that derivation on the ordinary read path.
+        token = (
+            None if self._can_read_cache_preview() else _PREPARED_CACHE_READS.set(None)
+        )
         try:
             live_table = self._source.as_table(
                 columns={"source": True, "system_tags": True, "meta": True}
@@ -664,7 +684,9 @@ class CachedSource(RootSource):
         self._require_rows_of_this_source()
         # Checking a nested cache needs its would-be rows, but must leave the
         # delivery for the next consuming read.
-        token = _PREPARED_CACHE_READS.set([] if self._wraps_cache() else None)
+        token = _PREPARED_CACHE_READS.set(
+            _CacheReadPreparation() if self._can_read_cache_preview() else None
+        )
         try:
             _ = self._source.check_for_new_data()
             seen = self._source_modified_time()
@@ -819,6 +841,8 @@ class CachedSource(RootSource):
 
     def _preview_stream(self, delivery: pa.Table | None) -> ArrowTableStream:
         """Present the cached and newly accepted rows while enclosing caches check them."""
+        from orcapod.databases.delta_lake_databases import DeltaTableDatabase
+
         stored = self._read_cached_records_with_hashes()
         rows = stored.drop(self._STORED_ONLY_COLUMNS) if stored is not None else None
         if delivery is not None and self._cache_database.stores_records:
@@ -840,11 +864,12 @@ class CachedSource(RootSource):
                 new_rows = delivery.take(sorted(additions.values())).drop(
                     [self.HASH_COLUMN_NAME]
                 )
-                rows = (
-                    new_rows
-                    if rows is None
-                    else pa.concat_tables([rows, new_rows.select(rows.column_names)])
-                )
+                if rows is None:
+                    rows = new_rows
+                elif isinstance(self._cache_database, DeltaTableDatabase):
+                    rows = self._cache_database.preview_appended_rows(rows, new_rows)
+                else:
+                    rows = pa.concat_tables([rows, new_rows.select(rows.column_names)])
         return self._stream_over(rows if rows is not None else self._empty_table())
 
     def _publish_stream(
@@ -939,14 +964,16 @@ class CachedSource(RootSource):
 
     def _ensure_stream(self) -> ArrowTableStream:
         """Build the merged stream after every cache reached by the read accepts it."""
-        pending = _PREPARED_CACHE_READS.get()
-        for prepared in pending or ():
-            if prepared.cache is self:
-                return prepared.stream
+        preparation = _PREPARED_CACHE_READS.get()
+        if preparation is not None:
+            for prepared in preparation.reads:
+                if prepared.cache is self:
+                    return prepared.stream
         if self._cached_stream is not None and not self.is_stale:
             return self._cached_stream
         seen = self._source_modified_time()
-        if pending is not None:
+        if preparation is not None:
+            pending = preparation.reads
             checkpoint = len(pending)
             delivery = self._prepare_delivery(pending)
             preview = self._preview_stream(delivery)
@@ -957,13 +984,15 @@ class CachedSource(RootSource):
             )
             return preview
 
-        pending = []
-        token = _PREPARED_CACHE_READS.set(pending)
+        preparation = _CacheReadPreparation()
+        pending = preparation.reads
+        token = _PREPARED_CACHE_READS.set(preparation)
         try:
             delivery = self._prepare_delivery(pending)
             # Publish from the inside out. A successful read still uses each
             # database's actual presentation order. The preview checked the
             # same record ids and hashes without modifying any store.
+            preparation.publishing = True
             for prepared in pending:
                 accepted = (
                     prepared.cache._live_records()
