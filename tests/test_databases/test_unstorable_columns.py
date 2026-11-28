@@ -536,6 +536,20 @@ def _mocked_postgresql() -> tuple[PostgreSQLConnector, MagicMock]:
     """A ``PostgreSQLConnector`` over a mocked connection (no server)."""
     with patch("psycopg.connect") as mock_connect:
         conn = MagicMock()
+        cursor = conn.cursor.return_value.__enter__.return_value
+
+        def fetchone():
+            query = cursor.execute.call_args.args[0]
+            if (
+                isinstance(query, str)
+                and "SELECT ns.nspname," in query
+                and "ns.oid," not in query
+                and "WHERE ns.nspname = current_schema()" in query
+            ):
+                return ("public", False)
+            return None
+
+        cursor.fetchone.side_effect = fetchone
         mock_connect.return_value = conn
         return PostgreSQLConnector("postgresql://localhost/test"), conn
 
@@ -751,30 +765,17 @@ class TestTableNameLength:
         finally:
             sqlite.close()
 
-    def test_every_table_entry_refuses_a_long_name(self):
-        """Write, read and check all refuse before anything is sent to the server."""
-        from orcapod.errors import UnstorableTableNameError
-
-        connector, conn = _mocked_postgresql()
+    def test_long_paths_can_be_buffered_and_read(self):
+        connector, _ = _mocked_postgresql()
         try:
             database = ConnectorArrowDatabase(connector)
             path = ("fn", "x" * 70)
             table = pa.table({"v": pa.array([1], type=pa.int64())})
-            calls_before = len(conn.mock_calls)
-
-            with pytest.raises(UnstorableTableNameError) as exc_info:
-                database.add_record(path, b"1", table)
-            with pytest.raises(UnstorableTableNameError):
-                database.get_all_records(path)
-            with pytest.raises(UnstorableTableNameError):
-                database.table_exists(path)
-            database.flush()  # nothing was buffered
-
-            assert len(conn.mock_calls) == calls_before
-            err = exc_info.value
-            assert err.database_kind == "PostgreSQLConnector"
-            assert err.table_name == "fn__" + "x" * 70
-            assert "DeltaTableDatabase" in str(err)
+            database.add_record(path, b"1", table)
+            assert database.table_exists(path)
+            assert database.list_table_paths() == [path]
+            stored = database.get_all_records(path)
+            assert stored is not None and stored.equals(table)
         finally:
             connector._conn = None
 
@@ -801,16 +802,8 @@ class TestTableNameLength:
             connector._conn = None
 
     def test_cached_source_on_postgresql_refused(self):
-        """A cached source's table name holds a hash: over 63 bytes on PostgreSQL.
-
-        Its system-tag column names hold a hash too. Either refusal comes before
-        anything is created or written. Since the look-up of a table at an older layout
-        is gone (ITL-1259), the read-only listing of tables under the source's name (for
-        tables of another layout) runs first; before, that look-up named the table and
-        was refused before any call.
-        """
+        """A cached source's system-tag column names exceed 63 bytes."""
         from orcapod.core.sources.cached_source import CachedSource
-        from orcapod.errors import UnstorableTableNameError
 
         connector, conn = _mocked_postgresql()
         try:
@@ -825,10 +818,7 @@ class TestTableNameLength:
             while err is not None:
                 chain.append(err)
                 err = err.__cause__ or err.__context__
-            assert any(
-                isinstance(e, (UnstorableTableNameError, UnstorableColumnError))
-                for e in chain
-            ), chain
+            assert any(isinstance(e, UnstorableColumnError) for e in chain), chain
             statements = " ".join(
                 str(call.args[0]).upper()
                 for call in conn.mock_calls[calls_before:]
@@ -870,13 +860,12 @@ class TestInPRReviewOn45e5e44e:
         assert CALLS == []
 
     @pytest.mark.parametrize("name", ["sqlite_results", "SQLite_x", "SQLITE_"])
-    def test_sqlite_reserved_table_prefix(self, tmp_path: pathlib.Path, name):
-        from orcapod.errors import UnstorableTableNameError
-
+    def test_path_can_start_with_a_reserved_sqlite_prefix(
+        self, tmp_path: pathlib.Path, name
+    ):
         database = _sqlite_database(tmp_path)
         table = pa.table({"v": pa.array([1], type=pa.int64())})
-
-        with pytest.raises(UnstorableTableNameError):
-            database.add_record((name,), b"1", table)
-        database.flush()
-        assert database.list_table_paths() == []
+        database.add_record((name,), b"1", table, flush=True)
+        assert database.list_table_paths() == [(name,)]
+        stored = database.get_all_records((name,))
+        assert stored is not None and stored.equals(table)
