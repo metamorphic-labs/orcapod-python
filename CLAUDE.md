@@ -1467,6 +1467,15 @@ data. The rules:
 - The type converter keys synthesized struct classes by the large-normalized struct, so
   `struct<b: string>` and `struct<b: large_string>` are one Python type (a workaround,
   `TODO(ITL-841)`).
+- Data context v1 gives nested fields produced from Python declarations implicit nullability
+  (developer, November 28, 2026, ITL-445/ITL-842). For example, `list[int]` and
+  `list[int | None]` give the same Arrow type. Sources, datagrams and function inputs can
+  carry a nested null where the codec supports it. A function checks nested values against
+  each declared output type, using the explicit `output_schema` for that output when
+  specified and the return annotation otherwise. A plain `T` at any depth refuses `None`.
+  Top-level flags distinguish T from T | None. An explicit nested Arrow flag is
+  kept as declared and enters the Arrow schema hash. Strict checking of Python input
+  annotations at nested positions is a later opt-in (ITL-1584).
 - `normalize_to_large_types` changes layouts only: every nested field (list items, struct
   children, map keys and items) keeps its name, nullability and metadata, so it never changes
   a schema or value hash. Never rebuild a nested type as `pa.large_list(element_type)`, which
