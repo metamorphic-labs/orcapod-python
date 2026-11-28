@@ -1152,10 +1152,17 @@ def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
     sort_system_tags = arrow_utils.sort_system_tag_values
 
     def observe(
-        table: pa.Table, *, tied_positions: Sequence[Sequence[int]] = ()
+        table: pa.Table,
+        *,
+        tied_positions: Sequence[Sequence[int]],
+        keep_custom_with_ids: bool = False,
     ) -> pa.Table:
         calls.append(sum(name.startswith(record_id) for name in table.column_names))
-        return sort_system_tags(table, tied_positions=tied_positions)
+        return sort_system_tags(
+            table,
+            tied_positions=tied_positions,
+            keep_custom_with_ids=keep_custom_with_ids,
+        )
 
     monkeypatch.setattr(arrow_utils, "sort_system_tag_values", observe)
     [(tag, _)] = async_rows(join, *reversed(inputs))
@@ -1169,7 +1176,11 @@ def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
 
 
 def _tied_join_inputs(
-    arity: int, *, missing: str | None = None, matching: bool = True
+    arity: int,
+    *,
+    missing: str | None = None,
+    matching: bool = True,
+    distinct_revisions: bool = False,
 ) -> list[ArrowTableStream]:
     names = ["k", "_tag_source_id", "_tag_record_id", "_tag_rev"]
     schema = pa.schema(
@@ -1185,8 +1196,9 @@ def _tied_join_inputs(
     )
     for index, (source_id, record_id) in enumerate(pairs[:arity]):
         key = 1 if matching else index
+        revision = f"revision-{index}" if distinct_revisions else "shared"
         table = pa.Table.from_pylist(
-            [dict(zip(names, (key, source_id, record_id, "shared"), strict=True))],
+            [dict(zip(names, (key, source_id, record_id, revision), strict=True))],
             schema=schema,
         )
         if len(inputs) == arity - 1 and missing is not None:
@@ -1264,6 +1276,27 @@ def test_symmetric_tied_join_matches_main(
         table_digest,
         expected_entry_id,
     ) * math.factorial(arity)
+
+
+@pytest.mark.parametrize("arity", [2, 3, 4])
+def test_standalone_tied_join_keeps_custom_tags_with_ids(arity: int) -> None:
+    inputs = _tied_join_inputs(arity, distinct_revisions=True)
+    suffix = inputs[0].pipeline_hash().to_hex()
+    expected = {}
+    names = ("_tag_source_id", "_tag_record_id", "_tag_rev")
+    bundles = [
+        tuple(table[name][0].as_py() for name in names)
+        for table in (
+            stream.as_table(columns={"system_tags": True}) for stream in inputs
+        )
+    ]
+    for position, values in enumerate(sorted(bundles)):
+        for name, value in zip(names, values, strict=True):
+            expected[f"{name}::{suffix}:{position}"] = value
+
+    for order in itertools.permutations(inputs):
+        [(tag, _)] = async_rows(Join(), *order)
+        assert tag.system_tags() == expected
 
 
 @pytest.mark.parametrize("arity", [2, 3, 4])

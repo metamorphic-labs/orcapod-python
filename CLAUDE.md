@@ -1521,8 +1521,10 @@ data. The rules:
   Join sorts tied source and record IDs together, with null IDs last, and declares the
   rebuilt fields without operand metadata. A rebuilt field is nullable if any of the
   corresponding input fields can hold a null. Tied operands must declare the same set of
-  system-tag names. Custom system tags keep their input positions and declarations.
-  Source and record IDs sort only within a full pipeline hash tie, on the final link.
+  system-tag names. Sync and record batches keep custom system tags in input order.
+  Standalone row channels carry custom tags on the same provenance path with their IDs,
+  preserving their Arrow fields. Sorting happens only within a full pipeline hash tie,
+  on the final link.
   A raw `ArrowTableStream` still preserves `null` in its table in ITL-1543 part A.
   A row's system-tag fields come from its stream, including raw streams. Join
   uses those declarations on the async row path as well as in its tables.

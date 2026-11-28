@@ -25,7 +25,7 @@ from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.utils import schema_utils
+from orcapod.utils import arrow_utils, schema_utils
 
 STR = pa.large_string()
 INT = pa.int64()
@@ -35,6 +35,12 @@ def test_stream_arrow_schema_docs_describe_declared_token_types() -> None:
     docstring = StreamProtocol.arrow_schema.__doc__
     assert docstring is not None
     assert "keep their declared token types" in " ".join(docstring.split())
+
+
+def test_source_info_field_docs_distinguish_list_tokens_from_field_flags() -> None:
+    docstring = arrow_utils.source_info_field.__doc__
+    assert docstring is not None
+    assert "Only string leaves may be null" in " ".join(docstring.split())
 
 
 def large(kind: pa.DataType) -> pa.DataType:

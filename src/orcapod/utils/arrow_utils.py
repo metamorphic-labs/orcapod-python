@@ -1054,7 +1054,10 @@ def _source_info_arrow_type_and_depth_known(
 
 
 def source_info_field(name: str, kind: "pa.DataType") -> "pa.Field[Any]":
-    """Declare a source-info field, whose token can always be absent.
+    """Declare a nullable Arrow field for a source-info token.
+
+    Stream construction separately validates token values. Only string leaves
+    may be null. Every list layer of a list-valued token must be present.
 
     Args:
         name: The prefixed column name.
@@ -1855,15 +1858,20 @@ def sorted_system_tag_field(field: "pa.Field[Any]", nullable: bool) -> "pa.Field
 
 
 def sort_system_tag_values(
-    table: "pa.Table", *, tied_positions: Sequence[Sequence[int]]
+    table: "pa.Table",
+    *,
+    tied_positions: Sequence[Sequence[int]],
+    keep_custom_with_ids: bool = False,
 ) -> "pa.Table":
     """Canonicalize system tags within each explicit full pipeline hash tie.
 
     Sort the (source_id, record_id) pairs per row within each provenance path. A printed path can include a shortened hash,
     so matching paths alone never make positions eligible to exchange IDs.
-    Tied operands must declare the same system-tag names. Custom tags keep
-    their input positions.
+    Tied operands must declare the same system-tag names. Standalone row
+    channels pass a one-row table and keep custom fields on the same path
+    with their IDs, as in the original row sorter.
     """
+    assert not keep_custom_with_ids or table.num_rows == 1
     if not tied_positions:
         return table
 
@@ -1878,7 +1886,9 @@ def sort_system_tag_values(
         {name: table.schema.field(name).nullable for name in sys_tag_cols},
         tied_positions,
     )
-    groups = _system_tag_position_groups(nullable.keys(), tied_positions)
+    groups = _system_tag_position_groups(
+        sys_tag_cols if keep_custom_with_ids else nullable.keys(), tied_positions
+    )
 
     source_id_field = constants.SYSTEM_TAG_SOURCE_ID_PREFIX[
         len(constants.SYSTEM_TAG_PREFIX) :
@@ -1925,15 +1935,28 @@ def sort_system_tag_values(
 
         for row_idx in range(table.num_rows):
             row_tuples = [
-                (sid_values[pos_idx][row_idx], rid_values[pos_idx][row_idx])
+                (sid_values[pos_idx][row_idx], rid_values[pos_idx][row_idx], pos_idx)
                 for pos_idx in range(n_positions)
             ]
             row_tuples.sort(
                 key=lambda pair: (pair[0] is None, pair[0], pair[1] is None, pair[1])
             )
-            for pos_idx, (sid_val, rid_val) in enumerate(row_tuples):
-                sorted_sid[pos_idx].append(sid_val)
-                sorted_rid[pos_idx].append(rid_val)
+            original = table
+            for destination, (sid_val, rid_val, origin) in enumerate(row_tuples):
+                sorted_sid[destination].append(sid_val)
+                sorted_rid[destination].append(rid_val)
+                if not keep_custom_with_ids or destination == origin:
+                    continue
+                from_fields = positions[sorted_positions[origin]]
+                to_fields = positions[sorted_positions[destination]]
+                for kind, name in to_fields.items():
+                    if kind in (source_id_field, record_id_field):
+                        continue
+                    column = from_fields[kind]
+                    field = original.schema.field(column).with_name(name)
+                    table = table.set_column(
+                        table.schema.get_field_index(name), field, original[column]
+                    )
 
         # Replace columns with sorted values
         for pos_idx, (sid_col, rid_col) in enumerate(paired_cols):
