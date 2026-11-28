@@ -2,43 +2,36 @@
 
 from __future__ import annotations
 
+import pytest
 
-class TestHashingConfig:
-    def test_defaults(self):
-        from orcapod.config import HashingConfig
 
-        cfg = HashingConfig()
-        assert cfg.system_tag_n_char is None
-        assert cfg.schema_n_char is None
-        assert cfg.path_n_char is None
+REMOVED_HASHING_FIELDS = ("system_tag_n_char", "schema_n_char", "path_n_char")
 
-    def test_is_frozen(self):
-        import dataclasses
 
-        import pytest
+@pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)
+def test_removed_hashing_constructor_field_is_refused(key: str) -> None:
+    from orcapod.config import HashingConfig
 
-        from orcapod.config import HashingConfig
+    with pytest.raises(TypeError, match=key):
+        HashingConfig(**{key: 6})
 
-        cfg = HashingConfig()
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            cfg.system_tag_n_char = 99  # type: ignore[misc]
 
-    def test_merge_non_default_wins(self):
-        from orcapod.config import HashingConfig
+@pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)
+def test_removed_hashing_mapping_field_is_refused(key: str) -> None:
+    from orcapod.config import OrcapodConfig
 
-        base = HashingConfig()
-        other = HashingConfig(system_tag_n_char=8)
-        merged = base.merge(other)
-        assert merged.system_tag_n_char == 8
-        assert merged.schema_n_char is None  # unchanged
+    with pytest.raises(ValueError, match=key):
+        OrcapodConfig.from_dict({"hashing": {key: 6}})
 
-    def test_merge_default_does_not_override(self):
-        from orcapod.config import HashingConfig
 
-        base = HashingConfig(system_tag_n_char=6)
-        other = HashingConfig()  # all defaults
-        merged = base.merge(other)
-        assert merged.system_tag_n_char == 6  # base value preserved
+@pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)
+def test_removed_hashing_toml_field_is_refused(key: str, tmp_path) -> None:
+    from orcapod.config import load_config
+
+    project_cfg = tmp_path / "orcapod_config.toml"
+    project_cfg.write_text(f"[hashing]\n{key} = 6\n")
+    with pytest.raises(ValueError, match=key):
+        load_config(project_cfg, tmp_path / "missing.toml")
 
 
 class TestDisplayConfig:
@@ -95,14 +88,6 @@ class TestOrcapodConfig:
 
         assert isinstance(DEFAULT_CONFIG, OrcapodConfig)
 
-    def test_with_updates_hashing_section(self):
-        from orcapod.config import HashingConfig, OrcapodConfig
-
-        cfg = OrcapodConfig()
-        updated = cfg.with_updates(hashing=HashingConfig(system_tag_n_char=8))
-        assert updated.hashing.system_tag_n_char == 8
-        assert cfg.hashing.system_tag_n_char is None  # original unchanged
-
     def test_with_updates_display_section(self):
         from orcapod.config import DisplayConfig, OrcapodConfig
 
@@ -110,22 +95,6 @@ class TestOrcapodConfig:
         updated = cfg.with_updates(display=DisplayConfig(max_rows=50))
         assert updated.display.max_rows == 50
         assert cfg.display.max_rows is None  # original unchanged
-
-    def test_merge_hashing_non_default_wins(self):
-        from orcapod.config import HashingConfig, OrcapodConfig
-
-        base = OrcapodConfig()
-        other = OrcapodConfig(hashing=HashingConfig(system_tag_n_char=8))
-        merged = base.merge(other)
-        assert merged.hashing.system_tag_n_char == 8
-
-    def test_merge_hashing_default_does_not_override(self):
-        from orcapod.config import HashingConfig, OrcapodConfig
-
-        base = OrcapodConfig(hashing=HashingConfig(system_tag_n_char=6))
-        other = OrcapodConfig()
-        merged = base.merge(other)
-        assert merged.hashing.system_tag_n_char == 6
 
     def test_merge_display_non_default_wins(self):
         from orcapod.config import DisplayConfig, OrcapodConfig
@@ -151,24 +120,16 @@ class TestOrcapodConfigFromDict:
 
         assert OrcapodConfig.from_dict({}) == DEFAULT_CONFIG
 
-    def test_partial_hashing_section(self):
-        from orcapod.config import OrcapodConfig
-
-        cfg = OrcapodConfig.from_dict({"hashing": {"system_tag_n_char": 8}})
-        assert cfg.hashing.system_tag_n_char == 8
-        assert cfg.hashing.schema_n_char is None  # default preserved
-
     def test_full_sections_round_trip(self):
         from orcapod.config import OrcapodConfig
 
         data = {
-            "hashing": {"system_tag_n_char": 8, "schema_n_char": 6, "path_n_char": 16},
+            "hashing": {},
+            "datetime": {"timezone_policy": "coerce_utc"},
             "display": {"max_rows": 100, "show_source_columns": True},
         }
         cfg = OrcapodConfig.from_dict(data)
-        assert cfg.hashing.system_tag_n_char == 8
-        assert cfg.hashing.schema_n_char == 6
-        assert cfg.hashing.path_n_char == 16
+        assert cfg.datetime.timezone_policy == "coerce_utc"
         assert cfg.display.max_rows == 100
         assert cfg.display.show_source_columns is True
 
@@ -210,7 +171,7 @@ class TestOrcapodConfigFromDict:
         with caplog.at_level(logging.WARNING, logger="orcapod.config"):
             cfg = OrcapodConfig.from_dict({"hashing": "not-a-table"})
         assert "hashing" in caplog.text
-        assert cfg.hashing.system_tag_n_char is None  # falls back to default
+        assert cfg == OrcapodConfig()
 
     def test_non_dict_display_section_warns_and_uses_defaults(self, caplog):
         import logging
@@ -237,12 +198,12 @@ class TestLoadConfig:
         from orcapod.config import load_config
 
         user_cfg = tmp_path / "config.toml"
-        user_cfg.write_text("[hashing]\nsystem_tag_n_char = 8\n")
+        user_cfg.write_text("[display]\nmax_rows = 8\n")
         result = load_config(
             user_config_path=user_cfg,
             project_config_path=tmp_path / "nonexistent.toml",
         )
-        assert result.hashing.system_tag_n_char == 8
+        assert result.display.max_rows == 8
 
     def test_project_local_config_applied(self, tmp_path):
         from orcapod.config import load_config
@@ -259,28 +220,11 @@ class TestLoadConfig:
         from orcapod.config import load_config
 
         user_cfg = tmp_path / "user.toml"
-        user_cfg.write_text("[hashing]\nsystem_tag_n_char = 6\n")
+        user_cfg.write_text("[display]\nmax_rows = 6\n")
         project_cfg = tmp_path / "project.toml"
-        project_cfg.write_text("[hashing]\nsystem_tag_n_char = 10\n")
+        project_cfg.write_text("[display]\nmax_rows = 10\n")
         result = load_config(user_config_path=user_cfg, project_config_path=project_cfg)
-        assert result.hashing.system_tag_n_char == 10
-
-    def test_project_local_wins_over_user_global_with_explicit_value(self, tmp_path):
-        """Project-local file wins over user-global file when both set an explicit value.
-
-        The built-in default is now ``None``, which cannot be expressed in TOML, so
-        this test verifies the simpler (and still meaningful) case: project value 12
-        beats user value 6.
-        """
-        from orcapod.config import load_config
-
-        user_cfg = tmp_path / "user.toml"
-        user_cfg.write_text("[hashing]\nsystem_tag_n_char = 6\n")
-        project_cfg = tmp_path / "project.toml"
-        # Project sets 12 (a non-default value) — should win over user's 6.
-        project_cfg.write_text("[hashing]\nsystem_tag_n_char = 12\n")
-        result = load_config(user_config_path=user_cfg, project_config_path=project_cfg)
-        assert result.hashing.system_tag_n_char == 12
+        assert result.display.max_rows == 10
 
     def test_malformed_toml_raises_value_error(self, tmp_path):
         import pytest

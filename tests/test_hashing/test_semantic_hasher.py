@@ -1073,8 +1073,8 @@ class TestGlobalSingletons:
         assert isinstance(ch.to_hex(), str)
         assert len(ch.to_hex()) == 64
         assert isinstance(ch.to_int(), int)
-        assert isinstance(ch.to_hex(16), str)
-        assert len(ch.to_hex(16)) == 16
+        assert ch.to_int(hexdigits=16) == int(ch.to_hex()[:16], 16)
+        assert ch.to_string(prefix_method=False, hexdigits=16) == ch.to_hex()[:16]
 
     def test_get_default_arrow_hasher_returns_protocol_instance(self):
         """get_default_arrow_hasher() returns the arrow hasher from the default context."""

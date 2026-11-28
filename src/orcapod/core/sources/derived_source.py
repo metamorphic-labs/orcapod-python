@@ -616,7 +616,7 @@ class DerivedSource(RootSource):
             table = table.append_column(
                 table.schema.field(tag).with_name(name), table.column(tag)
             )
-        builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
+        builder = SourceStreamBuilder(self.data_context)
         result = builder.build(
             table,
             tag_columns=self._origin.keys()[0],

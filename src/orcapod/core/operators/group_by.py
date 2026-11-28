@@ -550,9 +550,8 @@ class GroupBy(UnaryOperator):
                 arrays.append(emitted(c) if c in self.by else folded(c))
         grouped_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
-        n_char = self.orcapod_config.hashing.system_tag_n_char
         grouped_table = arrow_utils.append_to_system_tags(
-            grouped_table, stream.pipeline_hash().to_hex(n_char)
+            grouped_table, stream.pipeline_hash().to_hex()
         )
 
         # The keys, in the input's tag order rather than the order of `by`.  A
@@ -727,8 +726,7 @@ class GroupBy(UnaryOperator):
             data-tag key stays scalar.
         """
         tag_types, data_types = stream.output_schema(columns=columns, all_info=all_info)
-        n_char = self.orcapod_config.hashing.system_tag_n_char
-        suffix = stream.pipeline_hash().to_hex(n_char)
+        suffix = stream.pipeline_hash().to_hex()
 
         out_tag_types: dict[str, Any] = {}
         for name, col_type in tag_types.items():

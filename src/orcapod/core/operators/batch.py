@@ -193,9 +193,8 @@ class Batch(UnaryOperator):
             arrays.append(arrow_utils.aggregated_list_array(column, offsets, list_type))
         batched_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
-        n_char = self.orcapod_config.hashing.system_tag_n_char
         batched_table = arrow_utils.append_to_system_tags(
-            batched_table, stream.pipeline_hash().to_hex(n_char)
+            batched_table, stream.pipeline_hash().to_hex()
         )
 
         # A data-tag stays a data-tag: the same list in both roles.
@@ -228,8 +227,7 @@ class Batch(UnaryOperator):
             A ``(tag_schema, data_schema)`` tuple.
         """
         tag_types, data_types = stream.output_schema(columns=columns, all_info=all_info)
-        n_char = self.orcapod_config.hashing.system_tag_n_char
-        suffix = stream.pipeline_hash().to_hex(n_char)
+        suffix = stream.pipeline_hash().to_hex()
 
         batched_tag_types: dict[str, Any] = {}
         for name, col_type in tag_types.items():

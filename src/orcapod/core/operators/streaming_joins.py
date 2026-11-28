@@ -687,9 +687,8 @@ class StreamingJoinKernel(ABC):
 
     def _suffix(self, input_index: int, position: int) -> str:
         """What an input's system-tag column names gain: ``{pipeline hash}:{position}``."""
-        n_char = self.operator.orcapod_config.hashing.system_tag_n_char
         pipeline_hash = self.inputs[input_index].pipeline_hash()
-        return f"{pipeline_hash.to_hex(n_char)}:{position}"
+        return f"{pipeline_hash.to_hex()}:{position}"
 
 
 class StreamingJoin(StreamingJoinKernel):

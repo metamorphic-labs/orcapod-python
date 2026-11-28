@@ -432,7 +432,6 @@ class Join(NonZeroInputOperator):
         appending ::{pipeline_hash}:{canonical_position}. This method
         computes those output column names without performing the join.
         """
-        n_char = self.orcapod_config.hashing.system_tag_n_char
         ordered_streams = self.order_input_streams(*streams)
 
         system_tag_fields: dict[str, DataType] = {}
@@ -442,7 +441,7 @@ class Join(NonZeroInputOperator):
                 if col_name.startswith(constants.SYSTEM_TAG_PREFIX):
                     new_name = (
                         f"{col_name}{constants.BLOCK_SEPARATOR}"
-                        f"{stream.pipeline_hash().to_hex(n_char)}:{idx}"
+                        f"{stream.pipeline_hash().to_hex()}:{idx}"
                     )
                     system_tag_fields[new_name] = col_type
         nullable = arrow_utils.sorted_system_tag_nullability(
@@ -479,8 +478,6 @@ class Join(NonZeroInputOperator):
         # data column (meta columns are dropped, so they never collide).
         tag_schema, data_schema = self._joined_user_schemas(*streams)
 
-        n_char = self.orcapod_config.hashing.system_tag_n_char
-
         stream = ordered_streams[0]
 
         tag_keys, _ = [set(k) for k in stream.keys()]
@@ -495,7 +492,7 @@ class Join(NonZeroInputOperator):
         table = _with_common_key(table)
         table = arrow_utils.append_to_system_tags(
             table,
-            f"{stream.pipeline_hash().to_hex(n_char)}:0",
+            f"{stream.pipeline_hash().to_hex()}:0",
         )
 
         for idx, next_stream in enumerate(ordered_streams[1:], start=1):
@@ -506,7 +503,7 @@ class Join(NonZeroInputOperator):
             )
             next_table = arrow_utils.append_to_system_tags(
                 next_table,
-                f"{next_stream.pipeline_hash().to_hex(n_char)}:{idx}",
+                f"{next_stream.pipeline_hash().to_hex()}:{idx}",
             )
             # trick to ensure that there will always be at least one shared key
             # this ensure that no overlap in keys lead to full caretesian product
@@ -690,7 +687,7 @@ class Join(NonZeroInputOperator):
     ) -> list[str]:
         """Compute per-input system-tag suffixes from pipeline hashes.
 
-        Each suffix is ``{truncated_hash}:{canonical_position}`` where
+        Each suffix is ``{pipeline_hash}:{canonical_position}`` where
         canonical position is determined by sorting the hashes (matching
         the deterministic ordering used by ``static_process``).
 
@@ -701,7 +698,6 @@ class Join(NonZeroInputOperator):
         Returns:
             List of suffix strings, one per input position.
         """
-        n_char = self.orcapod_config.hashing.system_tag_n_char
         hex_strings = [h.to_hex() for h in input_pipeline_hashes]
 
         # Canonical order: sorted by full hex (same as order_input_streams).
@@ -713,11 +709,10 @@ class Join(NonZeroInputOperator):
         for canon_idx, orig_idx in enumerate(ranked):
             canon_position[orig_idx] = canon_idx
 
-        suffixes: list[str] = []
-        for orig_idx in range(len(hex_strings)):
-            truncated = input_pipeline_hashes[orig_idx].to_hex(n_char)
-            suffixes.append(f"{truncated}:{canon_position[orig_idx]}")
-        return suffixes
+        return [
+            f"{hex_digest}:{position}"
+            for hex_digest, position in zip(hex_strings, canon_position, strict=True)
+        ]
 
     async def async_execute(
         self,

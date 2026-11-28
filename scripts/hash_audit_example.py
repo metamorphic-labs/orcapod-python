@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 
-from orcapod.config import DEFAULT_CONFIG
 from orcapod.contexts import resolve_context
 from orcapod.core import row_ids
 from orcapod.core.function_pod import function_pod
@@ -48,7 +47,6 @@ def sub(title: str) -> None:
 
 def main() -> None:
     ctx = resolve_context()
-    schema_n_char = DEFAULT_CONFIG.hashing.schema_n_char
 
     # ------------------------------------------------------------------
     # Build the example pipeline (deterministic source_id values)
@@ -117,11 +115,9 @@ def main() -> None:
     tag_schema, data_schema = scores.output_schema()
     # The schema hash is built from the Arrow schemas of the source's rows (ITL-640).
     arrow_tag, arrow_data = scores.arrow_schemas
-    schema_hash = compute_schema_hash(
-        arrow_tag, arrow_data, scores.data_context, schema_n_char
-    )
+    schema_hash = compute_schema_hash(arrow_tag, arrow_data, scores.data_context)
     print(f"    (tag_schema, data_schema)   = ({tag_schema!r}, {data_schema!r})")
-    print(f"    schema_hash (char_count={schema_n_char!r}) = {schema_hash!r}")
+    print(f"    schema_hash = {schema_hash!r}")
 
     sub("Site 4 — Default source_id (explicit in this example → no hash computed)")
     print(

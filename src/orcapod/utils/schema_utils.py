@@ -639,7 +639,6 @@ def compute_schema_hash(
     tag_schema: "pa.Schema",
     data_schema: "pa.Schema",
     data_context: Any,
-    char_count: int | None,
 ) -> str:
     """Compute the schema hash used for system-tag column naming.
 
@@ -653,45 +652,12 @@ def compute_schema_hash(
         tag_schema: The Arrow schema of the tag columns.
         data_schema: The Arrow schema of the data columns (data-tags included).
         data_context: The active ``DataContext``.
-        char_count: Number of hex characters to include. ``None`` returns the full
-            hex digest.
 
     Returns:
-        Hex string: the full digest when ``char_count`` is ``None``, otherwise
-        truncated to ``char_count`` characters.
+        The full hex digest of the schema hash.
     """
     identity = arrow_schema_identity(tag_schema, data_schema, data_context)
-    return data_context.semantic_hasher.hash_object(identity).to_hex(
-        char_count=char_count
-    )
-
-
-def compute_source_schema_hash(
-    tag_schema: "pa.Schema",
-    data_schema: "pa.Schema",
-    data_context: Any,
-    config: Any,
-) -> str:
-    """Compute the schema hash for system-tag column naming from a ``DataContext`` and config.
-
-    This is the canonical single entry-point used by ``SourceStreamBuilder``,
-    ``SourceNodeBase``, and ``PollingSource`` so the truncation by
-    ``config.hashing.schema_n_char`` is not replicated at every call site.
-
-    Args:
-        tag_schema: The Arrow schema of the tag columns.
-        data_schema: The Arrow schema of the data columns (data-tags included).
-        data_context: The active ``DataContext``.
-        config: Active ``OrcapodConfig`` — ``config.hashing.schema_n_char``
-            controls hash truncation.
-
-    Returns:
-        Hex string schema hash, truncated to ``config.hashing.schema_n_char``
-        characters.
-    """
-    return compute_schema_hash(
-        tag_schema, data_schema, data_context, config.hashing.schema_n_char
-    )
+    return data_context.semantic_hasher.hash_object(identity).to_hex()
 
 
 def column_names(columns: str | Iterable[str]) -> tuple[str, ...]:

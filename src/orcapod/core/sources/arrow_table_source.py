@@ -118,7 +118,7 @@ class ArrowTableSource(RootSource):
             table = table.cast(arrow_utils.infer_schema_nullable(table))
         # else: schema is trusted as-is.
 
-        builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
+        builder = SourceStreamBuilder(self.data_context)
         result = builder.build(
             table,
             tag_columns=tag_columns,

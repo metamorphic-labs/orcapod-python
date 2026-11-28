@@ -60,7 +60,7 @@ from orcapod.utils import arrow_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
 from orcapod.utils.schema_utils import (
     arrow_schema_identity,
-    compute_source_schema_hash,
+    compute_schema_hash,
     declared_arrow_schema,
 )
 
@@ -881,14 +881,9 @@ class SourceNodeBase(TraceableBase, ABC):
             # The saved type text stands in until the class is registered (ITL-1138).
             return self.data_context.semantic_hasher.hash_object(
                 (self._tag_schema, self._data_schema)
-            ).to_hex(char_count=self.orcapod_config.hashing.schema_n_char)
+            ).to_hex()
         tag_schema, data_schema = self.arrow_schemas
-        return compute_source_schema_hash(
-            tag_schema,
-            data_schema,
-            self.data_context,
-            self.orcapod_config,
-        )
+        return compute_schema_hash(tag_schema, data_schema, self.data_context)
 
     @property
     def node_uri(self) -> tuple[str, ...]:

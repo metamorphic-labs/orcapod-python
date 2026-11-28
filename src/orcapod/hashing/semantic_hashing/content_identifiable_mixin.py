@@ -256,7 +256,7 @@ class ContentIdentifiableMixin:
         encouraged to override this if they need a more informative repr.
         """
         try:
-            short_hash = self.content_hash().to_hex(char_count=8)
+            short_hash = self.content_hash().to_hex()[:8]
         except Exception:
             short_hash = "<hash-unavailable>"
         return f"{type(self).__name__}(content_hash={short_hash!r})"

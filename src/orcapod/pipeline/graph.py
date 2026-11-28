@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import orcapod
+from orcapod.config import reject_removed_hashing_settings
 from orcapod.contexts import resolve_saved_context
 from orcapod.core.nodes import (
     FunctionNode,
@@ -321,7 +322,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         Raises:
             ValueError: If the file's format version is not the one this Orcapod
-                writes (an earlier format is refused, never migrated).
+                writes or a node specifies a removed hash-length setting.
         """
         import json as _json
         from orcapod.pipeline.serialization import (
@@ -387,6 +388,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             # Every node records its nullability (ITL-1043), and every function node
             # names its data-tags (ITL-1019).
             try:
+                reject_removed_hashing_settings(descriptor.get("config"))
                 require_nullability_records(descriptor)
                 if descriptor.get("node_type") == "function":
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(

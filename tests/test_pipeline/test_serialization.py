@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pyarrow as pa
 import pytest
 
 import orcapod
+from orcapod.config import DEFAULT_CONFIG, DisplayConfig
 from orcapod.core.nodes import SourceNode
 from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource
@@ -45,6 +47,54 @@ def spec_pipeline(tmp_path):
         Join()(node_a, node_b, label="joiner")
 
     return pipeline, tmp_path
+
+
+def test_saved_pipeline_accepts_old_default_hashing_settings(spec_pipeline) -> None:
+    pipeline, tmp_path = spec_pipeline
+    path = tmp_path / "pipeline.json"
+    pipeline.save(path)
+    saved = json.loads(path.read_text())
+    operator = next(n for n in saved["nodes"].values() if n["node_type"] == "operator")
+    # A read-only node restores its display settings directly from the descriptor.
+    del operator["operator_config"]
+    # The old writer serialized all dataclass defaults alongside a display override.
+    operator["config"] = dataclasses.asdict(
+        DEFAULT_CONFIG.with_updates(display=DisplayConfig(max_rows=17))
+    )
+    operator["config"]["hashing"] = {
+        "system_tag_n_char": None,
+        "schema_n_char": None,
+        "path_n_char": None,
+    }
+    path.write_text(json.dumps(saved))
+
+    loaded = Pipeline.load(path)
+    assert loaded.nodes["joiner"].orcapod_config.display.max_rows == 17
+    loaded.save(path)
+    resaved = json.loads(path.read_text())
+    operator = next(
+        n for n in resaved["nodes"].values() if n["node_type"] == "operator"
+    )
+    assert operator["config"]["hashing"] == {}
+
+
+@pytest.mark.parametrize(
+    ("node_type", "key"),
+    [("source", "schema_n_char"), ("operator", "system_tag_n_char")],
+)
+def test_saved_pipeline_refuses_removed_hashing_settings(
+    spec_pipeline, node_type: str, key: str
+) -> None:
+    pipeline, tmp_path = spec_pipeline
+    path = tmp_path / "pipeline.json"
+    pipeline.save(path)
+    saved = json.loads(path.read_text())
+    node = next(n for n in saved["nodes"].values() if n["node_type"] == node_type)
+    node["config"] = {"hashing": {key: 6}}
+    path.write_text(json.dumps(saved))
+
+    with pytest.raises(ValueError, match=key):
+        Pipeline.load(path)
 
 
 class TestPipelineBlueprintSave:

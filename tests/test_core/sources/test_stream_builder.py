@@ -16,10 +16,9 @@ class TestSourceStreamBuilder:
     @pytest.fixture
     def builder(self):
         from orcapod.contexts import resolve_context
-        from orcapod.config import DEFAULT_CONFIG
 
         ctx = resolve_context(None)
-        return SourceStreamBuilder(data_context=ctx, config=DEFAULT_CONFIG)
+        return SourceStreamBuilder(data_context=ctx)
 
     def test_build_returns_source_stream_result(self, builder):
         table = pa.table({"id": pa.array([1, 2]), "x": pa.array([10, 20])})
@@ -115,10 +114,9 @@ class TestSourceStreamBuilderRespectsSchema:
     @pytest.fixture
     def builder(self):
         from orcapod.contexts import resolve_context
-        from orcapod.config import DEFAULT_CONFIG
 
         ctx = resolve_context(None)
-        return SourceStreamBuilder(data_context=ctx, config=DEFAULT_CONFIG)
+        return SourceStreamBuilder(data_context=ctx)
 
     def test_nullable_true_schema_preserved(self, builder):
         """build() preserves nullable=True from incoming schema."""

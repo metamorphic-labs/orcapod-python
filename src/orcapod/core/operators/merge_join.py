@@ -350,8 +350,7 @@ class MergeJoin(BinaryOperator):
         ``position`` is the input's argument index (0 for the first, 1 for the
         second): MergeJoin is ordered, so its inputs are never reordered.
         """
-        n_char = self.orcapod_config.hashing.system_tag_n_char
-        return f"{stream.pipeline_hash().to_hex(n_char)}:{position}"
+        return f"{stream.pipeline_hash().to_hex()}:{position}"
 
     def _predict_system_tag_schema(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol

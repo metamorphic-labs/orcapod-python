@@ -1153,9 +1153,8 @@ def test_reducing_operator_names_system_tags_after_its_input(
     input. The input here is an operator's output, whose pipeline hash is not the
     schema-only hash of its rows.
     """
-    op = make_op()
     stream = after_operator(source_a())
-    suffix = stream.pipeline_hash().to_hex(op.orcapod_config.hashing.system_tag_n_char)
+    suffix = stream.pipeline_hash().to_hex()
     for rows in (sync_rows(make_op(), stream), async_rows(make_op(), stream)):
         for tag, _ in rows:
             names = list(tag.system_tags())

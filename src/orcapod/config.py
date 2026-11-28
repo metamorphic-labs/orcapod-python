@@ -9,6 +9,35 @@ from typing import Any, Literal, Self
 
 logger = logging.getLogger(__name__)
 
+_REMOVED_HASHING_SETTINGS = frozenset(
+    {"system_tag_n_char", "schema_n_char", "path_n_char"}
+)
+
+
+def reject_removed_hashing_settings(config: object) -> None:
+    """Refuse values for removed hash-length settings.
+
+    Older saved descriptors included null for each unset setting whenever
+    another section was customized.
+
+    Args:
+        config: Parsed configuration, possibly absent or malformed.
+
+    Raises:
+        ValueError: If a removed setting has a non-null value.
+    """
+    if not isinstance(config, Mapping):
+        return
+    hashing = config.get("hashing")
+    if not isinstance(hashing, Mapping):
+        return
+    removed = sorted(
+        key for key in _REMOVED_HASHING_SETTINGS if hashing.get(key) is not None
+    )
+    if removed:
+        settings = ", ".join(f"hashing.{key}" for key in removed)
+        raise ValueError(f"Removed hash-length settings: {settings}. Use full digests.")
+
 
 @dataclass(frozen=True)
 class _SectionConfig:
@@ -71,16 +100,7 @@ class DatetimeConfig(_SectionConfig):
 
 @dataclass(frozen=True)
 class HashingConfig(_SectionConfig):
-    """Hash length settings for system-tag column names, schema hashes, and path scoping.
-
-    All fields default to ``None``, which means full-length hashes are used everywhere.
-    Set a field to a positive integer to truncate hashes to that many hex characters
-    (e.g. for backwards compatibility with existing stored data).
-    """
-
-    system_tag_n_char: int | None = None
-    schema_n_char: int | None = None
-    path_n_char: int | None = None
+    """Hashing configuration. Hashes in stored names use full digests."""
 
 
 @dataclass(frozen=True)
@@ -168,7 +188,17 @@ class OrcapodConfig:
         Returns:
             ``OrcapodConfig`` populated from ``data``; missing sections and fields
             fall back to built-in defaults.
+
+        Raises:
+            ValueError: If a removed hash-length setting has a non-null value.
         """
+        try:
+            reject_removed_hashing_settings(data)
+        except ValueError as exc:
+            if source_path is not None:
+                exc.add_note(f"Loading configuration from {source_path}")
+            raise
+
         known_sections = {"hashing", "display", "datetime"}
         path_str = f" in {source_path}" if source_path is not None else ""
 
@@ -177,20 +207,16 @@ class OrcapodConfig:
                 logger.warning("Unknown config section %r%s — ignored", key, path_str)
 
         hashing_dict = data.get("hashing", {})
-        known_hashing = set(HashingConfig.__dataclass_fields__)
         if not isinstance(hashing_dict, Mapping):
             logger.warning(
                 "Config section [hashing]%s is not a table — ignored", path_str
             )
             hashing_dict = {}
         for key in hashing_dict:
-            if key not in known_hashing:
+            if key not in _REMOVED_HASHING_SETTINGS:
                 logger.warning(
                     "Unknown field %r in [hashing]%s — ignored", key, path_str
                 )
-        hashing = HashingConfig(
-            **{k: v for k, v in hashing_dict.items() if k in known_hashing}
-        )
 
         display_dict = data.get("display", {})
         known_display = set(DisplayConfig.__dataclass_fields__)
@@ -224,7 +250,7 @@ class OrcapodConfig:
             **{k: v for k, v in datetime_dict.items() if k in known_datetime}
         )
 
-        return cls(hashing=hashing, display=display, datetime=datetime_config)
+        return cls(display=display, datetime=datetime_config)
 
 
 # Module-level default config — created at import time.
@@ -255,7 +281,8 @@ def load_config(
         Merged ``OrcapodConfig`` with all applicable overrides applied.
 
     Raises:
-        ValueError: If a config file exists but contains invalid TOML.
+        ValueError: If a config file contains invalid TOML or a removed hash-length
+            setting.
     """
     import tomllib
 
@@ -270,7 +297,6 @@ def load_config(
         else Path.cwd() / "orcapod_config.toml"
     )
 
-    known_hashing = set(HashingConfig.__dataclass_fields__)
     known_display = set(DisplayConfig.__dataclass_fields__)
     known_datetime = set(DatetimeConfig.__dataclass_fields__)
 
@@ -284,6 +310,10 @@ def load_config(
                 data = tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
             raise ValueError(f"Malformed TOML in {path}: {e}") from e
+        try:
+            reject_removed_hashing_settings(data)
+        except ValueError as exc:
+            raise ValueError(f"{path}: {exc}") from exc
 
         # Warn on unknown top-level sections.
         for key in data:
@@ -298,14 +328,11 @@ def load_config(
             logger.warning(
                 "Config section [hashing] in %s is not a table — ignored", path
             )
-            hashing_data = {}
         else:
             for key in hashing_data:
-                if key not in known_hashing:
-                    logger.warning(
-                        "Unknown field %r in [hashing] in %s — ignored", key, path
-                    )
-        hashing_updates = {k: v for k, v in hashing_data.items() if k in known_hashing}
+                logger.warning(
+                    "Unknown field %r in [hashing] in %s — ignored", key, path
+                )
 
         display_data = data.get("display", {})
         if not isinstance(display_data, dict):
@@ -337,10 +364,6 @@ def load_config(
             k: v for k, v in datetime_data.items() if k in known_datetime
         }
 
-        if hashing_updates:
-            config = config.with_updates(
-                hashing=replace(config.hashing, **hashing_updates)
-            )
         if display_updates:
             config = config.with_updates(
                 display=replace(config.display, **display_updates)

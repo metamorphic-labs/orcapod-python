@@ -252,7 +252,7 @@ class DBTableSource(RootSource):
 
     def _build(self, table: pa.Table) -> SourceStreamResult:
         """Enrich ``table`` as this source's stream (source info, system tags)."""
-        builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
+        builder = SourceStreamBuilder(self.data_context)
         return builder.build(
             table,
             tag_columns=self._tag_columns,

@@ -43,7 +43,7 @@ copy_out = fx.elapsed_s2.pod(copy_in)
 
 def h(x) -> str:
     """Return the first 16 hex characters of a ``ContentHash``."""
-    return x.to_hex(16)
+    return x.to_hex()[:16]
 
 
 print("=== per-row input data content_hash (the pod's result-cache key)")
@@ -96,7 +96,7 @@ for name, stream in (("W2", w2_in), ("copy", copy_in)):
         f"input_data_hash=...{vals['__input_data_hash'].hex()[-16:]}",
     )
     # How FunctionNode.compute_base_entry_id hashes the preimage.
-    entry = contexts.get_default_context().arrow_hasher.hash_table(pre).to_hex(16)
+    entry = contexts.get_default_context().arrow_hasher.hash_table(pre).to_hex()[:16]
     print(f"{name:5s} base entry id (arrow hash of the preimage): {entry}")
 
 print("\n=== divergence: the copy is ordinary data once created")

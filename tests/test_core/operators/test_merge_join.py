@@ -337,7 +337,6 @@ class TestMergeJoinArgumentOrder:
         from orcapod.system_constants import constants
 
         op = MergeJoin()
-        n_char = op.orcapod_config.hashing.system_tag_n_char
         for order in ((left_source, right_source), (right_source, left_source)):
             table = op.static_process(*order).as_table(columns={"system_tags": True})
             sys_cols = [
@@ -346,7 +345,7 @@ class TestMergeJoinArgumentOrder:
                 if c.startswith(constants.SYSTEM_TAG_PREFIX)
             ]
             for index, stream in enumerate(order):
-                suffix = f"{stream.pipeline_hash().to_hex(n_char)}:{index}"
+                suffix = f"{stream.pipeline_hash().to_hex()}:{index}"
                 assert sum(c.endswith(suffix) for c in sys_cols) == 2, suffix
 
     def test_system_tag_values_same_pipeline_hash_follow_argument_order(self):
@@ -632,10 +631,7 @@ class TestMergeJoinSystemTags:
 
     def test_system_tag_positions_are_argument_indices(self, left_source, right_source):
         """System tag columns carry each input's argument index (ITL-1281)."""
-        from orcapod.config import OrcapodConfig
         from orcapod.system_constants import constants
-
-        n_char = OrcapodConfig().hashing.system_tag_n_char
 
         op = MergeJoin()
         result = op.static_process(left_source, right_source)
@@ -654,8 +650,8 @@ class TestMergeJoinSystemTags:
             )
             positions[index_str] = stream_hash
         assert positions == {
-            "0": left_source.pipeline_hash().to_hex(n_char),
-            "1": right_source.pipeline_hash().to_hex(n_char),
+            "0": left_source.pipeline_hash().to_hex(),
+            "1": right_source.pipeline_hash().to_hex(),
         }
 
     def test_same_schema_inputs_distinguished_by_argument_position(self):

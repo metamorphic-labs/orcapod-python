@@ -936,23 +936,21 @@ def schema_compute_schema_hash() -> dict[str, Any]:
     from orcapod.utils.schema_utils import compute_schema_hash
 
     tag_schema, data_schema = _tag_data_arrow_schemas()
-    ctx = _ctx()
+    full = compute_schema_hash(tag_schema, data_schema, _ctx())
     return {
-        "full": compute_schema_hash(tag_schema, data_schema, ctx, None),
-        "chars_16": compute_schema_hash(tag_schema, data_schema, ctx, 16),
+        "full": full,
+        # Preserve the existing golden projection of the full digest.
+        "chars_16": full[:16],
     }
 
 
 @case("schema", "source_schema_hash")
 def schema_source_schema_hash() -> dict[str, Any]:
-    from orcapod import DEFAULT_CONFIG
     from orcapod.utils.arrow_utils import system_tag_column_names
-    from orcapod.utils.schema_utils import compute_source_schema_hash
+    from orcapod.utils.schema_utils import compute_schema_hash
 
     tag_schema, data_schema = _tag_data_arrow_schemas()
-    schema_hash = compute_source_schema_hash(
-        tag_schema, data_schema, _ctx(), DEFAULT_CONFIG
-    )
+    schema_hash = compute_schema_hash(tag_schema, data_schema, _ctx())
     source_id_col, record_id_col = system_tag_column_names(schema_hash)
     return {
         "schema_hash": schema_hash,
@@ -981,10 +979,9 @@ def _builder_table() -> pa.Table:
 @case("schema", "source_stream_builder")
 def schema_source_stream_builder() -> dict[str, Any]:
     # SourceStreamBuilder is not public API; the issue names it as a pinned call site.
-    from orcapod import DEFAULT_CONFIG
     from orcapod.core.sources.stream_builder import SourceStreamBuilder
 
-    builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
+    builder = SourceStreamBuilder(_ctx())
     out: dict[str, Any] = {}
     variants: dict[str, dict[str, Any]] = {
         # Every source id has a kind part (ITL-1425): the builder takes it and a name.
@@ -1091,7 +1088,6 @@ def schema_hash_in_key_order() -> dict[str, Any]:
     Returns:
         Each variant's source id, content hash and table hash.
     """
-    from orcapod import DEFAULT_CONFIG
     from orcapod.core.sources import (
         ArrowTableSource,
         DataFrameSource,
@@ -1172,7 +1168,7 @@ def schema_hash_in_key_order() -> dict[str, Any]:
             prefix = f"{kind}.aligned.{key_name}"
             out[f"{prefix}.source_id"] = source.source_id
             out[f"{prefix}.content_hash"] = source.content_hash().to_string()
-    builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
+    builder = SourceStreamBuilder(_ctx())
     for variant, kwargs in variants.items():
         for order, rows in row_orders.items():
             result = builder.build(

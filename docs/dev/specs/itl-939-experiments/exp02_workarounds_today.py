@@ -98,8 +98,8 @@ def show(label: str, stream) -> None:
         c for c in stream.as_table(all_info=True).column_names if c.startswith("_tag_")
     ]
     print("system tag columns:", sys_cols)
-    print("pipeline_hash:", stream.pipeline_hash().to_hex(16))
-    print("content_hash: ", stream.content_hash().to_hex(16))
+    print("pipeline_hash:", stream.pipeline_hash().to_hex()[:16])
+    print("content_hash: ", stream.content_hash().to_hex()[:16])
 
 
 def rows(stream, cols: list[str]) -> None:

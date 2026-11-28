@@ -110,10 +110,10 @@ print("derived all columns:", [c[:40] for c in der_t.column_names])
 print("derived _source_task_upper[0]:", der_t["_source_task_upper"][0].as_py())
 
 print("\n=== 5. identity")
-print("origin  content_hash :", node.content_hash().to_hex(16))
-print("derived content_hash :", derived.content_hash().to_hex(16))
-print("origin  pipeline_hash:", node.pipeline_hash().to_hex(16))
-print("derived pipeline_hash:", derived.pipeline_hash().to_hex(16))
+print("origin  content_hash :", node.content_hash().to_hex()[:16])
+print("derived content_hash :", derived.content_hash().to_hex()[:16])
+print("origin  pipeline_hash:", node.pipeline_hash().to_hex()[:16])
+print("derived pipeline_hash:", derived.pipeline_hash().to_hex()[:16])
 print("derived.upstreams:", derived.upstreams, "| producer:", derived.producer)
 
 

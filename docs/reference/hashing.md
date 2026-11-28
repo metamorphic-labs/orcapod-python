@@ -22,10 +22,10 @@ appended, because it is a variant of the same system tag mechanism.)
 |---|------|-----------|---------------|--------------------|
 | 1 | `content_hash()` | `SemanticAwarePythonHasher` → JSON + SHA-256 | `ContentHash` | Unique per semantic content of the object; data-inclusive |
 | 2 | `pipeline_hash()` | `SemanticAwarePythonHasher` → JSON + SHA-256 | `ContentHash` | Unique per pipeline topology + schema; data-exclusive |
-| 3 | Schema hash (system tag column naming) | `SemanticAwarePythonHasher.hash_object((hash_schema(tag), hash_schema(data))).to_hex(n)` over the Arrow schemas | Truncated hex `str` | Unique per Arrow `(tag, data)` schema pair; embedded in system tag column names |
+| 3 | Schema hash (system tag column naming) | `SemanticAwarePythonHasher.hash_object((hash_schema(tag), hash_schema(data))).to_hex()` over the Arrow schemas | Full hex digest (`str`) | Unique per Arrow `(tag, data)` schema pair; embedded in system tag column names |
 | 4 | Default `source_id` of an in-memory source | `"<kind part>:" + StarfixArrowHasher.hash_table(table).to_string()` | `str`, `<kind>_v<N>:<algorithm label>:<hex>` | Unique per kind, implementation version and raw table content; the hash is the source's name when none is given |
 | 5 | Per-row `record_id` (system tag value) | the row identifier itself: `row_<n>`, or the canonical JSON of the key columns (`key_row_identifier`) | `str` (`large_string`) | Names the row within its source; stable as long as its position or its key is |
-| 6 | Join system tag suffix | `stream.pipeline_hash().to_hex(n)` + `:{idx}` appended to column name | Column name suffix | Unique per `(input topology, canonical join position)`; encodes full join lineage in column name |
+| 6 | Join system tag suffix | `stream.pipeline_hash().to_hex()` + `:{idx}` appended to column name | Column name suffix | Unique per `(input topology, canonical join position)`; encodes full join lineage in column name |
 | 6b | Aggregating operator system tag fold | SHA-256 of the canonical JSON list of member values, after the operation's label, for both system tags | `"<fold label>:<hex>"` `str`, plus a column name suffix | Deterministic per ordered member set; keeps system tags scalar through a many-to-one reduction |
 | 7 | Entry id (`row_ids.entry_id`) | `StarfixArrowHasher.hash_table(tags + system_tags + INPUT_DATA_HASH_COL)` | `ContentHash`; stored as `bytes` (`b"method:digest"`) | Unique per `(tag lineage, input_data content)`: an entry of the pipeline table |
 | 8 | Instance id (`row_ids.instance_id`) | `StarfixArrowHasher.hash_table(entry id + source-info tokens in name order)` | `ContentHash`; stored as `bytes` | Unique per `(entry, provenance of the input)`: one arrival of an entry; the pipeline table's lookup column |
@@ -1088,8 +1088,8 @@ topology suffix, encoding the full join lineage into each column name.
 | Field | Value |
 |---|---|
 | **Inputs** | the Arrow tag schema and data schema (a data-tag in both) of the source's table, or of a slot |
-| **Algorithm** | `SemanticAwarePythonHasher.hash_object((hash_schema(tag), hash_schema(data))).to_hex(schema_n_char)` (`schema_utils.compute_schema_hash`), where `schema_n_char = OrcapodConfig.hashing.schema_n_char` |
-| **Output format** | Truncated hex `str` (length = `schema_n_char`; `None` = full digest) |
+| **Algorithm** | `SemanticAwarePythonHasher.hash_object((hash_schema(tag), hash_schema(data))).to_hex()` (`schema_utils.compute_schema_hash`) |
+| **Output format** | Full hex digest (`str`) |
 | **Uniqueness guarantee** | Unique per Arrow schema pair; two sources whose Arrow schemas are equal (as "The Arrow schema hash" compares them) produce identically-named system tag columns, and two that differ in any Arrow type (`int32` and `int64`) do not |
 | **Known exclusions** | No data content; no source identity; purely structural |
 
@@ -1101,7 +1101,7 @@ topology suffix, encoding the full join lineage into each column name.
 |---|---|
 | **Inputs** | Full raw Arrow table (all columns, before any system tag injection), its rows in the order given, or sorted by the key columns in key order with `hash_in_key_order=True` (`arrow_utils.key_row_order`, ITL-1272) |
 | **Algorithm** | `build_source_id(<kind>, <version>, hash_source_name(StarfixArrowHasher.hash_table(table)))`, at full length — the table hash is starfix hash format 2: the 3-byte format number `00 00 02` followed by a SHA-256 digest (`starfix` 0.6.0 or newer, with the float rule, §9) |
-| **Output format** | `str`: `<kind>_v<N>:<algorithm label>:<hex>`, for example `dict_v1:arrow_v1:000002fe…`. The kind is the class's config type key (`SOURCE_KIND`: `arrow_table`, `dict`, `list`, `data_frame`) and `N` its `SOURCE_VERSION`; the label is the one the hash carries. Nothing is shortened: the hex is the full digest whatever `hashing.path_n_char` says (a default source id is a name; developer, November 16, 2026). The parts hold no `:`, so the id never contains the `::` that separates the parts of a source-info value |
+| **Output format** | `str`: `<kind>_v<N>:<algorithm label>:<hex>`, for example `dict_v1:arrow_v1:000002fe…`. The kind is the class's config type key (`SOURCE_KIND`: `arrow_table`, `dict`, `list`, `data_frame`) and `N` its `SOURCE_VERSION`; the label is the one the hash carries. The hex is the full digest. The parts hold no `:`, so the id never contains the `::` that separates the parts of a source-info value |
 | **Uniqueness guarantee** | Unique per kind, implementation version and raw table content; changes if any cell value changes or the rows are reordered, except with `hash_in_key_order=True`, where a reorder changes nothing and a change of the key columns' order changes the id only when it sorts the table differently (it always changes the content hash, which holds the key columns in key order) |
 | **Known exclusions** | Used **only** as a fallback when no explicit `source_id` is provided. With a user-supplied `source_id` the builder still computes the table hash (it returns it as `table_hash`), but the hash enters neither the id nor the source's identity. |
 
@@ -1148,7 +1148,7 @@ print(first_row["_source_age"])
 | Field | Value |
 |---|---|
 | **Inputs** | `stream.pipeline_hash()` of each canonically-ordered input stream + its 0-based canonical position index `idx` |
-| **Algorithm** | Streams are first sorted by `stream.pipeline_hash().to_hex()` for determinism. For each input at canonical position `idx`, every existing system tag column name has `{BLOCK_SEPARATOR}{stream.pipeline_hash().to_hex(system_tag_n_char)}:{idx}` appended via `arrow_utils.append_to_system_tags()`. (`system_tag_n_char` from `OrcapodConfig.hashing`; default `None` = full digest.) |
+| **Algorithm** | Streams are first sorted by `stream.pipeline_hash().to_hex()` for determinism. For each input at canonical position `idx`, every existing system tag column name has `{BLOCK_SEPARATOR}{stream.pipeline_hash().to_hex()}:{idx}` appended via `arrow_utils.append_to_system_tags()`. |
 | **Output format** | Column name suffix; no separate value is stored |
 | **Uniqueness guarantee** | Each post-join system tag column name uniquely identifies `(original schema, input topology, canonical join position)`; no collision even when joining streams with identical schemas |
 | **Known exclusions** | `SemiJoin` passes system tags through unchanged. Aggregating operators (`Batch`, `GroupBy`) use the fold described in site 6b instead. |
@@ -1166,7 +1166,7 @@ tag columns too, so those calls are as wide as the joins make them (ITL-1132).
 | Field | Value |
 |---|---|
 | **Inputs** | The ordered list of a group's member values for one system tag column, and the operation's label |
-| **Algorithm** | `arrow_utils.fold_system_tag_values(values, label=...)`, one helper for both system tags: SHA-256 of the canonical JSON array of the members in order (`json.dumps([None if v is None else str(v) for v in values], separators=(",", ":"), ensure_ascii=False)`, UTF-8), as 64 hex characters after the operation's label: `batch_v1:<hex>` for `Batch` (`BATCH_FOLD_LABEL`, in `batch.py`), `group_v1:<hex>` for `GroupBy` (`GROUP_BY_FOLD_LABEL`, in `group_by.py`). The label names the operation; each operation's procedure may change on its own (ITL-1154). The array marks where each member ends, so `["ab", "c"]` and `["a", "bc"]` fold differently, and a `None` member (`null`) differs from `""` (ITL-942). The folded column name then gains `{BLOCK_SEPARATOR}{stream.pipeline_hash().to_hex(system_tag_n_char)}` via `arrow_utils.append_to_system_tags()`. |
+| **Algorithm** | `arrow_utils.fold_system_tag_values(values, label=...)`, one helper for both system tags: SHA-256 of the canonical JSON array of the members in order (`json.dumps([None if v is None else str(v) for v in values], separators=(",", ":"), ensure_ascii=False)`, UTF-8), as 64 hex characters after the operation's label: `batch_v1:<hex>` for `Batch` (`BATCH_FOLD_LABEL`, in `batch.py`), `group_v1:<hex>` for `GroupBy` (`GROUP_BY_FOLD_LABEL`, in `group_by.py`). The label names the operation; each operation's procedure may change on its own (ITL-1154). The array marks where each member ends, so `["ab", "c"]` and `["a", "bc"]` fold differently, and a `None` member (`null`) differs from `""` (ITL-942). The folded column name then gains `{BLOCK_SEPARATOR}{stream.pipeline_hash().to_hex()}` via `arrow_utils.append_to_system_tags()`. |
 | **Output format** | `"<fold label>:<64 hex>"` `str` for the source id and the record id alike: **scalar**, matching the input column's type |
 | **Uniqueness guarantee** | Deterministic per ordered member set, and stable across processes (both primitives are SHA-based). `Batch` and `GroupBy` both order their members deterministically before folding, so an unchanged member set always folds to the same digest |
 | **Known exclusions** | Member order is significant; a permuted member set folds differently. This is why `GroupBy` sorts members by their non-key tag values with `record_id` as a tiebreaker rather than relying on upstream emission order |

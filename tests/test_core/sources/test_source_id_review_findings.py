@@ -345,23 +345,17 @@ class TestFinding4LegacyConfigInAJobFile:
 class TestFinding5OneBuilderOneParser:
     @pytest.mark.parametrize("bad", ["wrong", "csv", "csv_v0", "Csv_v1", "csv_v1:x"])
     def test_the_stream_builder_refuses_a_malformed_kind_part(self, bad):
-        from orcapod.config import DEFAULT_CONFIG
         from orcapod.contexts import resolve_context
 
-        builder = SourceStreamBuilder(
-            data_context=resolve_context(None), config=DEFAULT_CONFIG
-        )
+        builder = SourceStreamBuilder(data_context=resolve_context(None))
         table = pa.Table.from_pylist(ROWS, schema=SCHEMA)
         with pytest.raises(ValueError, match="kind part"):
             builder.build(table, tag_columns=KEY, source_name="x", kind_part=bad)
 
     def test_the_stream_builder_builds_a_valid_kind_part(self):
-        from orcapod.config import DEFAULT_CONFIG
         from orcapod.contexts import resolve_context
 
-        builder = SourceStreamBuilder(
-            data_context=resolve_context(None), config=DEFAULT_CONFIG
-        )
+        builder = SourceStreamBuilder(data_context=resolve_context(None))
         table = pa.Table.from_pylist(ROWS, schema=SCHEMA)
         result = builder.build(
             table, tag_columns=KEY, source_name="a:b", kind_part="csv_v1"

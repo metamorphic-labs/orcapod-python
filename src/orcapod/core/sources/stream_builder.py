@@ -28,10 +28,9 @@ from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.schema_utils import compute_source_schema_hash
+from orcapod.utils.schema_utils import compute_schema_hash
 
 if TYPE_CHECKING:
-    from orcapod.config import OrcapodConfig
     from orcapod.contexts import DataContext
     from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
 
@@ -449,12 +448,10 @@ class SourceStreamBuilder:
 
     Args:
         data_context: Provides type_converter, semantic_hasher, arrow_hasher.
-        config: Orcapod config (controls hash character counts).
     """
 
-    def __init__(self, data_context: DataContext, config: OrcapodConfig) -> None:
+    def __init__(self, data_context: DataContext) -> None:
         self._data_context = data_context
-        self._config = config
 
     def build(
         self,
@@ -591,11 +588,10 @@ class SourceStreamBuilder:
         tag_schema = non_sys.select(list(tag_columns_tuple)).schema
         data_schema = non_sys.drop(list(tag_only_tuple)).schema
         try:
-            schema_hash = compute_source_schema_hash(
+            schema_hash = compute_schema_hash(
                 tag_schema,
                 data_schema,
                 self._data_context,
-                self._config,
             )
         except ValueError as exc:
             # A type the Arrow hasher cannot hash fails here first, at its schema
