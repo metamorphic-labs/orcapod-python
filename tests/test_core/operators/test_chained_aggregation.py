@@ -252,7 +252,7 @@ class TestSyncChains:
             assert not field.nullable, name
 
     def test_source_info_columns_nest_their_incoming_type(self, chain: Chain) -> None:
-        """``_source_<col>`` is ``large_list`` of the upstream ``_source_<col>`` type."""
+        """A nullable token field holds a list of the upstream token type."""
         upstream = chain.upstream.as_table(columns=WITH_SOURCE).schema
         result = chain.result.as_table(columns=WITH_SOURCE).schema
         source_columns = [n for n in upstream.names if n.startswith(SOURCE)]
@@ -260,7 +260,7 @@ class TestSyncChains:
         for name in source_columns:
             incoming = upstream.field(name).type
             assert result.field(name).type == LL(incoming), name
-            assert not result.field(name).nullable, name
+            assert result.field(name).nullable, name
 
     @pytest.mark.parametrize("columns", [{}, {"system_tags": True}], ids=str)
     def test_prediction_matches_static_process(

@@ -1235,9 +1235,9 @@ def stream_from_batches(
     (``InputChannel.to_stream``), and the record batches a row-by-row operator is
     applied to. The batches are put under one another in the order given, and the
     table is handed on as a node hands its rows to its successors
-    (``_output_stream``): declared system-tag flags are restored and source-info
-    flags are settled from values over the complete table. The result keeps
-    ``stream``'s producer, upstreams, pipeline hash and data context.
+    (``_output_stream``): declared system-tag flags are restored, and source-info
+    fields are nullable with types settled from the complete table's tokens.
+    The result keeps ``stream``'s producer, upstreams, pipeline hash and data context.
     With no batch it is ``stream``'s zero-row input,
     typed by its description and never by rows.
 
