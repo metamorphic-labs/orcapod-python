@@ -94,6 +94,10 @@ original bindings are restored. InconsistentSourceError names the changed
 slots. Restore the original bindings or build a new job. A job can compile
 and run with its replacement bindings. ITL-1559 tracks capture after rebinding.
 
+When a job captures another job's source slot or a standalone source slot, it
+takes the source object bound to that slot at capture time. Later changes to the
+supplying slot leave the receiving job's binding alone.
+
 Capturing into a loaded job or recompiling it can lose its restored graph
 (ITL-1560). Recompilation preserves the loaded job's public `sources` mapping.
 

@@ -6,7 +6,7 @@ import contextlib
 import enum
 import logging
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -226,8 +226,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         if exc_type is None and self._auto_compile:
             self.compile()
 
-    def _record_invocation(self, invocation: PodInvocation) -> None:
-        """Record a step only while every compiled slot has its original binding."""
+    def prepare_invocation(self, invocation: PodInvocation) -> Callable[[], None]:
+        """Prepare a step only while every compiled slot has its original binding."""
         # ITL-1559: refuse additive capture until the relationship between captured
         # objects and slots is defined. Check at recording so a bind inside an
         # open capture context cannot bypass the rule.
@@ -247,7 +247,22 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 f"{names}. Bind them back to their original objects or build a new "
                 "job (ITL-1559)."
             )
-        super()._record_invocation(invocation)
+        if any(
+            isinstance(stream, SourceJobNode) for stream in invocation.input_streams
+        ):
+            # Each job owns its slots. Keep the binding at capture, even if the
+            # supplying slot changes before this job first compiles.
+            invocation = type(invocation)(
+                pod=invocation.pod,
+                input_streams=tuple(
+                    SourceJobNode.from_stream(stream)
+                    if isinstance(stream, SourceJobNode)
+                    else stream
+                    for stream in invocation.input_streams
+                ),
+                label=invocation.label,
+            )
+        return super().prepare_invocation(invocation)
 
     def _source_uses(self, extra: PodInvocation | None = None) -> Iterator[SourceUse]:
         """Validate actual graph leaves after a binding replaces a captured input."""

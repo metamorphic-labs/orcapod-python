@@ -1,10 +1,16 @@
+from __future__ import annotations
+
+from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from orcapod.protocols.core_protocols.function_pod import FunctionPodProtocol
 from orcapod.protocols.core_protocols.operator_pod import OperatorPodProtocol
 from orcapod.protocols.core_protocols.side_effect_pod import SideEffectPodProtocol
 from orcapod.protocols.core_protocols.streams import StreamProtocol
+
+if TYPE_CHECKING:
+    from orcapod.pipeline.pod_invocation import PodInvocation
 
 
 @runtime_checkable
@@ -47,6 +53,20 @@ class TrackerProtocol(Protocol):
 
         Returns:
             bool: True if tracker is active and recording, False otherwise
+        """
+        ...
+
+    def prepare_invocation(self, invocation: PodInvocation) -> Callable[[], None]:
+        """Validate an invocation without recording it.
+
+        All checks that can refuse an invocation belong here. The manager calls
+        the returned callbacks only after every active tracker has accepted.
+
+        Args:
+            invocation: The pod and inputs to record.
+
+        Returns:
+            A callback that records the validated invocation.
         """
         ...
 

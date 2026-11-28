@@ -2245,12 +2245,7 @@ class TestOneRestrictionPerSource:
 
 
 class TestRestrictionsCheckedLive:
-    """The one-restriction rule reads what each stream reads now (CodeRabbit, PR 435).
-
-    A slot rebound during the capture changes what the streams recorded from it read,
-    so nothing is kept from an earlier check: every invocation checks every stream
-    the pipeline holds with its own inputs, and compilation checks them again.
-    """
+    """Restriction checks use the binding captured by the receiving job."""
 
     @staticmethod
     def _slot(source: Any) -> Any:
@@ -2259,11 +2254,9 @@ class TestRestrictionsCheckedLive:
         return SourceJobNode.from_stream(source)
 
     @pytest.mark.parametrize("step", ["select", "drop"])
-    def test_a_slot_rebound_between_invocations_is_refused_at_the_next(
+    def test_a_foreign_slot_rebound_between_invocations_keeps_its_captured_source(
         self, project, tmp_path, step
     ):
-        """A projection from a slot bound to m1, the slot rebound to m2, then a
-        projection from the m1 source: compiled, both would read m2's rows."""
         m1 = _events().where(subject_id="m1")
         slot = self._slot(m1)
         later = {
@@ -2271,25 +2264,27 @@ class TestRestrictionsCheckedLive:
             "drop": lambda s: s.drop_data_columns(["note"]),
         }[step]
         job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                MapData({"channel": "lane"})(slot)
-                slot.bound_source = _events().where(subject_id="m2")
-                later(m1)
+        with job:
+            MapData({"channel": "lane"})(slot)
+            slot.bound_source = _events().where(subject_id="m2")
+            later(m1)
+        assert job.sources["events"] is m1
+        assert job.run().conditions == {"events": Condition.of(subject_id="m1")}
 
-    def test_a_slot_rebound_after_the_last_invocation_is_refused_at_compile(
+    def test_a_foreign_slot_rebound_before_compile_keeps_its_captured_source(
         self, project, tmp_path
     ):
         m1 = _events().where(subject_id="m1")
         slot = self._slot(m1)
         job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                MapData({"channel": "lane"})(slot)
-                m1.select_data_columns(["amplitude"])
-                slot.bound_source = _events().where(subject_id="m2")
+        with job:
+            MapData({"channel": "lane"})(slot)
+            m1.select_data_columns(["amplitude"])
+            slot.bound_source = _events().where(subject_id="m2")
+        assert job.sources["events"] is m1
+        assert job.run().conditions == {"events": Condition.of(subject_id="m1")}
 
-    def test_a_slot_rebound_to_an_equal_restriction_is_accepted(
+    def test_an_equal_restriction_on_a_rebound_foreign_slot_conflicts_with_the_capture(
         self, project, tmp_path
     ):
         m1 = _events().where(subject_id="m1")
@@ -2299,7 +2294,12 @@ class TestRestrictionsCheckedLive:
             MapData({"channel": "lane"})(slot)
             replacement = _events().where(subject_id="m1")
             slot.bound_source = replacement
-            replacement.select_data_columns(["amplitude"])
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
+                replacement.select_data_columns(["amplitude"])
+            m1.select_data_columns(["amplitude"])
+        assert job.sources["events"] is m1
         assert job.run().conditions == {"events": Condition.of(subject_id="m1")}
 
 

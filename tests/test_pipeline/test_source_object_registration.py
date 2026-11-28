@@ -8,11 +8,12 @@ from typing import Any
 
 import pytest
 
-from orcapod import Pipeline, PipelineJob, function_pod
+from orcapod import Pipeline, PipelineJob, function_pod, side_effect_pod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InconsistentSourceError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.side_effects import SideEffectPod
 from orcapod.sources import CSVSource, DictSource
 
 Orchestrator = type[AsyncPipelineOrchestrator] | type[SyncPipelineOrchestrator]
@@ -863,3 +864,84 @@ def test_capture_uses_the_binding_of_the_first_compiled_slot(
         difference.pod(original, label="after")
     job.run()
     assert sorted(job.after.as_table()["out"].to_pylist()) == [-1, -1]
+
+
+@pytest.mark.parametrize("foreign_origin", ["standalone", "job_bind", "job_setter"])
+@pytest.mark.parametrize("compile_mode", ["first", "implicit", "explicit"])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_foreign_slot_binding_is_captured_by_value(
+    foreign_origin: str, compile_mode: str, orchestrator: Orchestrator
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    original = _shifted_source("a", 0)
+    replacement = _shifted_source("b", 10)
+    upstream_job = None
+    if foreign_origin == "standalone":
+        foreign_slot = SourceJobNode.from_stream(original, name="a")
+    else:
+        with PipelineJob(database=InMemoryArrowDatabase()) as upstream_job:
+            total.pod(original, label="upstream")
+        foreign_slot = upstream_job.nodes["a"]
+        assert isinstance(foreign_slot, SourceJobNode)
+
+    with PipelineJob(
+        database=InMemoryArrowDatabase(), auto_compile=compile_mode != "first"
+    ) as job:
+        total.pod(foreign_slot, label="before")
+
+    if foreign_origin == "job_bind":
+        assert upstream_job is not None
+        upstream_job.bind(sources={"a": replacement})
+    else:
+        foreign_slot.bound_source = replacement
+    assert foreign_slot.bound_source is replacement
+
+    if compile_mode == "implicit":
+        with job:
+            difference.pod(original, label="after")
+    else:
+        job.compile()
+
+    job.run(orchestrator=orchestrator())
+    assert job.sources["a"] is original
+    assert sorted(job.before.as_table()["out"].to_pylist()) == [3, 7]
+    if compile_mode == "implicit":
+        assert sorted(job.after.as_table()["out"].to_pylist()) == [-1, -1]
+
+
+@pytest.mark.parametrize(
+    "blocked_index,count", [(0, 2), (1, 2), (0, 3), (1, 3), (2, 3)]
+)
+@pytest.mark.parametrize("capture", ["function", "operator", "side_effect"])
+def test_nested_capture_refusal_leaves_every_job_unchanged(
+    blocked_index: int, count: int, capture: str
+) -> None:
+    from contextlib import ExitStack
+
+    def deliver(x: int, ctx: Any) -> None:
+        raise AssertionError("A refused side effect must never run")
+
+    original = _shifted_source("a", 0)
+    replacement = _shifted_source("b", 10)
+    jobs = [PipelineJob(database=InMemoryArrowDatabase()) for _ in range(count)]
+    for job in jobs:
+        with job:
+            total.pod(original, label="before")
+    jobs[blocked_index].bind(sources={"a": replacement})
+
+    with ExitStack() as contexts:
+        for job in jobs:
+            contexts.enter_context(job)
+        with pytest.raises(InconsistentSourceError, match="not as captured"):
+            if capture == "function":
+                difference.pod(original, label="refused")
+            elif capture == "operator":
+                original.map_data({"x": "renamed"}, label="refused")
+            else:
+                tap = side_effect_pod(deliver)
+                assert isinstance(tap, SideEffectPod)
+                tap.process(original, label="refused")
+
+    for job in jobs:
+        assert "refused" not in job.nodes

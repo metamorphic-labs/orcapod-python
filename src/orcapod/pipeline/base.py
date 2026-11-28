@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Hashable, Iterator
+from collections.abc import Callable, Hashable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
@@ -319,7 +319,10 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         )
 
     def _record_invocation(self, invocation: PodInvocation) -> None:
-        """Store *invocation* and update the topology graph.
+        self.prepare_invocation(invocation)()
+
+    def prepare_invocation(self, invocation: PodInvocation) -> Callable[[], None]:
+        """Validate *invocation* and prepare to update the topology graph.
 
         Non-source nodes in ``_persistent_node_map`` are keyed by the
         corresponding ``PodInvocation.content_hash()`` string.  For
@@ -339,6 +342,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         Args:
             invocation: The pod invocation to record.
+
+        Returns:
+            A callback that records the validated invocation.
 
         Raises:
             ValueError: If the invocation reads a source under another restriction
@@ -360,12 +366,15 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         uses = tuple(self._source_uses(invocation))
         require_consistent_sources(uses)
         require_one_restriction(stream for _, stream in uses)
-        self._remember_invocation(key, invocation, input_keys)
-        self._hash_graph.add_node(key)
-        for upstream, upstream_hash in zip(inputs, input_keys, strict=True):
-            self._hash_graph.add_edge(upstream_hash, key)
-            if upstream_hash not in self._source_streams:
-                self._source_streams[upstream_hash] = upstream
+
+        def record() -> None:
+            self._remember_invocation(key, invocation, input_keys)
+            self._hash_graph.add_node(key)
+            for upstream, upstream_hash in zip(inputs, input_keys, strict=True):
+                self._hash_graph.add_edge(upstream_hash, key)
+                self._source_streams.setdefault(upstream_hash, upstream)
+
+        return record
 
     def _remember_invocation(
         self, key: str, invocation: PodInvocation, input_keys: tuple[str, ...]
