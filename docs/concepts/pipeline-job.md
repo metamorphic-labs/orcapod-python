@@ -107,8 +107,9 @@ Three more things a job node offers:
   rows computed by earlier runs of the same job over the same source with other inputs.
   Pass `columns={"meta": True}` to include the record of each call (function name and
   version, time, Python version).
-- **`as_source()`** returns a `DerivedSource` over the same stored records, whether or not
-  the node has run in this process, to use as the input of another pipeline.
+- **`as_source()`** returns a `DerivedSource` that selects the most recent readable
+  stored record per input lineage. You can use it as the input of another pipeline
+  even before the node has run in this process.
 - **`upstreams`** and **`label`** let you walk the pipeline backwards.
 
 ## The database

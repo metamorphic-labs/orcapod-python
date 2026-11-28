@@ -176,6 +176,9 @@ class DerivedSource(RootSource):
           ``derived_v1:<name>``, output schema and key columns; no class name,
           ITL-1425) plus the sorted ``tags_as_data`` items,
           since two mappings can give one schema and one explicit ``source_id``.
+          Explicit ``record_id_columns=()`` appends the marker
+          ``("record_id_policy", "position")`` to distinguish positional IDs from
+          the default lineage fold.
         - ``pipeline_hash`` is schema-only, as for every root source.
 
     Identity (plain form):

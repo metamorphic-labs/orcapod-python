@@ -47,10 +47,10 @@ def warn_provisional_source(name: str) -> None:
     warn_provisional_use(
         name,
         f"{name} is provisional: its source id and hashes are not frozen with data "
-        "context v1 and may change in a later release. Then the system tags, stored "
+        "context v1 and may change in a later release. The system tags, stored "
         f"paths and record ids of its rows, and of every step downstream of {name}, "
-        "change, and those results are computed again instead of reused (nothing "
-        "stored is lost or wrong). See 'Provisional sources' in "
+        "may also change. Downstream jobs can reuse cached function results when their "
+        "input data is unchanged. See 'Provisional sources' in "
         "docs/concepts/sources.md. To silence: warnings.filterwarnings('ignore', "
         "category=orcapod.errors.ProvisionalHashWarning).",
     )
