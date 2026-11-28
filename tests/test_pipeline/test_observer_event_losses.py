@@ -22,6 +22,7 @@ import pytest
 from typing_extensions import override
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.datagrams import Data, Tag
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import ObserverEventsLostWarning, RowFailuresWarning
 from orcapod.pipeline import (
@@ -84,6 +85,20 @@ def describe_except_unencodable_error(d1: int, d3: str) -> tuple[int, str]:
     """Raise with a filesystem-decoded filename for the first row."""
     if d1 == 10:
         raise ValueError("filename: bad\udcff")
+    return d1 + 1, d3 + d3
+
+
+class _UnprintableRowError(ValueError):
+    @override
+    def __str__(self) -> str:
+        raise RuntimeError("cannot format row error")
+
+
+@function_pod(output_keys=("n", "s"))
+def describe_except_unprintable_error(d1: int, d3: str) -> tuple[int, str]:
+    """Raise an error whose message cannot be formatted for the first row."""
+    if d1 == 10:
+        raise _UnprintableRowError()
     return d1 + 1, d3 + d3
 
 
@@ -405,6 +420,37 @@ def test_custom_observers_keep_their_lifecycle(
     assert _rows(job) == EXPECTED_ROWS
 
 
+def test_custom_completion_observer_sees_the_current_logging_run(
+    arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
+) -> None:
+    """A custom hook sees the caller's built-in logger updated by the run."""
+    db = InMemoryArrowDatabase()
+    logging_observer = LoggingObserver(db)
+
+    class LogCompletion(NoOpObserver):
+        run_id: str = ""
+
+        @override
+        def on_run_end(self, run_id: str) -> None:
+            self.run_id = run_id
+            logger = logging_observer.create_data_logger(
+                Tag({"t1": "completion", "t2": 0, "t3": True}), Data({})
+            )
+            logger.record(success=True)
+
+    completion = LogCompletion()
+    job = _job(arrangement)
+    observer = CompositeObserver(CompositeObserver(logging_observer), completion)
+
+    assert run_job(job, observer).ok
+    root_logs = db.get_all_records(("execution_logs",))
+    assert root_logs is not None
+    assert root_logs["_log_run_id"].to_pylist() == [completion.run_id]
+    all_logs = logging_observer.get_logs()
+    assert all_logs is not None
+    assert all_logs["_log_run_id"].to_pylist() == [completion.run_id] * (N_ROWS + 1)
+
+
 def test_unencodable_log_event_preserves_rows(
     arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
 ) -> None:
@@ -443,6 +489,34 @@ def test_promoted_row_warning_still_reports_observer_losses(
     assert [warning.category for warning in caught] == [ObserverEventsLostWarning]
 
 
+@pytest.mark.parametrize("promote_observer_warning", [False, True])
+def test_unprintable_row_error_still_reports_observer_losses(
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+    promote_observer_warning: bool,
+) -> None:
+    """A row's broken formatter remains the primary error after completion."""
+    job = _job(arrangement, pod=describe_except_unprintable_error)
+    observer = StatusObserver(InMemoryArrowDatabase())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter(
+            "error" if promote_observer_warning else "always", ObserverEventsLostWarning
+        )
+        with pytest.raises(RuntimeError, match="cannot format row error") as error:
+            _ = run_job(job, observer)
+
+    summary = job.last_run
+    assert summary is not None
+    assert summary.nodes[LABEL].computed == N_ROWS - 1
+    assert summary.nodes[LABEL].failed == 1
+    assert summary.lost_observer_events["status"].count == 1
+    if promote_observer_warning:
+        assert isinstance(error.value.__cause__, ObserverEventsLostWarning)
+    else:
+        assert [warning.category for warning in caught] == [ObserverEventsLostWarning]
+
+
 def test_unencodable_status_event_preserves_other_rows(
     arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
 ) -> None:
@@ -468,22 +542,33 @@ def test_unencodable_status_event_preserves_other_rows(
     assert _rows(job) == [row for row in EXPECTED_ROWS if row[3] != 11]
 
 
-def test_scheduled_run_async_warning_points_to_the_call(
+def test_run_async_is_a_coroutine_function() -> None:
+    """Both standard coroutine-function checks recognize the public method."""
+    run_async = _job(ARRANGEMENTS[0]).run_async
+    assert inspect.iscoroutinefunction(run_async)
+    assert asyncio.iscoroutinefunction(run_async)  # pyright: ignore[reportDeprecated]  # verifies existing asyncio callers
+
+
+def test_run_async_warning_points_to_the_await(
     arrangement: Arrangement,
 ) -> None:
-    """Scheduling the coroutine later still attributes the loss warning to its call."""
+    """The completion warning points to the line awaiting the coroutine."""
     job = _job(arrangement)
     observer = StatusObserver(_database())
-    frame = inspect.currentframe()
-    assert frame is not None
+
+    async def run() -> int:
+        pending = job.run_async(observer=observer)
+        frame = inspect.currentframe()
+        assert frame is not None
+        await_line = frame.f_lineno + 1
+        _ = await pending
+        return await_line
 
     with pytest.warns(ObserverEventsLostWarning) as caught:
-        call_line = frame.f_lineno + 1
-        pending = job.run_async(observer=observer)
-        _ = asyncio.run(pending)
+        await_line = asyncio.run(run())
 
     assert len(caught) == 1
-    assert (caught[0].filename, caught[0].lineno) == (__file__, call_line)
+    assert (caught[0].filename, caught[0].lineno) == (__file__, await_line)
 
 
 def test_a_load_only_run_reports_lost_events(
@@ -607,27 +692,20 @@ def test_the_warning_can_be_turned_into_an_error_after_the_run_is_kept(
     assert _rows(job) == EXPECTED_ROWS
 
 
-def test_a_recontextualized_status_observer_keeps_its_run() -> None:
-    """A copy contextualized twice writes its run's id and reports under it."""
-    from orcapod.core.datagrams import Tag
-    from orcapod.pipeline.observer_losses import RunLosses
+def test_precontextualized_status_observer_preserves_empty_metadata(
+    arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
+) -> None:
+    """Re-contextualized status rows retain main's empty metadata and report losses."""
+    observer = StatusObserver(_database(accept_first=1))
+    scoped = observer.contextualize("tenant")
+    with pytest.warns(ObserverEventsLostWarning):
+        summary = run_job(_job(arrangement), scoped)
 
-    stored = StatusObserver(InMemoryArrowDatabase())
-    stored.on_run_start("run-1", pipeline_uri="p@1")
-    tag: Any = Tag({"t1": "a", "t2": 1})
-    stored.contextualize("a").contextualize("b").on_data_start("n", tag, None)  # pyright: ignore[reportArgumentType]  # the status observer does not read the data
-    table = stored.get_status()
+    assert summary.lost_observer_events["status"].count == 2 * N_ROWS - 1
+    table = observer.get_status()
     assert table is not None
-    assert table.column("_status_run_id").to_pylist() == ["run-1"]
-    assert table.column("_status_pipeline_uri").to_pylist() == ["p@1"]
-
-    losses = RunLosses()
-    refusing = StatusObserver(_database()).with_run_losses(losses)
-    refusing.on_run_start("run-2")
-    refusing.contextualize("a").contextualize("b").on_data_start("n", tag, None)  # pyright: ignore[reportArgumentType]  # as above
-    assert losses.by_kind() == {
-        "status": LostObserverEvents("status", 1, "OSError: store refuses writes")
-    }
+    assert table["_status_run_id"].to_pylist() == [""]
+    assert table["_status_pipeline_uri"].to_pylist() == [""]
 
 
 def test_overlapping_async_jobs_can_share_observers() -> None:
@@ -807,25 +885,39 @@ def test_a_failing_log_handler_cannot_interrupt_loss_reporting(
     assert summary.ok and _rows(job) == EXPECTED_ROWS
 
 
-def test_precontextualized_logging_observer_uses_the_current_run(
-    orchestrator: Any, arrangement: Arrangement
+def test_precontextualized_logging_observer_keeps_its_existing_run_id(
+    arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
 ) -> None:
-    """A twice scoped observer replaces stale metadata and counts failed writes."""
+    """A twice scoped observer keeps its stored run ID and counts failed writes."""
     observer = LoggingObserver(_database(accept_first=1))
     observer.on_run_start("earlier-run")
     scoped = observer.contextualize("tenant").contextualize("project")
-    started = _RunStart()
     job = _job(arrangement)
-    summary, messages = _run_losing(
-        job, orchestrator=orchestrator, observer=CompositeObserver(scoped, started)
-    )
+    with pytest.warns(ObserverEventsLostWarning) as caught:
+        summary = run_job(job, scoped)
 
     assert summary.lost_observer_events["logging"].count == N_ROWS - 1
-    assert len(messages) == 1
+    assert len(caught) == 1
     logs = observer.get_logs()
     assert logs is not None
-    assert logs["_log_run_id"].to_pylist() == [started.run_id]
+    assert logs["_log_run_id"].to_pylist() == ["earlier-run"]
     assert _rows(job) == EXPECTED_ROWS
+
+
+def test_direct_precontextualized_logging_observer_keeps_its_existing_run_id(
+    orchestrator: Any,
+) -> None:
+    """A direct orchestrator leaves the contextualized logger's run ID alone."""
+    observer = LoggingObserver(InMemoryArrowDatabase())
+    observer.on_run_start("earlier-run")
+    scoped = observer.contextualize("tenant")
+    _ = orchestrator.run(
+        _job(ARRANGEMENTS[0]).dag, observer=scoped, run_id="direct-run"
+    )
+
+    logs = observer.get_logs()
+    assert logs is not None
+    assert logs["_log_run_id"].to_pylist() == ["earlier-run"] * N_ROWS
 
 
 def test_async_orchestrator_on_its_own_thread_keeps_the_jobs_losses() -> None:

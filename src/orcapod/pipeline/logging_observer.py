@@ -56,7 +56,6 @@ from orcapod.pipeline.logging_capture import install_capture_streams
 from orcapod.pipeline.observer_losses import (
     LOGGING_EVENTS,
     RunLosses,
-    RunLossObserver,
     report_lost_event,
 )
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -150,7 +149,7 @@ class DataLogger:
             )
 
 
-class LoggingObserver(RunLossObserver):
+class LoggingObserver:
     """Writes data-level logs to a pre-scoped log database.
 
     Instantiate once, outside the pipeline, and pass to the orchestrator::
@@ -196,7 +195,7 @@ class LoggingObserver(RunLossObserver):
                 "LoggingObserver.contextualize() requires a non-empty identity_path."
             )
         return _ContextualizedLoggingObserver(
-            self._db.at(*identity_path), self._current_run_id, self._run_losses
+            self._db.at(*identity_path), self._current_run_id
         )
 
     # -- lifecycle hooks --
@@ -248,7 +247,6 @@ class LoggingObserver(RunLossObserver):
             log_path=DEFAULT_LOG_PATH,
             run_id=self._current_run_id,
             tag_data=dict(tag),
-            losses=self._run_losses,
         )
 
     # -- convenience --
@@ -323,7 +321,7 @@ class LoggingObserver(RunLossObserver):
         return cls(db)
 
 
-class _ContextualizedLoggingObserver(RunLossObserver):
+class _ContextualizedLoggingObserver:
     """ExecutionObserverProtocol implementation bound to a specific node identity path.
 
     One instance per node per run, created via LoggingObserver.contextualize().
@@ -350,7 +348,7 @@ class _ContextualizedLoggingObserver(RunLossObserver):
         )
 
     def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
-        self._run_id = run_id
+        pass
 
     def on_run_end(self, run_id: str) -> None:
         pass

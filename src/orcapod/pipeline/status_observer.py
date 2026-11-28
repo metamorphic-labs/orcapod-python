@@ -62,7 +62,6 @@ from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.observer import NoOpLogger
 from orcapod.pipeline.observer_losses import (
     STATUS_EVENTS,
-    RunLossObserver,
     report_lost_event,
 )
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -71,6 +70,7 @@ from orcapod.types import SchemaLike
 if TYPE_CHECKING:
     import pyarrow as pa
 
+    from orcapod.pipeline.observer_losses import RunLosses
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ DEFAULT_STATUS_PATH: tuple[str, ...] = ("execution_status",)
 _NOOP_LOGGER = NoOpLogger()
 
 
-class StatusObserver(RunLossObserver):
+class StatusObserver:
     """Writes node execution status to a pre-scoped status database.
 
     Instantiate once, outside the pipeline, and pass to the orchestrator::
@@ -128,7 +128,6 @@ class StatusObserver(RunLossObserver):
         ctx = _ContextualizedStatusObserver(self._db.at(*identity_path))
         ctx._current_run_id = self._current_run_id
         ctx._current_pipeline_uri = self._current_pipeline_uri
-        ctx._run_losses = self._run_losses
         return ctx
 
     # -- lifecycle hooks --
@@ -313,7 +312,7 @@ class StatusObserver(RunLossObserver):
             # The run goes on: its results do not depend on this row. The loss is
             # logged here and reported by the run (ITL-1556).
             report_lost_event(
-                self._run_losses,
+                None,
                 STATUS_EVENTS,
                 event_error,
                 logger,
@@ -323,7 +322,7 @@ class StatusObserver(RunLossObserver):
             )
 
 
-class _ContextualizedStatusObserver(RunLossObserver):
+class _ContextualizedStatusObserver:
     """ExecutionObserverProtocol implementation bound to a specific node identity path.
 
     One instance is created per node per run via StatusObserver.contextualize().
@@ -342,13 +341,11 @@ class _ContextualizedStatusObserver(RunLossObserver):
         self._current_run_id: str = ""
         self._current_pipeline_uri: str = ""
         self._tag_schema: SchemaLike = {}
+        self._run_losses: RunLosses | None = None
 
     def contextualize(self, *identity_path: str) -> "_ContextualizedStatusObserver":
         """Re-contextualize with a new identity path (scopes the DB)."""
         ctx = _ContextualizedStatusObserver(self._db.at(*identity_path))
-        # The copy belongs to the same execution and keeps its metadata and counter.
-        ctx._current_run_id = self._current_run_id
-        ctx._current_pipeline_uri = self._current_pipeline_uri
         ctx._run_losses = self._run_losses
         return ctx
 

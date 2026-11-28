@@ -1,20 +1,18 @@
 """Observer events a run could not record (ITL-1556).
 
-Each job execution gives its built-in observers a shared counter. Their contextualized
-copies and data loggers carry the counter with them, including onto worker threads.
+Each job execution gives its node-scoped built-in observers a shared counter.
+Those observers and their data loggers carry it onto worker threads.
 An observer used directly by an orchestrator or node only logs failed writes.
 """
 
 from __future__ import annotations
 
 import threading
-from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import logging
-    from typing import Self
 
 STATUS_EVENTS = "status"
 """The kind of the events a ``StatusObserver`` records."""
@@ -79,18 +77,6 @@ class RunLosses:
                 kind: LostObserverEvents(kind, count, self._first_errors[kind])
                 for kind, count in sorted(self._counts.items())
             }
-
-
-class RunLossObserver:
-    """A built-in observer whose copy can collect losses for one job execution."""
-
-    _run_losses: RunLosses | None = None
-
-    def with_run_losses(self, losses: RunLosses) -> Self:
-        """Copy the observer with a counter for this job's execution."""
-        observer = copy(self)
-        observer._run_losses = losses
-        return observer
 
 
 def report_lost_event(

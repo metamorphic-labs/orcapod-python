@@ -30,6 +30,7 @@ from orcapod.types import SchemaLike
 
 if TYPE_CHECKING:
     from orcapod.pipeline.observer_losses import RunLosses
+    from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 _NOOP_LOGGER = NoOpLogger()
 
@@ -42,21 +43,40 @@ class CompositeObserver:
             ``ExecutionObserverProtocol``.
     """
 
+    _run_losses: RunLosses | None = None
+
     def __init__(self, *observers: Any) -> None:
         self._observers = list(observers)
 
     def contextualize(self, *identity_path: str) -> "CompositeObserver":
         """Return a new CompositeObserver wrapping each child's contextualized version."""
+        return self._contextualize(identity_path, self._run_losses)
+
+    @classmethod
+    def _for_run(
+        cls,
+        observer: ExecutionObserverProtocol,
+        counter: ExecutionObserverProtocol,
+        losses: RunLosses,
+    ) -> CompositeObserver:
+        """Keep the original observers for lifecycle calls and count node event losses."""
+        composite = cls(observer, counter)
+        composite._run_losses = losses
+        return composite
+
+    def _contextualize(
+        self, identity_path: tuple[str, ...], losses: RunLosses | None
+    ) -> CompositeObserver:
+        """Scope the children and attach the job's counter to the built-in results."""
         if not identity_path:
             raise ValueError(
                 "CompositeObserver.contextualize() requires a non-empty identity_path."
             )
-        return CompositeObserver(
-            *[o.contextualize(*identity_path) for o in self._observers]
-        )
+        if losses is None:
+            return CompositeObserver(
+                *[o.contextualize(*identity_path) for o in self._observers]
+            )
 
-    def _with_run_losses(self, losses: RunLosses) -> CompositeObserver:
-        """Bind concrete built-in children while preserving custom observer instances."""
         from orcapod.pipeline.logging_observer import (
             LoggingObserver,
             _ContextualizedLoggingObserver,  # pyright: ignore[reportPrivateUsage]
@@ -74,12 +94,15 @@ class CompositeObserver:
         )
         children: list[Any] = []
         for child in self._observers:
-            # Custom hooks must keep running on the observer the caller supplied.
+            # Only factory results from concrete built-ins belong to this run.
+            # A custom contextualize() can return a shared or delegated observer.
             if type(child) is CompositeObserver:
-                child = child._with_run_losses(losses)
-            elif type(child) in built_ins:
-                child = child.with_run_losses(losses)
-            children.append(child)
+                scoped = child._contextualize(identity_path, losses)
+            else:
+                scoped = child.contextualize(*identity_path)
+                if type(child) in built_ins:
+                    scoped._run_losses = losses
+            children.append(scoped)
         return CompositeObserver(*children)
 
     def on_run_start(self, run_id: str, **kwargs: Any) -> None:

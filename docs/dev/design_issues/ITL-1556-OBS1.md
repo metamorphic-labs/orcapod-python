@@ -14,19 +14,19 @@ one case only (a SQLite-backed store is accepted at setup and refuses every even
 
 **Fix:** Developer decision (November 28, 2026): the observers continue, and the loss is
 reported. A job creates a counter for its execution (`pipeline/observer_losses.py`,
-`RunLosses`) and gives it to copies of the built-in observers. Node-scoped observers and
-data loggers carry that counter, so overlapping executions remain independent even when
-they share an observer or a run id. A failed event encoding or write is counted and logged.
-Custom observer subclasses receive lifecycle hooks on the supplied instance. The
-run puts the record in `RunSummary.lost_observer_events` (per observer kind: count and first
-error's text) and issues one `ObserverEventsLostWarning` at the end of the run, after the
-summary is kept, at the caller's line. The end and not the first loss: the counts are
-complete then, the warning turned into an error loses no result, and the first loss happens
-inside a node, possibly on a worker thread. A completed run reports observer losses even
-when the row-failure warning is promoted to an exception. Additive: no existing field
-changed meaning, and the run's result and exit are unchanged. A run that raises before
-the summary is kept reports nothing beyond the log lines. A job node's own `run()` takes
-no observer, so it has nothing to lose. An observer
-handed directly to an orchestrator or to `node.execute` has no job run to report for it: its
-failed writes are logged only. A re-contextualized status observer now keeps its run id.
-Which stores observers work on (the SQLite case) stays open on the issue.
+`RunLosses`). Node-scoped built-in observers and their data loggers carry that counter,
+so overlapping executions count their own losses even when they share an observer or
+a run ID. A failed event encoding or write is counted and logged. Lifecycle hooks run
+on the caller's original observers, and the built-ins derive event metadata as before.
+
+The run puts the count and first error for each observer kind in
+`RunSummary.lost_observer_events`. It issues one `ObserverEventsLostWarning` after
+keeping the completed summary. The warning points to the `run()` call, the
+`run_async()` await, or the event loop's resumption site for a separately scheduled
+coroutine. A completed run reports observer losses even when preparing or issuing the
+row-failure warning raises. The earlier error still propagates.
+
+A run that raises before keeping a summary reports the losses in the logs. A job
+node's own `run()` takes no observer. Observers passed directly to an orchestrator or
+`node.execute` report failed writes in the logs. Which stores support observer event
+rows remains open on the issue.
