@@ -690,6 +690,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         # Shared read-only structural state (recording + compiled)
         clone._name = self._name
         clone._invocation_lut = self._invocation_lut
+        clone._invocation_input_keys = self._invocation_input_keys
         clone._source_streams = self._source_streams
         clone._node_lut = self._node_lut
         clone._upstreams = self._upstreams
@@ -699,6 +700,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         clone._node_graph = self._node_graph
         clone._auto_compile = self._auto_compile
         clone._compiled = self._compiled
+        clone._loaded_job_graph = self._loaded_job_graph
         clone._loaded_output_schemas = self._loaded_output_schemas
         # Mutable per-execution state — own copy so runs don't interfere
         clone._nodes = dict(self._nodes)

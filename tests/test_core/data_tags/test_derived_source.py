@@ -99,9 +99,10 @@ def _operator_job(
 ) -> PipelineJob:
     """A ``LOG`` join of the function node's output with itself filtered by ``unit``."""
     job = PipelineJob(name=JOB, database=store)
+    source = _source()
     with job:
-        doubled = double.pod(_source(), label="double")
-        _ = Join()(doubled, _source().select_data_columns(["unit"]), label="joined")
+        doubled = double.pod(source, label="double")
+        _ = Join()(doubled, source.select_data_columns(["unit"]), label="joined")
     job.nodes["joined"].attach_databases(
         pipeline_database=store.at(JOB), cache_mode=CacheMode.LOG
     )

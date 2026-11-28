@@ -227,9 +227,10 @@ def _ran_job() -> Any:
     from orcapod.operators import SelectDataColumns
 
     job = PipelineJob(name="derived", database=InMemoryArrowDatabase())
+    origin = _origin()
     with job:
-        _total.pod(_origin(), label="total")
-        SelectDataColumns(["age", "weight"])(_origin(), label="picked")
+        _total.pod(origin, label="total")
+        SelectDataColumns(["age", "weight"])(origin, label="picked")
     job.run()
     return job
 

@@ -78,6 +78,72 @@ same rows read by another kind, or by another version of one kind, are another s
 record id names a row within its source and never holds the source id. A job names an input
 slot by the source's name (`job.bind(sources={"units": ...})`).
 
+Each source content hash is registered to one Python object per pipeline or job.
+Build the source once and reuse that object wherever you read it. For sources
+whose hash includes their `source_id`, each source can instead have its own ID.
+Two distinct objects with the same content hash raise
+`InconsistentSourceError` even when their rows agree, including sources that read
+rows later. Capture, binding, loading and execution all check for conflicts.
+Rebinding replaces a slot's source. On load, slots with identical saved source
+configurations share one reconstructed object.
+
+A job accepts new steps only while every slot holds the exact source object
+it held when that slot was first compiled. A slot originally compiled unbound
+must be unbound. Rebinding or unbinding a slot blocks recording until all
+original bindings are restored. InconsistentSourceError names the changed
+slots. Restore the original bindings or build a new job. A job can compile
+and run with its replacement bindings. ITL-1559 tracks capture after rebinding.
+
+As a stopgap pending ITL-1559, a job refuses bindable source slots
+(`SourceJobNode`) from another job or created standalone, including through a
+stream built from one. Pass the source itself, or use `node.as_source()` to read
+another job's stored results. A schema-only `SourceNode` declares a new unbound
+slot for each job that captures it.
+
+The capture and restriction checks follow wrappers that can read live inputs.
+This includes tag-copy `DerivedSource` over a live source. A `DerivedSource`
+over a job node reads stored results, so the checks stop there. Source object
+registration uses the wrapper itself and its content hash.
+
+Capturing into a loaded job or recompiling it can lose its restored graph
+(ITL-1560). Recompilation preserves the loaded job's public `sources` mapping.
+
+The same rule applies to wrappers. Each of these pairs raises
+`InconsistentSourceError` when the objects share one content hash.
+
+| Sources used together | How to share the source |
+| --- | --- |
+| A source and a `CachedSource` over it | Build the cache once and use it in both places. |
+| Two caches over one source, or a cache and its inner cache | Choose one cache object and reuse it. |
+| Two calls to `node.as_source()` on one node | Call `as_source()` once and reuse the result. |
+| Two `DerivedSource(tags_as_data=...)` objects with the same hash | Build one derived source and reuse it. |
+| A source or its cache paired with a `SourceProxy` restored for it | Choose one source object and reuse it. |
+
+ITL-1553 tracks accepting distinct objects that represent the same source.
+ITL-1531 tracks sources that read their rows later.
+
+```python
+from orcapod import Pipeline, function_pod
+from orcapod.errors import InconsistentSourceError
+from orcapod.sources import DictSource
+
+
+@function_pod(output_keys="adjusted")
+def adjust(rate: float) -> float:
+    return rate + 1
+
+
+first = DictSource([{"rate": 3.5}], source_id="rates")
+second = DictSource([{"rate": 3.5}], source_id="rates")
+try:
+    with Pipeline("rates"):
+        adjust.pod(first, label="first")
+        adjust.pod(second, label="second")
+except InconsistentSourceError as error:
+    print(error)
+# Source 'dict_v1:rates' has distinct source objects with one content hash in step 'first' and step 'second'. Build the source once and reuse the object. If the source ID contributes to the hash, give each source its own source_id.
+```
+
 A kind's version moves when a row read before a change of its implementation could read
 differently after it (other values, other Arrow types, another record id). Saved jobs keep
 each source's name and version apart; a job loaded where a kind's version moved rebuilds the
@@ -583,14 +649,13 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   inside the pipeline (`PolarsFilter`). A NaN or infinite value is saved as
   `{"float": "nan"}`, `{"float": "inf"}` or `{"float": "-inf"}`, since JSON has no such number.
 - **One restriction per table in a pipeline.** A restricted source has the unrestricted
-  source's identity, so a pipeline holds one restriction (or none) per source: building a
-  pipeline in which one table is read with two different restrictions (or with and without
-  one) raises `ValueError` instead of silently reading one of them, whatever streams lead to
-  the table: different column selections or operator chains, streams built before the
-  pipeline, a `CachedSource` or a `SourceProxy` bound to it. It is checked from what each
-  stream reads at that moment: when the pipeline is built, when it is compiled, by `bind`
-  before it binds (a slot bound to a stream over a table another slot reads) and when a run
-  starts. Use one restriction per pipeline, or build separate pipelines.
+  source's content hash, and each call to `where()` returns a new source object.
+  Call `where()` once and reuse its result when several parts of the pipeline need
+  the same restriction. If two distinct source objects with the same content hash
+  enter a pipeline, Orcapod raises `InconsistentSourceError` even when the two
+  restrictions are equal. The one-restriction check also looks through wrappers
+  such as `CachedSource` and bound `SourceProxy` objects. It rejects different
+  restrictions on the same source, including a restricted and an unrestricted read.
 - **With `limit=`.** A source built with `limit=n` reads the first `n` rows that match, in
   key order: the conditions are applied first.
 - **Conditions as values.** Two conditions are equal when they require the same columns to
@@ -975,6 +1040,12 @@ hash of its table, as `<kind part>:<algorithm label>:<hex>` (for example
 order or content can vary between runs, pass an explicit, stable `source_id` **and** name
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
+
+Sources with one `source_id` must agree on their Arrow schema and key columns.
+Differences raise `InconsistentSourceError` during capture, binding, loading and
+execution through `job.run()` or a node's `run()`. ITL-1506 tracks support for
+distinct readings of one dataset in distinct named slots. Give each reading its
+own `source_id` for now.
 
 An in-memory source with key columns and no `source_id` can instead hash its rows in key
 order: pass `hash_in_key_order=True` (`ArrowTableSource`, `DictSource`, `DataFrameSource`,
