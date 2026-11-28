@@ -42,7 +42,12 @@ from orcapod.contexts.stored import (
     report_rows_of_other_data_contexts,
     with_data_context,
 )
-from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
+from orcapod.protocols.core_protocols import (
+    DataProtocol,
+    SourceProtocol,
+    StreamProtocol,
+    TagProtocol,
+)
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
@@ -268,6 +273,14 @@ class CachedSource(RootSource):
         """The name part of the wrapped source's source id."""
         return parse_source_id(self._source.source_id).name
 
+    @property
+    @override
+    def _resolved_key_columns(self) -> tuple[str, ...] | None:
+        """The wrapped source's key columns, or ``None`` when it is not a root source."""
+        if isinstance(self._source, RootSource):
+            return self._source._resolved_key_columns
+        return None
+
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """The wrapped source's Arrow schemas: the cache stores that source's rows."""
         schemas = typed_arrow_schemas(self._source)
@@ -348,6 +361,11 @@ class CachedSource(RootSource):
     def cached_source(self) -> SourceProtocol:
         """The source this cache reads and keeps the rows of."""
         return self._source
+
+    @property
+    def live_source_inputs(self) -> tuple[StreamProtocol, ...]:
+        """A cache can read its wrapped source live."""
+        return (self._source,)
 
     def _live_records(self) -> pa.Table:
         """Read the wrapped source's rows, each with its record hash in front.

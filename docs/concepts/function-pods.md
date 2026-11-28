@@ -1117,6 +1117,10 @@ print(loaded.nodes["bmi"].as_table().num_rows, summary.nodes["bmi"].not_stored)
 
 To compute again, build the job from your code as before.
 
+As a stopgap (ITL-1560), a loaded job and its cached `job.pipeline` blueprint raise
+`RuntimeError` if you try to capture steps into either or call `compile()`.
+Build the job from its pipeline to change the graph.
+
 The database is the source of truth: a loaded job's stored views show what the database holds for
 it. The job file names each run's rows by the content hash the run stored them under, so a
 loaded node's stored view reads exactly what the same node built from your code would read
