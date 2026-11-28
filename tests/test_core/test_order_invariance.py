@@ -923,6 +923,34 @@ def test_a_source_stream_or_pod_does_not_depend_on_the_arrangement_of_its_input(
     assert_all_equal(results)
 
 
+@pytest.mark.parametrize(
+    "case", [*STREAM_CASES], ids=[case.label for case in STREAM_CASES]
+)
+def test_stream_and_rows_agree_on_tag_and_primary_data_fields(
+    case: StreamCase, tmp_path: Path
+) -> None:
+    """Rows keep the stream's declared fields across tag orders and layouts."""
+    columns = {"system_tags": True}
+    for order, layout in ARRANGEMENTS:
+        stream = case.build(case.roles[0], order, layout, tmp_path)
+        table = stream.as_table(columns=columns)
+        rows = [list(stream.iter_data())]
+        if case.with_async:
+            rows.append(
+                asyncio.run(_run_async(stream.producer, list(stream.upstreams)))
+            )
+        for path_rows in rows:
+            assert len(path_rows) == table.num_rows
+            for tag, data in path_rows:
+                for row_table in (tag.as_table(columns=columns), data.as_table()):
+                    assert all(
+                        field.equals(
+                            table.schema.field(field.name), check_metadata=True
+                        )
+                        for field in row_table.schema
+                    )
+
+
 @pytest.mark.parametrize("role", ROLES)
 def test_the_order_of_a_function_pods_inputs_changes_nothing(role: str) -> None:
     """``pod(a, b)`` joins its inputs: their order is not part of anything."""

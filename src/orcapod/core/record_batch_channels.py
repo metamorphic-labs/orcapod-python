@@ -414,20 +414,22 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     converted: type strictness), the same nullability (and no null where the
     description's field is not nullable) and the same field metadata. A
     ``null`` type of the description (anywhere in a column's type) is carried as
-    ``large_string``, as a row's datagram stores it, and only null values are taken
-    there. Whether a system-tag or source-info field is nullable is not compared: it
-    follows the values of the complete table (``_flag_by_values``). Nor is a
-    source-info column's type, which follows its tokens over the complete table
-    (``_type_source_info_by_values``): it must only be a token type (``large_string``,
-    or ``large_list`` of a token type).
+    ``large_string`` outside system tags, and only null values are taken there.
+    System-tag field metadata must match the description. Batches may differ in
+    their top-level provenance flags. The complete stream uses the declared system-tag
+    flags and settles source-info flags from values. A source-info column may
+    carry any token type (``large_string`` or ``large_list`` of a token type).
+    The complete table settles its type in ``_type_source_info_by_values``.
     """
     sent = batch.schema
     if sorted(declared.names) != sorted(sent.names):
         return f"it has {sent.names}, the stream has {declared.names}"
-    provenance = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     for index, column in enumerate(sent):
         expected = declared.field(column.name)
-        carried = arrow_utils.normalize_to_large_types(expected.type)
+        system_tag = column.name.startswith(constants.SYSTEM_TAG_PREFIX)
+        carried = arrow_utils.normalize_to_large_types(
+            expected.type, keep_null=system_tag
+        )
         if column.name.startswith(constants.SOURCE_PREFIX):
             if not _is_token_type(column.type):
                 return f"column {column.name!r} is {column.type}, not a token type"
@@ -445,12 +447,15 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 f"column {column.name!r} holds values where the stream's type "
                 + f"{expected.type} holds only nulls"
             )
-        if column.name.startswith(provenance):
-            # A row builds these from its values: no field metadata at any depth.
-            if column.metadata or not column.type.equals(
-                _without_metadata(column.type), check_metadata=True
+        if system_tag:
+            if (expected.metadata or None) != (column.metadata or None) or not (
+                column.type.equals(carried, check_metadata=True)
             ):
-                return f"column {column.name!r} carries field metadata"
+                return f"column {column.name!r} carries field metadata that differs from its stream"
+            if not expected.nullable and batch.column(index).null_count:
+                return (
+                    f"column {column.name!r} holds nulls, the stream's is not nullable"
+                )
             continue
         if expected.nullable != column.nullable:
             flags = {True: "nullable", False: "not nullable"}

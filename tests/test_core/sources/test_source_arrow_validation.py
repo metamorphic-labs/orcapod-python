@@ -391,6 +391,50 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
         cached.as_table()
 
 
+@pytest.mark.parametrize("stored_flag", [False, True])
+def test_cached_source_reads_older_token_field_flags_as_stored(
+    stored_flag: bool,
+) -> None:
+    """A cache read uses the stored schema when its original source is unavailable."""
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        source_id="rows",
+    )
+    tags, data = source.output_schema()
+    proxy = SourceProxy(
+        source_id=source.source_id,
+        content_hash_str=source.content_hash().to_string(),
+        pipeline_hash_str=source.pipeline_hash().to_string(),
+        tag_schema=tags,
+        data_schema=data,
+    )
+    database = InMemoryArrowDatabase()
+    cache = CachedSource(proxy, cache_database=database)
+    columns = {"source": True, "system_tags": True}
+    table = source.as_table(columns=columns)
+    token = "_source_extra"
+    position = table.schema.get_field_index(token)
+    table = table.set_column(
+        position,
+        table.schema.field(position).with_nullable(stored_flag),
+        table.column(position),
+    )
+    table = table.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
+    database.add_records(
+        cache.cache_path,
+        with_data_context(table, source.data_context_key),
+        record_id_column=CachedSource.HASH_COLUMN_NAME,
+        flush=True,
+    )
+    assert cache.as_table(columns=columns).schema.field(token).nullable is stored_flag
+    assert all(
+        data.source_info_table().schema.field(token).nullable
+        for _, data in cache.iter_data()
+    )
+
+
 @pytest.mark.parametrize("row_count", [0, 2])
 def test_derived_source_refuses_stored_null_in_its_direct_table_view(
     row_count: int, monkeypatch: pytest.MonkeyPatch
