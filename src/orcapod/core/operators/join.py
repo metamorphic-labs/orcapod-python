@@ -73,6 +73,18 @@ _PENDING_MEMBERS = "\x00join-pending-members\x00"
 _COMMON_JOIN_KEY = "_common"
 
 
+def tied_pipeline_positions(
+    pipeline_hashes: Sequence[ContentHash],
+) -> tuple[tuple[int, ...], ...]:
+    """Return canonical positions that share a full pipeline hash."""
+    ordered = sorted(hash_value.to_hex() for hash_value in pipeline_hashes)
+    groups = (
+        tuple(position for position, _ in group)
+        for _, group in itertools.groupby(enumerate(ordered), key=lambda pair: pair[1])
+    )
+    return tuple(group for group in groups if len(group) > 1)
+
+
 def _with_common_key(table: "pa.Table") -> "pa.Table":
     """Return ``table`` with the constant join key ``_COMMON_JOIN_KEY`` as its first column.
 
@@ -571,6 +583,8 @@ class Join(NonZeroInputOperator):
         """
         n_char = self.orcapod_config.hashing.system_tag_n_char
         ordered_streams = self.order_input_streams(*streams)
+        hashes = [stream.pipeline_hash() for stream in ordered_streams]
+        tied_positions = tied_pipeline_positions(hashes)
 
         system_tag_fields: dict[str, DataType] = {}
         names_by_input: list[dict[str, str]] = []
@@ -582,11 +596,13 @@ class Join(NonZeroInputOperator):
                 if col_name.startswith(constants.SYSTEM_TAG_PREFIX):
                     new_name = (
                         f"{col_name}{constants.BLOCK_SEPARATOR}"
-                        f"{stream.pipeline_hash().to_hex(n_char)}:{idx}"
+                        f"{hashes[idx].to_hex(n_char)}:{idx}"
                     )
                     system_tag_fields[new_name] = col_type
                     names[col_name] = new_name
-        if arrow_utils.has_tied_custom_system_tags(system_tag_fields.keys()):
+        if arrow_utils.has_tied_custom_system_tags(
+            system_tag_fields.keys(), tied_positions
+        ):
             fields = [
                 field.with_name(names[field.name])
                 for stream, names in zip(ordered_streams, names_by_input, strict=True)
@@ -595,7 +611,9 @@ class Join(NonZeroInputOperator):
             ]
             if len(fields) == len(system_tag_fields):
                 declared = pa.schema(fields).empty_table()
-                canonical = arrow_utils.sort_tied_custom_system_tags(declared)
+                canonical = arrow_utils.sort_tied_custom_system_tags(
+                    declared, tied_positions
+                )
                 renamed = dict(
                     zip(declared.column_names, canonical.column_names, strict=True)
                 )
@@ -606,7 +624,8 @@ class Join(NonZeroInputOperator):
             {
                 name: kind is type(None) or type(None) in get_args(kind)
                 for name, kind in system_tag_fields.items()
-            }
+            },
+            tied_positions,
         )
         return Schema(
             {
@@ -632,6 +651,7 @@ class Join(NonZeroInputOperator):
         # Canonically order streams by pipeline_hash for deterministic
         # system tag column names regardless of input order (Join is commutative)
         ordered_streams = self.order_input_streams(*streams)
+        hashes = [stream.pipeline_hash() for stream in ordered_streams]
         # The output column order, and the check that no two inputs share a
         # data column (meta columns are dropped, so they never collide).
         tag_schema, data_schema = self._joined_user_schemas(*streams)
@@ -652,7 +672,7 @@ class Join(NonZeroInputOperator):
         table = _with_common_key(table)
         table = arrow_utils.append_to_system_tags(
             table,
-            f"{stream.pipeline_hash().to_hex(n_char)}:0",
+            f"{hashes[0].to_hex(n_char)}:0",
         )
 
         for idx, next_stream in enumerate(ordered_streams[1:], start=1):
@@ -663,7 +683,7 @@ class Join(NonZeroInputOperator):
             )
             next_table = arrow_utils.append_to_system_tags(
                 next_table,
-                f"{next_stream.pipeline_hash().to_hex(n_char)}:{idx}",
+                f"{hashes[idx].to_hex(n_char)}:{idx}",
             )
             # trick to ensure that there will always be at least one shared key
             # this ensure that no overlap in keys lead to full caretesian product
@@ -737,7 +757,9 @@ class Join(NonZeroInputOperator):
             table = self._fold_source_column(table, name)
 
         # Sort system tag values for same-pipeline-hash streams to ensure commutativity
-        table = arrow_utils.sort_system_tag_values(table)
+        table = arrow_utils.sort_system_tag_values(
+            table, tied_positions=tied_pipeline_positions(hashes)
+        )
 
         # Lay the columns out in the order ``output_schema`` defines (see
         # ``_joined_user_schemas``): tags, then data, then the hidden columns.
@@ -941,7 +963,9 @@ class Join(NonZeroInputOperator):
                 return
 
             suffixes = self._compute_system_tag_suffixes(input_pipeline_hashes)
-            await self._streaming_join(inputs, output, suffixes)
+            await self._streaming_join(
+                inputs, output, suffixes, tied_pipeline_positions(input_pipeline_hashes)
+            )
         finally:
             await output.close()
 
@@ -950,6 +974,7 @@ class Join(NonZeroInputOperator):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         suffixes: list[str],
+        tied_positions: Sequence[Sequence[int]],
     ) -> None:
         """Dispatch between binary join (N=2) and staggered chain (N>=3).
 
@@ -957,6 +982,7 @@ class Join(NonZeroInputOperator):
             inputs: Readable channels, one per upstream.
             output: Output channel for matched rows.
             suffixes: Per-input system-tag suffixes (positional).
+            tied_positions: Canonical positions sharing a full pipeline hash.
         """
         n = len(inputs)
         if n == 2:
@@ -971,7 +997,9 @@ class Join(NonZeroInputOperator):
                 rt: TagProtocol,
                 rp: DataProtocol,
             ) -> tuple[TagProtocol, DataProtocol]:
-                return self._merge_pair_rename(lt, lp, rt, rp, pair_suffixes)
+                return self._merge_pair_rename(
+                    lt, lp, rt, rp, pair_suffixes, tied_positions
+                )
 
             await self._binary_streaming_join(
                 inputs[left_idx], inputs[right_idx], output, merge_fn
@@ -979,7 +1007,7 @@ class Join(NonZeroInputOperator):
             return
 
         # N >= 3: staggered pairwise joins matching static_process
-        await self._staggered_join(inputs, output, suffixes)
+        await self._staggered_join(inputs, output, suffixes, tied_positions)
 
     @staticmethod
     def _canonical_input_order(suffixes: Sequence[str]) -> list[int]:
@@ -1007,6 +1035,7 @@ class Join(NonZeroInputOperator):
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
         output: WritableChannel[tuple[TagProtocol, DataProtocol]],
         suffixes: list[str],
+        tied_positions: Sequence[Sequence[int]],
     ) -> None:
         """Staggered pairwise binary joins: ``join(join(x, y), z)``.
 
@@ -1025,6 +1054,7 @@ class Join(NonZeroInputOperator):
             inputs: Readable channels, one per upstream.
             output: Output channel for matched rows.
             suffixes: Per-input system-tag suffixes (positional).
+            tied_positions: Canonical positions sharing a full pipeline hash.
         """
         from orcapod.channels import Channel
 
@@ -1084,6 +1114,7 @@ class Join(NonZeroInputOperator):
                             self._merge_pair_passthrough,
                             final=is_last,
                             merged_so_far=merged_so_far,
+                            tied_positions=tied_positions,
                         ),
                     )
                 )
@@ -1380,14 +1411,21 @@ class Join(NonZeroInputOperator):
 
     @staticmethod
     def _join_system_tag_tables(
-        tables: Sequence["pa.Table | None"], *, final: bool = True
+        tables: Sequence["pa.Table | None"],
+        *,
+        tied_positions: Sequence[Sequence[int]],
+        final: bool = True,
     ) -> "pa.Table | None":
         """Join the system-tag tables and sort tied positions on the final link."""
         present = [table for table in tables if table is not None]
         if not present:
             return None
         joined = arrow_utils.hstack_tables(*present)
-        return arrow_utils.sort_system_tag_values(joined) if final else joined
+        return (
+            arrow_utils.sort_system_tag_values(joined, tied_positions=tied_positions)
+            if final
+            else joined
+        )
 
     @staticmethod
     def _build_tag(
@@ -1657,6 +1695,7 @@ class Join(NonZeroInputOperator):
         right_tag: TagProtocol,
         right_pkt: DataProtocol,
         suffixes: list[str],
+        tied_positions: Sequence[Sequence[int]],
     ) -> tuple[TagProtocol, DataProtocol]:
         """Merge a matched pair, renaming system tags with per-side suffixes.
 
@@ -1670,7 +1709,7 @@ class Join(NonZeroInputOperator):
             else None
             for tag, suffix in zip((left_tag, right_tag), suffixes, strict=True)
         ]
-        merged_sys = Join._join_system_tag_tables(tables)
+        merged_sys = Join._join_system_tag_tables(tables, tied_positions=tied_positions)
         merged_tag = Join._build_tag(
             Join._merge_tag_tables(left_tag, right_tag),
             merged_sys,
@@ -1684,6 +1723,8 @@ class Join(NonZeroInputOperator):
         left_pkt: DataProtocol,
         right_tag: TagProtocol,
         right_pkt: DataProtocol,
+        *,
+        tied_positions: Sequence[Sequence[int]],
         final: bool = True,
         merged_so_far: set[str] | None = None,
     ) -> tuple[TagProtocol, DataProtocol]:
@@ -1697,6 +1738,7 @@ class Join(NonZeroInputOperator):
         """
         merged_sys = Join._join_system_tag_tables(
             [Join._system_tag_table(left_tag), Join._system_tag_table(right_tag)],
+            tied_positions=tied_positions,
             final=final,
         )
         merged_tag = Join._build_tag(
