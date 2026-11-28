@@ -37,6 +37,7 @@ def _source() -> DictSource:
         [{"k": i, "x": i} for i in range(ROWS)],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
 

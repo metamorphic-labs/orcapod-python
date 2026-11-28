@@ -127,6 +127,10 @@ pipeline hash, regardless of their data; an input slot declared with Python type
 one Arrow type per Python type (`int` is `int64`, `datetime` is `timestamp[us, tz=UTC]`), and
 a slot can also be declared with Arrow schemas.
 
+A captured source slot has a label that identifies the role in the job. Its label
+enters the content identity while the slot is unbound. A bound slot takes its
+content identity from the dataset that fills it.
+
 ### Recursive case: downstream elements
 
 Each downstream element (operator, function pod, or node) computes its pipeline hash from:

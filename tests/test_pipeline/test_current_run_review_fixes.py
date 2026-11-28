@@ -89,7 +89,7 @@ def _reset() -> None:
 def _source(data: list[dict[str, int]] = ROWS) -> DictSource:
     """An in-memory source of ``data`` with tags ``g`` and ``k``."""
     return DictSource(
-        data, tag_columns=["g", "k"], tag_only_columns=True, source_id="s"
+        data, tag_columns=["g", "k"], tag_only_columns=True, label="s", source_id="s"
     )
 
 
@@ -346,7 +346,7 @@ def _source_table() -> ArrowTableSource:
         ),
     )
     return ArrowTableSource(
-        table, tag_columns=["k"], tag_only_columns=True, source_id="t"
+        table, tag_columns=["k"], tag_only_columns=True, label="t", source_id="t"
     )
 
 
@@ -409,12 +409,14 @@ def test_an_unrun_loaded_operator_without_its_operator_keeps_its_columns(
                 [{"k": 0, "a": 1}],
                 tag_columns=["k"],
                 tag_only_columns=True,
+                label="a",
                 source_id="a",
             ),
             DictSource(
                 [{"k": 0, "b": 2}],
                 tag_columns=["k"],
                 tag_only_columns=True,
+                label="b",
                 source_id="b",
             ),
             label="joined",
@@ -650,6 +652,7 @@ def test_a_load_only_run_reaches_an_operator_below_a_loaded_side_effect_node(
             [{"g": r["g"], "k": r["k"], "w": r["x"]} for r in ROWS],
             tag_columns=["g", "k"],
             tag_only_columns=True,
+            label="w",
             source_id="w",
         )
 
@@ -782,6 +785,7 @@ def test_a_loaded_job_runs_its_bound_branch_beside_a_broken_unbound_one(
                     [{"g": 0, "k": 9, "x": 5}],
                     tag_columns=["g", "k"],
                     tag_only_columns=True,
+                    label="other",
                     source_id="other",
                 ),
                 label="up2",
@@ -803,6 +807,7 @@ def test_a_loaded_job_runs_its_bound_branch_beside_a_broken_unbound_one(
                 [{"g": 0, "k": 9, "x": 5}],
                 tag_columns=["g", "k"],
                 tag_only_columns=True,
+                label="other",
                 source_id="other",
             )
         }

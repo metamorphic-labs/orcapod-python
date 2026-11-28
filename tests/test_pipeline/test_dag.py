@@ -498,6 +498,7 @@ class TestPipelineDagProperty:
             ),
             tag_columns=["id"],
             tag_only_columns=True,
+            label="src",
             source_id="src",
             infer_nullable=True,
         )
@@ -626,6 +627,7 @@ class TestPipelineJobDagOnLoadedJob:
             ),
             tag_columns=["id"],
             tag_only_columns=True,
+            label="src",
             source_id="src",
             infer_nullable=True,
         )

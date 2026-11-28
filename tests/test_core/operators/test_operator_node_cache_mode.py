@@ -36,7 +36,11 @@ def _source(source_id: str, data: tuple[str, str]) -> op.sources.ArrowTableSourc
         }
     )
     return op.sources.ArrowTableSource(
-        table, tag_columns=["id", "k"], source_id=source_id, tag_only_columns=True
+        table,
+        tag_columns=["id", "k"],
+        label=source_id,
+        source_id=source_id,
+        tag_only_columns=True,
     )
 
 
@@ -137,7 +141,7 @@ def _data_tag_source(
         }
     )
     return op.sources.ArrowTableSource(
-        table, tag_columns=["id", "k"], source_id=source_id
+        table, tag_columns=["id", "k"], label=source_id, source_id=source_id
     )
 
 

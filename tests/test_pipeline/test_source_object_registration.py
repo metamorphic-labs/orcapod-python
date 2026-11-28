@@ -145,8 +145,10 @@ def test_bind_refuses_two_objects_with_one_hash(
     assert "slot 'a'" in str(error.value) and "slot 'b'" in str(error.value)
     assert job.sources == before
 
-    job.bind(sources={"a": first, "b": first})
-    assert job.sources["a"] is job.sources["b"] is first
+    with pytest.raises(InconsistentSourceError, match="ITL-1559"):
+        job.bind(sources={"a": first, "b": first})
+    assert job.sources == before
+    job.bind(sources={"a": first})
     job.bind(sources={"a": _source(tmp_path, kind, "replacement")})
     job.bind(sources={"b": second})
     assert job.sources["b"] is second
@@ -276,11 +278,12 @@ def test_slots_feeding_the_same_pod_refuse_equal_live_identity(tmp_path: Path) -
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
         for slot in ("a", "b"):
             total.pod(_source(tmp_path, "dict", slot), label=f"total_{slot}")
+    original = job.sources
     source = _source(tmp_path, "csv", "shared")
     with pytest.raises(InconsistentSourceError, match="ITL-1559"):
         job.bind(sources={"a": source, "b": source})
-    assert job.sources["a"].source_id == "dict_v1:a"
-    assert job.sources["b"].source_id == "dict_v1:b"
+    assert job.sources["a"] is original["a"]
+    assert job.sources["b"] is original["b"]
 
 
 @pytest.mark.parametrize("kind", ["equal", "different", "csv"])
@@ -364,8 +367,8 @@ def test_coalesced_captures_release_duplicate_projections(tmp_path: Path) -> Non
     graph = Pipeline("retention")
 
     def capture_projection():
-        projection = source.select_data_columns(["x", "y"])
         with graph:
+            projection = source.select_data_columns(["x", "y"])
             _ = total.pod(projection, label="step")
         return ref(projection)
 
@@ -578,7 +581,7 @@ def test_rebound_job_refuses_prebuilt_streams_after_recompile(
     original = _source(tmp_path, "dict", "a")
     replacement = _shifted_source("b", 10)
     peer = _source(tmp_path, "dict", "peer")
-    original_cache = original.cached(InMemoryArrowDatabase())
+    original_cache = original.cached(InMemoryArrowDatabase(), label=original.label)
     consumer = double if kind == "function" else increment
 
     def build(prebuilt: bool = False):
@@ -635,6 +638,11 @@ def test_swapping_or_rotating_slots_blocks_capture_but_preserves_rows(
         for name, source in sources.items():
             total.pod(source, label=f"original_{name}")
     rotated = names[1:] + names[:1]
+    if setter:
+        with pytest.raises(InconsistentSourceError, match="ITL-1559"):
+            job.nodes[names[0]].bound_source = sources[rotated[0]]
+        for name in names:
+            job.nodes[name].bound_source = None
     _rebind(
         job,
         {slot: sources[name] for slot, name in zip(names, rotated, strict=True)},
@@ -658,6 +666,7 @@ def test_swapping_or_rotating_slots_blocks_capture_but_preserves_rows(
         assert sorted(before.as_table()["out"].to_pylist()) == [offset + 3, offset + 7]
 
     restored, *still_changed = names
+    job.nodes[names[-1]].bound_source = None
     _rebind(job, {restored: sources[restored]}, setter)
     with job:
         with pytest.raises(InconsistentSourceError, match="not as captured") as error:
@@ -665,6 +674,9 @@ def test_swapping_or_rotating_slots_blocks_capture_but_preserves_rows(
         assert repr(restored) not in str(error.value)
         assert all(repr(name) in str(error.value) for name in still_changed)
 
+    if setter:
+        for name in still_changed:
+            job.nodes[name].bound_source = None
     _rebind(job, {name: sources[name] for name in still_changed}, setter)
     with job:
         difference.pod(sources[restored], label="added")
@@ -727,6 +739,7 @@ def test_rebound_job_refuses_same_pod_or_prebuilt_recapture(
             total.pod(first, label="original_a")
         total.pod(second, label="original_b")
     if setter:
+        job.nodes["b"].bound_source = None
         job.nodes["a"].bound_source = second
         job.nodes["b"].bound_source = first
     else:

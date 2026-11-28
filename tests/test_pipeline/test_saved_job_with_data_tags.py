@@ -58,6 +58,7 @@ def _job(tmp_path: Path, tag_only: object = ("time",)) -> PipelineJob:
         _csv(tmp_path),
         tag_columns=["unit", "time"],
         tag_only_columns=tag_only,  # pyright: ignore[reportArgumentType]  # the test varies it
+        label="spikes",
         source_id="spikes",
     )
     job = PipelineJob(database=DeltaTableDatabase(tmp_path / "store"))
@@ -279,6 +280,7 @@ def test_a_source_config_with_a_bare_string_tag_column_loads(
         _csv(tmp_path),
         tag_columns=["unit"],
         tag_only_columns=tag_only,  # pyright: ignore[reportArgumentType]  # the test varies it
+        label="spikes",
         source_id="spikes",
     )
     job = PipelineJob(database=DeltaTableDatabase(tmp_path / "store"))

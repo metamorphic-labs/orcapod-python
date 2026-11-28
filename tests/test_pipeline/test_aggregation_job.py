@@ -339,12 +339,14 @@ class TestMergeJoinRegression:
         """
         left = ArrowTableSource(
             pa.table({"id": ["a", "b"], "v": ["l1", "l2"]}),
+            label="left",
             tag_columns=["id"],
             tag_only_columns=True,
             infer_nullable=True,
         )
         right = ArrowTableSource(
             pa.table({"id": ["a", "b"], "v": ["r1", "r2"]}),
+            label="right",
             tag_columns=["id"],
             tag_only_columns=True,
             infer_nullable=True,
@@ -403,6 +405,7 @@ class TestFileContentHashingThroughReduction:
             tag_columns=["date", "probe"],
             tag_only_columns=True,
             data_schema={"date": str, "probe": int, "cfg": File},
+            label="cfgsrc",
             source_id="cfgsrc",
         )
 

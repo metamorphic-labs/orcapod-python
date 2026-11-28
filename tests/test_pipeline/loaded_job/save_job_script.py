@@ -76,6 +76,7 @@ def main(root: pathlib.Path) -> None:
         tag_columns=["id"],
         tag_only_columns=True,
         source_id="dsrc",
+        label="dsrc",
     )
     arrow_source = ArrowTableSource(
         pa.table(
@@ -90,14 +91,23 @@ def main(root: pathlib.Path) -> None:
         tag_columns=["id"],
         tag_only_columns=True,
         source_id="asrc",
+        label="asrc",
     )
     csv_source = CSVSource(
-        str(root / "c.csv"), tag_columns=["id"], tag_only_columns=True, source_id="csrc"
+        str(root / "c.csv"),
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="csrc",
+        label="csrc",
     )
     delta_source = DeltaTableSource(
-        str(root / "dt"), tag_columns=["id"], tag_only_columns=True, source_id="tsrc"
+        str(root / "dt"),
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="tsrc",
+        label="tsrc",
     )
-    list_source = ListSource("z", [1, 2], source_id="lsrc")
+    list_source = ListSource("z", [1, 2], source_id="lsrc", label="lsrc")
 
     job = PipelineJob(
         name="loaded_demo", database=DeltaTableDatabase(str(root / "store"))

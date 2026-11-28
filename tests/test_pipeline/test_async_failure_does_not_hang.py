@@ -93,6 +93,7 @@ def test_function_node_store_failure_raises(tmp_path: Path, store: str) -> None:
         source = DictSource(
             data=[{"k": i, "x": i} for i in range(N_ROWS)],
             tag_columns=["k"],
+            label="src",
             source_id="src",
             tag_only_columns=True,
         )
@@ -117,6 +118,7 @@ def test_operator_node_failure_raises(tmp_path: Path, store: str) -> None:
                 }
             ),
             tag_columns=["k"],
+            label="left",
             source_id="left",
             tag_only_columns=True,
         )
@@ -128,6 +130,7 @@ def test_operator_node_failure_raises(tmp_path: Path, store: str) -> None:
                 }
             ),
             tag_columns=["k"],
+            label="right",
             source_id="right",
             tag_only_columns=True,
         )

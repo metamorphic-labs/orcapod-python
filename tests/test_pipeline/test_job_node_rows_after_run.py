@@ -79,7 +79,7 @@ ORCHESTRATORS = ["sync", "async"]
 def _source(data: list[dict[str, int]]) -> DictSource:
     """Return a ``DictSource`` of ``data`` with tags ``g`` and ``k`` and source id ``s``."""
     return DictSource(
-        data, tag_columns=["g", "k"], tag_only_columns=True, source_id="s"
+        data, tag_columns=["g", "k"], tag_only_columns=True, label="s", source_id="s"
     )
 
 

@@ -53,6 +53,7 @@ def table_source(
         pa.Table.from_pylist(rows, schema=schema),
         tag_columns=tags,
         tag_only_columns=True,
+        label=source_id,
         source_id=source_id,
     )
 
@@ -83,14 +84,15 @@ def test_a_cached_source_is_never_materialized_or_written(tmp_path: Path) -> Non
         [{"k": "a", "g": "1", "x": 1, "y": 2}, {"k": "b", "g": "1", "x": 3, "y": 4}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="inner",
         source_id="inner",
     )
-    cached = CachedSource(inner, cache_database=cache)
+    cached = CachedSource(inner, cache_database=cache, label=inner.label)
     job = PipelineJob(name="c", database=InMemoryArrowDatabase())
     with job:
         SelectDataColumns(["x"])(cached)
     assert cache.list_table_paths() == []
-    # The cache's slot is named after the source it wraps (ITL-1425).
+    # The cache's slot uses the label assigned when building the cache.
     trace = job.nodes["inner"].trace({"k": "a", "g": "1"}, "x")
     assert trace.status == "unavailable"
     assert cache.list_table_paths() == []  # nothing was materialized or written
@@ -155,6 +157,7 @@ def test_two_cached_versions_of_one_record(tmp_path: Path) -> None:
         [{"k": "a", "g": "1", "x": 1, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="v",
         source_id="v",
     )
     CachedSource(first, cache_database=cache, cache_path=("shared",)).as_table()
@@ -162,6 +165,7 @@ def test_two_cached_versions_of_one_record(tmp_path: Path) -> None:
         [{"k": "a", "g": "1", "x": 2, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="v",
         source_id="v",
     )
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
@@ -208,6 +212,7 @@ def test_a_source_read_that_would_return_other_values_is_not_used(
         [{"k": "a", "g": "1", "x": 1, "y": 0}, {"k": "b", "g": "1", "x": 4, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="src",
         source_id="src",
     )
     job = PipelineJob(name="gs", database=InMemoryArrowDatabase())
@@ -447,6 +452,7 @@ def test_a_data_tag_key_after_group_by_traces_to_its_members() -> None:
             {"k": "b", "g": "1", "x": 7, "y": 0},
         ],
         tag_columns=["k", "g"],
+        label="src",
         source_id="src",
     )  # the default role: k and g are data-tags
     job = PipelineJob(name="dt", database=InMemoryArrowDatabase())
@@ -467,9 +473,10 @@ def aliased_job(tmp_path: Path) -> tuple[PipelineJob, DeltaTableDatabase]:
         [{"k": "a", "g": "1", "x": 1, "y": 0}, {"k": "b", "g": "1", "x": 2, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="inner",
         source_id="inner",
     )
-    cached = CachedSource(inner, cache_database=cache)
+    cached = CachedSource(inner, cache_database=cache, label=inner.label)
     job = PipelineJob(name="al", database=InMemoryArrowDatabase())
     with job:
         SelectDataColumns(["x"])(cached)
@@ -558,6 +565,7 @@ def test_two_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> Non
         [{"k": "a", "g": "1", "x": 1, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="v",
         source_id="v",
     )
     CachedSource(first, cache_database=cache, cache_path=("shared",)).as_table()
@@ -565,6 +573,7 @@ def test_two_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> Non
         [{"k": "a", "g": "1", "x": 2, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="v",
         source_id="v",
     )
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
@@ -726,6 +735,7 @@ def test_two_inputs_carrying_one_id_are_told_apart_by_position(
         [{"k": "x", "i": 0, "x": 1, "y": 2}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     cache = CachedSource(inner, cache_database=InMemoryArrowDatabase(), label="cache")
@@ -758,6 +768,7 @@ def test_date_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> No
         [{"k": "a", "g": "1", "d": date(2025, 1, 1), "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="v",
         source_id="v",
     )
     CachedSource(first, cache_database=cache, cache_path=("shared",)).as_table()
@@ -765,6 +776,7 @@ def test_date_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> No
         [{"k": "a", "g": "1", "d": date(2025, 1, 2), "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="v",
         source_id="v",
     )
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
@@ -829,6 +841,7 @@ def test_a_source_known_by_structure_feeds_a_node_with_no_rows_from_it() -> None
         [{"k": "a", "g": "1", "x": 1, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     cache = CachedSource(inner, cache_database=InMemoryArrowDatabase())
@@ -854,9 +867,15 @@ def test_merge_join_elements_come_from_their_own_argument(left_first: bool) -> N
         if extra:
             row["z"] = 1
         inner = DictSource(
-            [row], tag_columns=["k", "i"], tag_only_columns=True, source_id=name
+            [row],
+            tag_columns=["k", "i"],
+            tag_only_columns=True,
+            label=name,
+            source_id=name,
         )
-        return CachedSource(inner, cache_database=InMemoryArrowDatabase())
+        return CachedSource(
+            inner, cache_database=InMemoryArrowDatabase(), label=inner.label
+        )
 
     left, right = cached("left", 1, False), cached("right", 100, True)
     job = PipelineJob(name="slots", database=InMemoryArrowDatabase())
@@ -895,9 +914,15 @@ def _two_caches_of_one_record(name: str, left_first: bool, select: bool) -> Pipe
         if extra:
             row["z"] = 1
         inner = DictSource(
-            [row], tag_columns=["k", "i"], tag_only_columns=True, source_id=source_id
+            [row],
+            tag_columns=["k", "i"],
+            tag_only_columns=True,
+            label=source_id,
+            source_id=source_id,
         )
-        return CachedSource(inner, cache_database=InMemoryArrowDatabase())
+        return CachedSource(
+            inner, cache_database=InMemoryArrowDatabase(), label=inner.label
+        )
 
     left, right = cached("left", 1, False), cached("right", 100, True)
     job = PipelineJob(name=name, database=InMemoryArrowDatabase())
@@ -954,12 +979,14 @@ def test_a_folded_list_passing_through_merge_join_keeps_its_members(
         [{"k": "a", "i": 0, "x": 1, "y": 0}, {"k": "a", "i": 1, "x": 4, "y": 0}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     extra = DictSource(
         [{"k": "a", "z": 5, "w": 6}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="extra",
         source_id="extra",
     )
     job = PipelineJob(name=f"gm{group_first}", database=InMemoryArrowDatabase())
@@ -989,6 +1016,7 @@ def test_an_inner_list_of_nested_folds_traces_its_members() -> None:
         ],
         tag_columns=["a", "b", "c"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name="nested", database=InMemoryArrowDatabase())
@@ -1039,6 +1067,7 @@ def test_pick_after_index_after_a_fold_traces_one_member(fold: str) -> None:
         data_schema=schema,
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="input",
         source_id="input",
     )
     folding = Batch(batch_size=2) if fold == "batch" else GroupBy(["k"])
@@ -1104,8 +1133,8 @@ def test_renamed_branches_of_one_source_are_told_apart(left_first: bool) -> None
 def test_a_shared_data_tag_at_merge_join_traces_to_both_inputs(a_first: bool) -> None:
     """A data-tag k of both inputs is one key (a scalar with a merged token): it comes
     from both inputs' rows, as a tag join key does."""
-    a = DictSource([{"k": "x", "p": 1}], tag_columns=["k"], source_id="a")
-    b = DictSource([{"k": "x", "q": 2}], tag_columns=["k"], source_id="b")
+    a = DictSource([{"k": "x", "p": 1}], tag_columns=["k"], label="a", source_id="a")
+    b = DictSource([{"k": "x", "q": 2}], tag_columns=["k"], label="b", source_id="b")
     job = PipelineJob(name=f"key{a_first}", database=InMemoryArrowDatabase())
     with job:
         MergeJoin()(a, b) if a_first else MergeJoin()(b, a)
@@ -1128,6 +1157,7 @@ def _xy_source(source_id: str = "a") -> DictSource:
         [{"k": "a", "x": 1, "y": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label=source_id,
         source_id=source_id,
     )
 
@@ -1175,6 +1205,7 @@ def test_a_subclass_of_a_known_operator_is_not_traced() -> None:
         data_schema=schema,
         tag_columns=["k"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     job = PipelineJob(name="subclasses", database=InMemoryArrowDatabase())
@@ -1214,8 +1245,8 @@ from orcapod import PipelineJob
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.operators import Join
 from orcapod.sources import DictSource
-a = DictSource([{"k": "none", "i": 0}, {"k": "shared", "i": 1}], tag_columns=["k", "i"], source_id="a")
-b = DictSource([{"k": "shared", "i": 1}], tag_columns=["k", "i"], source_id="b")
+a = DictSource([{"k": "none", "i": 0}, {"k": "shared", "i": 1}], tag_columns=["k", "i"], source_id="a", label="a")
+b = DictSource([{"k": "shared", "i": 1}], tag_columns=["k", "i"], source_id="b", label="b")
 job = PipelineJob(name="tied", database=InMemoryArrowDatabase())
 with job:
     Join()(b, a) if REVERSED else Join()(a, b)
@@ -1254,8 +1285,8 @@ def test_tied_join_inputs_are_resolved_by_value(reversed_args: bool) -> None:
 
 
 def test_a_commutative_join_lists_its_inputs_in_one_order() -> None:
-    a = DictSource([{"k": "x", "p": 1}], tag_columns=["k"], source_id="a")
-    b = DictSource([{"k": "x", "q": 2}], tag_columns=["k"], source_id="b")
+    a = DictSource([{"k": "x", "p": 1}], tag_columns=["k"], label="a", source_id="a")
+    b = DictSource([{"k": "x", "q": 2}], tag_columns=["k"], label="b", source_id="b")
     texts = []
     for swap in (False, True):
         job = PipelineJob(name=f"order{swap}", database=InMemoryArrowDatabase())
@@ -1287,6 +1318,7 @@ def test_stored_history_of_tied_bindings_reads_the_asked_source(mode: str) -> No
     a = DictSource(
         [{"k": "unmatched", "i": 0}, {"k": "shared", "i": 1}],
         tag_columns=["k", "i"],
+        label="s",
         source_id="s",
     )
     schema = pa.schema(
@@ -1298,6 +1330,7 @@ def test_stored_history_of_tied_bindings_reads_the_asked_source(mode: str) -> No
     b = ArrowTableSource(
         pa.Table.from_pylist([{"k": "shared", "i": 1}], schema=schema),
         tag_columns=["k", "i"],
+        label="t",
         source_id="t",
     )
     job = PipelineJob(name=f"hist{mode}", database=InMemoryArrowDatabase())
@@ -1339,6 +1372,7 @@ def test_a_selection_token_that_contradicts_the_operator_raises(
         [{"k": "x", "i": 0, "x": [7], "y": [7]}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     job = PipelineJob(name=f"tok{projection}", database=InMemoryArrowDatabase())
@@ -1384,6 +1418,7 @@ def test_a_semi_join_right_input_never_reaches_its_output(mode: str) -> None:
         [{"k": "x", "i": 0, "x": 7, "y": 9}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="same",
         source_id="same",
     )
     schema = pa.schema(
@@ -1398,6 +1433,7 @@ def test_a_semi_join_right_input_never_reaches_its_output(mode: str) -> None:
         pa.Table.from_pylist([{"k": "x", "i": 0, "x": 70, "y": 90}], schema=schema),
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="other",
         source_id="other",
     )
     job = PipelineJob(name=f"semi{mode}", database=InMemoryArrowDatabase())
@@ -1430,6 +1466,7 @@ def test_an_input_row_must_keep_the_tags_the_step_keeps(
             [{"k": key, "i": 0, "x": 7, "y": 9}],
             tag_columns=["k", "i"],
             tag_only_columns=True,
+            label="same",
             source_id="same",
         )
 
@@ -1475,6 +1512,7 @@ def test_a_failed_call_is_not_reported_as_never_reached(mode: str) -> None:
         [{"k": "x", "i": 0, "x": 1}, {"k": "x", "i": 1, "x": 2}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     job = PipelineJob(name=f"fails{mode}", database=InMemoryArrowDatabase())
@@ -1502,6 +1540,7 @@ def test_why_missing_does_not_follow_an_operator_subclass(mode: str) -> None:
         [{"k": "unmatched", "i": 1, "x": 7}, {"k": "shared", "i": 2, "x": 8}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="same",
         source_id="same",
     )
     schema = pa.schema(
@@ -1515,6 +1554,7 @@ def test_why_missing_does_not_follow_an_operator_subclass(mode: str) -> None:
         pa.Table.from_pylist([{"k": "shared", "i": 2, "x": 90}], schema=schema),
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="other",
         source_id="other",
     )
     job = PipelineJob(name=f"customsemi{mode}", database=InMemoryArrowDatabase())
@@ -1535,7 +1575,9 @@ def test_why_missing_does_not_follow_an_operator_subclass(mode: str) -> None:
 
 def _kg_source(source_id: str, rows: list[dict[str, Any]]) -> DictSource:
     """A source whose tags k and i are data-tags (the default role) and its only data."""
-    return DictSource(rows, tag_columns=["k", "i"], source_id=source_id)
+    return DictSource(
+        rows, tag_columns=["k", "i"], label=source_id, source_id=source_id
+    )
 
 
 def test_many_tied_join_inputs_are_resolved_without_trying_every_order(
@@ -1566,7 +1608,10 @@ def test_many_tied_join_inputs_are_resolved_without_trying_every_order(
 
 def test_a_data_tag_falling_through_a_function_traces_to_its_input() -> None:
     source = DictSource(
-        [{"k": "x", "i": 0, "x": 1, "y": 2}], tag_columns=["k", "i"], source_id="s"
+        [{"k": "x", "i": 0, "x": 1, "y": 2}],
+        tag_columns=["k", "i"],
+        label="s",
+        source_id="s",
     )
     job = PipelineJob(name="fallthrough", database=InMemoryArrowDatabase())
     with job:
@@ -1656,7 +1701,7 @@ def test_a_fold_witness_proves_receipt_despite_direct_names() -> None:
 def test_a_function_after_an_unread_source_is_not_blamed(tmp_path: Path) -> None:
     cache = DeltaTableDatabase(tmp_path / "cache")
     inner = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "s")
-    cached = CachedSource(inner, cache_database=cache)
+    cached = CachedSource(inner, cache_database=cache, label=inner.label)
     job = PipelineJob(name="cachedfn", database=InMemoryArrowDatabase())
     with job:
         add.pod(cached, label="sums")
@@ -1677,6 +1722,7 @@ def test_a_join_diagnostic_calls_no_source_method() -> None:
         [{"k": "z", "i": 0, "p": 5}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="b",
         source_id="b",
     )
     job = PipelineJob(name="armedjoin", database=InMemoryArrowDatabase())
@@ -1692,19 +1738,28 @@ def test_an_unread_join_input_is_not_named_as_lacking_the_key(tmp_path: Path) ->
     """Three inputs: the first lacks the key, an unread cached input may hold it, the
     third holds the record. Only the first is named."""
     a = DictSource(
-        [{"k": "B", "p": 1}], tag_columns=["k"], tag_only_columns=True, source_id="a"
+        [{"k": "B", "p": 1}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        label="a",
+        source_id="a",
     )
     cached = CachedSource(
         DictSource(
             [{"k": "A", "q": 2}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="b",
             source_id="b",
         ),
         cache_database=DeltaTableDatabase(tmp_path / "cache"),
     )
     c = DictSource(
-        [{"k": "A", "r": 3}], tag_columns=["k"], tag_only_columns=True, source_id="c"
+        [{"k": "A", "r": 3}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        label="c",
+        source_id="c",
     )
     job = PipelineJob(name="threejoin", database=InMemoryArrowDatabase())
     with job:
@@ -1745,6 +1800,7 @@ def test_an_unread_join_input_is_unknown_never_a_miss(order: str, mode: str) -> 
         [{"k": "wanted", "i": 0, "x": 7}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     b = CachedSource(
@@ -1752,6 +1808,7 @@ def test_an_unread_join_input_is_unknown_never_a_miss(order: str, mode: str) -> 
             [{"k": "wanted", "z": 4}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="b",
             source_id="b",
         ),
         cache_database=InMemoryArrowDatabase(),
@@ -1760,6 +1817,7 @@ def test_an_unread_join_input_is_unknown_never_a_miss(order: str, mode: str) -> 
         [{"k": "other", "w": 5}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="c",
         source_id="c",
     )
     inputs = {"a": a, "b": b, "c": c}
@@ -1779,6 +1837,7 @@ def test_an_unread_join_input_alone_is_named_as_not_read() -> None:
         [{"k": "wanted", "i": 0, "x": 7}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     b = CachedSource(
@@ -1786,6 +1845,7 @@ def test_an_unread_join_input_alone_is_named_as_not_read() -> None:
             [{"k": "other", "z": 4}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="b",
             source_id="b",
         ),
         cache_database=InMemoryArrowDatabase(),
@@ -1803,18 +1863,21 @@ def test_every_join_input_proving_the_miss_is_named() -> None:
         [{"k": "wanted", "i": 0, "x": 7}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     c = DictSource(
         [{"k": "other", "w": 5}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="c",
         source_id="c",
     )
     d = DictSource(
         [{"k": "other", "v": 6}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="d",
         source_id="d",
     )
     job = PipelineJob(name="twoprove", database=InMemoryArrowDatabase())
@@ -1844,6 +1907,7 @@ def test_the_join_diagnostic_calls_no_method_of_the_other_source(mode: str) -> N
         [{"k": "wanted", "i": 0, "x": 7}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     b = Armed(
@@ -1893,12 +1957,14 @@ def test_a_stored_witness_must_be_the_held_input(mode: str) -> None:
         a = DictSource(
             [{"k": key, "i": 0, "rid": id_a}],
             tag_columns=["k", "i"],
+            label="s",
             source_id="s",
             record_id_columns=["rid"],
         )
         b = ArrowTableSource(
             pa.Table.from_pylist([{"k": key, "i": 0, "rid": id_b}], schema=schema),
             tag_columns=["k", "i"],
+            label="t",
             source_id="t",
             record_id_columns=["rid"],
         )
@@ -1936,7 +2002,10 @@ def test_a_stored_witness_must_be_the_held_input(mode: str) -> None:
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_rejoin_keeps_the_common_token_of_a_shared_column(mode: str) -> None:
     source = DictSource(
-        [{"k": "x", "i": 0, "x": 1, "y": 2}], tag_columns=["k", "i"], source_id="a"
+        [{"k": "x", "i": 0, "x": 1, "y": 2}],
+        tag_columns=["k", "i"],
+        label="a",
+        source_id="a",
     )
     from orcapod.operators import Rejoin
 
@@ -1957,7 +2026,10 @@ def test_a_falling_through_data_tag_token_must_name_its_own_column() -> None:
     """A data-tag i falling through a function over the source directly: a held
     token naming q (same value) is refused."""
     source = DictSource(
-        [{"k": "x", "i": 7, "q": 7}], tag_columns=["k", "i", "q"], source_id="a"
+        [{"k": "x", "i": 7, "q": 7}],
+        tag_columns=["k", "i", "q"],
+        label="a",
+        source_id="a",
     )
     job = PipelineJob(name="ownname", database=InMemoryArrowDatabase())
     with job:
@@ -1987,12 +2059,14 @@ def test_a_semi_join_right_record_is_explained_by_row_flow_alone(mode: str) -> N
         [{"k": "retain", "x": 1}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="left",
         source_id="left",
     )
     right = DictSource(
         [{"k": "retain", "y": 2}, {"k": "absent", "y": 3}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="right",
         source_id="right",
     )
     job = PipelineJob(name=f"semiright{mode}", database=InMemoryArrowDatabase())
@@ -2021,16 +2095,25 @@ def test_every_held_version_of_a_record_gets_its_reason(
             [{"k": key, "x": 1}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
 
     CachedSource(data(first), cache_database=cache, cache_path=("shared",)).as_table()
     a = CachedSource(data(second), cache_database=cache, cache_path=("shared",))
     b = DictSource(
-        [{"k": "old", "y": 2}], tag_columns=["k"], tag_only_columns=True, source_id="b"
+        [{"k": "old", "y": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        label="b",
+        source_id="b",
     )
     c = DictSource(
-        [{"k": "new", "z": 3}], tag_columns=["k"], tag_only_columns=True, source_id="c"
+        [{"k": "new", "z": 3}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        label="c",
+        source_id="c",
     )
     job = PipelineJob(name=f"versions{mode}{first}", database=InMemoryArrowDatabase())
     with job:
@@ -2063,12 +2146,14 @@ def test_a_null_join_key_matches_nothing_in_the_explanation() -> None:
         pa.Table.from_pylist([{"k": None, "x": 1}], schema=schema),
         tag_columns=["k"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     b = ArrowTableSource(
         pa.Table.from_pylist([{"k": None, "y": 2}], schema=other),
         tag_columns=["k"],
         tag_only_columns=True,
+        label="b",
         source_id="b",
     )
     job = PipelineJob(name="nullkey", database=InMemoryArrowDatabase())
@@ -2155,6 +2240,7 @@ def _trials_job(database: Any, rows: list[dict[str, Any]] = TRIALS) -> PipelineJ
         rows,
         tag_columns=["animal", "trial"],
         tag_only_columns=True,
+        label="trials",
         source_id="trials",
     )
     job = PipelineJob(name="marks", database=database)
@@ -2251,6 +2337,7 @@ def test_a_trace_highlight_marks_on_a_loaded_job(tmp_path: Path) -> None:
                 TRIALS,
                 tag_columns=["animal", "trial"],
                 tag_only_columns=True,
+                label="trials",
                 source_id="trials",
             )
         }
@@ -2379,6 +2466,7 @@ def test_several_rows_on_a_loaded_job(tmp_path: Path) -> None:
                 TRIALS,
                 tag_columns=["animal", "trial"],
                 tag_only_columns=True,
+                label="trials",
                 source_id="trials",
             )
         }
@@ -2440,7 +2528,11 @@ def test_the_asked_node_is_marked_apart_from_the_path() -> None:
     # why_missing at a node the record does not reach: asked here, not on the path,
     # and not dimmed.
     filtered = DictSource(
-        TRIALS, tag_columns=["animal", "trial"], tag_only_columns=True, source_id="t"
+        TRIALS,
+        tag_columns=["animal", "trial"],
+        tag_only_columns=True,
+        label="t",
+        source_id="t",
     )
     other = PipelineJob(name="asked", database=InMemoryArrowDatabase())
     with other:
@@ -2495,7 +2587,7 @@ def _null_key_peer(name: str) -> ArrowTableSource:
         ),
     )
     return ArrowTableSource(
-        table, tag_columns=["k"], tag_only_columns=True, source_id=name
+        table, tag_columns=["k"], tag_only_columns=True, label=name, source_id=name
     )
 
 
@@ -2531,6 +2623,7 @@ def test_a_collapsed_diagram_keeps_the_asked_node(mode: str) -> None:
         [{"k": "one", "i": 1, "x": 7}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
+        label="a",
         source_id="a",
     )
     job = PipelineJob(name=f"collapse{mode}", database=InMemoryArrowDatabase())
@@ -2560,6 +2653,7 @@ def test_roots_follow_a_total_order_with_nan(mode: str) -> None:
             [{"key": v, "value": 0} for v in held],
             tag_columns=["key"],
             tag_only_columns=True,
+            label="numbers",
             source_id="numbers",
         )
         job = PipelineJob(name=f"nan{mode}", database=InMemoryArrowDatabase())
@@ -2587,6 +2681,7 @@ def test_a_question_shows_a_date_selector_value(mode: str) -> None:
         ],
         tag_columns=["when"],
         tag_only_columns=True,
+        label="dates",
         source_id="dates",
     )
     job = PipelineJob(name=f"dates{mode}", database=InMemoryArrowDatabase())
@@ -2645,6 +2740,7 @@ def test_a_source_argument_naming_two_sources_is_refused(
             [{"k": "match", "y": 2}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="a",
             source_id="a",
         )
         with warnings.catch_warnings():
@@ -2653,6 +2749,7 @@ def test_a_source_argument_naming_two_sources_is_refused(
                 [{"k": "match", "x": 1}],
                 tag_columns=["k"],
                 tag_only_columns=True,
+                label="dict_v1:a",
                 source_id="dict_v1:a",
             )
         return left, right
@@ -2700,6 +2797,7 @@ def test_a_full_id_asks_about_that_id_only_in_a_slot_of_several(
             tag_columns=["rid"],
             tag_only_columns=True,
             record_id_columns=["rid"],
+            label=name,
             source_id=name,
         )
 
@@ -2753,6 +2851,7 @@ def test_a_label_that_is_one_of_its_slots_ids_is_refused(
                 tag_columns=["rid"],
                 tag_only_columns=True,
                 record_id_columns=["rid"],
+                label=name,
                 source_id=name,
             )
 
@@ -2819,6 +2918,7 @@ def test_an_ignored_rename_beside_a_valid_one(
         [{"k": "a", "g": "1", "x": 1, "y": 2, "z": 3}],
         tag_columns=["g", "k"] if data_tag else ["k", "g"],
         tag_only_columns=["k"] if data_tag else True,
+        label="s",
         source_id="s",
     )
     valid = {"MapTags": ("g", "gg"), "MapData": ("x", "xx"), "MapColumns": ("y", "yy")}
@@ -2876,6 +2976,7 @@ def test_repeated_identical_inputs_before_a_batch_never_trace_wrongly(
         [{"k": 0, "x": 1}, {"k": 1, "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     table = s.as_table(columns={"source": True, "system_tags": True})
@@ -2888,6 +2989,7 @@ def test_repeated_identical_inputs_before_a_batch_never_trace_wrongly(
                     [{"k": 9, "x": 9}],
                     tag_columns=["k"],
                     tag_only_columns=True,
+                    label="slot",
                     source_id="slot",
                 ),
                 label="f",
@@ -2983,10 +3085,15 @@ def test_a_collapsed_diagram_keeps_the_removing_step(mode: str) -> None:
         [{"k": "a", "x": 1}, {"k": "lonely", "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="L",
         source_id="L",
     )
     right = DictSource(
-        [{"k": "a", "q": 5}], tag_columns=["k"], tag_only_columns=True, source_id="R"
+        [{"k": "a", "q": 5}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        label="R",
+        source_id="R",
     )
     job = PipelineJob(name=f"boundary{mode}", database=InMemoryArrowDatabase())
     with job:
@@ -3035,6 +3142,7 @@ def test_a_narrower_bind_reads_the_snapshot_in_the_declared_form(mode: str) -> N
         pa.Table.from_pylist([{"k": "a", "x": 1}], schema=schema),
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     narrower = ArrowTableSource(
@@ -3049,6 +3157,7 @@ def test_a_narrower_bind_reads_the_snapshot_in_the_declared_form(mode: str) -> N
         ),
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name=f"narrow{mode}", database=InMemoryArrowDatabase())
@@ -3132,6 +3241,7 @@ def test_list_tag_roots_follow_the_nan_order(mode: str) -> None:
             [{"key": v, "value": 0} for v in held],
             tag_columns=["key"],
             tag_only_columns=True,
+            label="numbers",
             source_id="numbers",
         )
         job = PipelineJob(name=f"listnan{mode}", database=InMemoryArrowDatabase())
@@ -3158,6 +3268,7 @@ def test_texts_keep_map_entries_and_fold_positions() -> None:
         [{"k": i, "x": i} for i in range(3)],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name="positions", database=InMemoryArrowDatabase())
@@ -3181,6 +3292,7 @@ def test_a_trace_keeps_the_selector_it_answered() -> None:
         [{"k": "u0", "x": 1}, {"k": "u1", "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name="selector", database=InMemoryArrowDatabase())
@@ -3212,6 +3324,7 @@ def test_batches_of_two_cached_versions_of_one_record(
                 [{"k": "a", "g": "1", "x": x, "y": 0}],
                 tag_columns=["k", "g"],
                 tag_only_columns=True,
+                label="v",
                 source_id="v",
             ),
             cache_database=cache,
@@ -3259,7 +3372,11 @@ def test_group_members_follow_both_keys(
         ]
         rows = [{c: r[c] for c in (*tag_order, *data_order)} for r in rows]
         source = DictSource(
-            rows, tag_columns=tag_order, tag_only_columns=plain, source_id="s"
+            rows,
+            tag_columns=tag_order,
+            tag_only_columns=plain,
+            label="s",
+            source_id="s",
         )
         job = PipelineJob(
             name=f"two{mode}{''.join(keys)}{''.join(data_order)}",
@@ -3310,10 +3427,15 @@ def _boundary_job(mode: str) -> PipelineJob:
         [{"k": "a", "x": 1}, {"k": "lonely", "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="L",
         source_id="L",
     )
     right = DictSource(
-        [{"k": "a", "q": 5}], tag_columns=["k"], tag_only_columns=True, source_id="R"
+        [{"k": "a", "q": 5}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        label="R",
+        source_id="R",
     )
     job = PipelineJob(name=f"edges{mode}", database=InMemoryArrowDatabase())
     with job:
@@ -3359,6 +3481,7 @@ def test_a_float_selector_subclass_never_runs_its_own_equality() -> None:
         [{"t": 1.0, "x": 1}, {"t": 0.0, "x": 2}, {"t": float("nan"), "x": 3}],
         tag_columns=["t"],
         tag_only_columns=True,
+        label="f",
         source_id="f",
     )
     job = PipelineJob(name="floats", database=InMemoryArrowDatabase())
@@ -3389,6 +3512,7 @@ def test_a_selector_container_subclass_is_copied_without_its_methods() -> None:
         [{"k": "u0", "x": 1}, {"k": "u1", "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name="containers", database=InMemoryArrowDatabase())
@@ -3485,6 +3609,7 @@ def test_a_batch_after_a_partly_stored_run_traces(
             tag_columns=["k", "j"],
             tag_only_columns=True,
             record_id_columns=["k"],
+            label="s",
             source_id="s",
         )
         job = PipelineJob(name="partly", database=database)
@@ -3563,6 +3688,7 @@ def test_a_stored_token_naming_an_absent_column_is_refused(
         [{"k": 0, "g": "a", "x": None}, {"k": 1, "g": "b", "x": 2}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name="ghost", database=InMemoryArrowDatabase())
@@ -3610,6 +3736,7 @@ def test_a_stored_token_must_be_the_source_rows_own_token_for_its_column(
         [{"k": 0, "g": "a", "x": 10, "z": 20}, {"k": 1, "g": "b", "x": None, "z": 5}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     job = PipelineJob(name="binding", database=InMemoryArrowDatabase())

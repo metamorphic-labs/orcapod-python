@@ -15,6 +15,7 @@ sessions = CSVSource(
     tag_columns=["subject_id", "session"], tag_only_columns=True,
     source_id="sessions",
 )
+durations = sessions.select_data_columns(["duration_s"])
 ```
 
 ## Side effects

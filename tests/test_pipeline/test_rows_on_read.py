@@ -43,6 +43,7 @@ def _plain() -> DictSource:
         [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
 
@@ -112,6 +113,7 @@ def test_a_narrower_raw_bind_keeps_the_slots_system_tag_order() -> None:
             [{"k": 1, "x": 1}, {"k": 2, "x": None}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         Batch(batch_size=2)(declared, label="batched")
@@ -153,6 +155,7 @@ def test_a_narrower_bind_is_described_from_its_declared_schema() -> None:
             table.cast(pa.schema(fields)),
             tag_columns=["j", "k"],
             tag_only_columns=("j",),
+            label="s",
             source_id="s",
         )
 
@@ -193,6 +196,7 @@ def test_a_narrower_bind_channel_delivers_its_rows() -> None:
             table.cast(pa.schema(fields)),
             tag_columns=["j", "k"],
             tag_only_columns=("j",),
+            label="s",
             source_id="s",
         )
 
@@ -347,7 +351,7 @@ def test_an_empty_output_is_derived_at_the_edge(
     job = PipelineJob(name="empty_edge", database=InMemoryArrowDatabase())
     with job:
         ArrowTableSource(
-            table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+            table, tag_columns=["k"], tag_only_columns=True, label="s", source_id="s"
         ).select_data_columns(["x"], label="selected")
     slot = next(label for label in job.nodes if label != "selected")
     observer = _NodeEvents()
@@ -474,7 +478,7 @@ def test_a_subclass_that_overrides_a_reader_is_not_a_table_is_rows_kind(
     source = cls(table, tag_columns=["k"], tag_only_columns=True, source_id="s")
     assert not table_is_rows(source)
     plain = ArrowTableSource(
-        table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+        table, tag_columns=["k"], tag_only_columns=True, label="s", source_id="s"
     )
     assert table_is_rows(plain)
     # Exact, never by inspection: a subclass that overrides nothing is not proven.
@@ -495,7 +499,7 @@ def test_a_filtering_subclass_delivers_only_its_rows() -> None:
     job = PipelineJob(name="filtering", database=InMemoryArrowDatabase())
     with job:
         ArrowTableSource(
-            table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+            table, tag_columns=["k"], tag_only_columns=True, label="s", source_id="s"
         ).select_data_columns(["x"], label="selected")
     job.bind(
         sources={
@@ -532,6 +536,7 @@ def test_an_operator_result_keeps_its_own_column_order() -> None:
             [{"k": 1, "x": 1, "y": 2}, {"k": 2, "x": 3, "y": 4}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         Batch(batch_size=2)(Reordered(["x", "y"])(source, label="reordered"), label="b")
@@ -581,7 +586,7 @@ def _bound_selection(source: Any) -> list[int]:
     job = PipelineJob(name="exact", database=InMemoryArrowDatabase())
     with job:
         ArrowTableSource(
-            table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+            table, tag_columns=["k"], tag_only_columns=True, label="s", source_id="s"
         ).select_data_columns(["x"], label="selected")
     job.bind(sources={"s": source})
     job.run()
@@ -622,7 +627,7 @@ def test_an_exact_library_source_is_eager() -> None:
 
     table = pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])})
     source = ArrowTableSource(
-        table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+        table, tag_columns=["k"], tag_only_columns=True, label="s", source_id="s"
     )
     source.as_table()
     list(source.iter_data())
@@ -669,6 +674,7 @@ def test_a_composed_operator_result_keeps_its_own_order(
             [{"a": 1, "b": 5, "x": 1, "y": 2}, {"a": 2, "b": 6, "x": 3, "y": 4}],
             tag_columns=["a", "b"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         Batch(batch_size=2)(Composed(["x", "y"])(source, label="composed"), label="b")
@@ -717,6 +723,7 @@ def test_a_result_of_another_stream_kind_takes_mains_row_path() -> None:
             pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])}),
             tag_columns=["k"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         Batch(batch_size=2)(Filtering(["x"])(source, label="filtered"), label="b")
@@ -766,6 +773,7 @@ def test_a_dynamic_stream_that_is_not_proven_stops_the_chain(how: str) -> None:
             pa.table({"k": [1, 2], "x": [10, 20], "y": [1, 2], "z": [5, 6]}),
             tag_columns=["k"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         Batch(batch_size=2)(Outer(["x", "y"])(source, label="outer"), label="b")
@@ -848,6 +856,7 @@ def test_a_source_in_another_data_context_hands_on_its_own_rows() -> None:
         [{"k": 1, "x": 10}, {"k": 2, "x": 20}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
         data_context=custom,
     )
@@ -902,6 +911,7 @@ def _system_tag_job(values: list[int | None], exact: bool) -> tuple[Any, Any]:
             [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         _AddSystemTag.operator(values, exact)(source, label="marked")
@@ -970,6 +980,7 @@ def test_a_source_table_with_other_system_tags_is_not_its_rows() -> None:
         tag_columns=["k"],
         tag_only_columns=True,
         system_tag_columns=["region"],
+        label="s",
         source_id="s",
     )
     assert not system_tags_as_rows_give(narrow.as_table(columns={"system_tags": True}))
@@ -1090,7 +1101,7 @@ def test_a_lazy_output_describes_itself_without_converting_python_types(
     base = pa.table({"k": pa.array([1, 2], pa.int64()), "x": values})
     base = base.cast(pa.schema([f.with_nullable(False) for f in base.schema]))
     source = ArrowTableSource(
-        base, tag_columns=["k"], tag_only_columns=True, source_id="s"
+        base, tag_columns=["k"], tag_only_columns=True, label="s", source_id="s"
     )
     raw = ArrowTableStream(
         source.as_table(columns={"source": True, "system_tags": True}),
@@ -1123,6 +1134,7 @@ def test_a_source_job_node_subclass_hands_on_the_rows_it_reads() -> None:
         pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])}),
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
     node: Any = AboveTen.from_stream(source)
@@ -1185,6 +1197,7 @@ def _system_tag_outcome(case: str, asynchronous: bool) -> Any:
             [{"k": 1, "x": 1, "y": 3}, {"k": 2, "x": 2, "y": 4}],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         Batch(batch_size=2)(AddSystemTag(["x"])(source, label="marked"), label="b")

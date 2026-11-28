@@ -240,7 +240,11 @@ def test_several_slots_round_trip_in_operator_argument_order(
     declarations = {role: stream.as_slot(role) for role, stream in bindings}
     blueprint = Pipeline(name="ordered")
     with blueprint:
-        MergeJoin()(declarations["left"], declarations["right"], label="paired")
+        steps = {
+            role: _increment.pod(slot, label=f"{role}_value")
+            for role, slot in declarations.items()
+        }
+        MergeJoin()(steps["left"], steps["right"], label="paired")
     db = InMemoryArrowDatabase()
     job = PipelineJob.from_pipeline(blueprint, database=db)
     job.bind(sources=dict(bindings))
@@ -250,14 +254,13 @@ def test_several_slots_round_trip_in_operator_argument_order(
         import asyncio
 
         asyncio.run(job.run_async())
-    assert job.nodes["paired"].as_table()["value"].to_pylist() == [[4, 7]]
+    assert job.nodes["paired"].as_table()["output"].to_pylist() == [[5, 8]]
     saved = tmp_path / "job.json"
     job.save(saved)
     loaded = PipelineJob.load(saved, database=db)
     assert set(loaded.unbound_sources) == {"left", "right"}
-    assert [slot.label for slot in loaded.nodes["paired"].upstreams] == [
-        "left",
-        "right",
-    ]
+    upstreams = loaded.nodes["paired"].upstreams
+    assert [step.label for step in upstreams] == ["left_value", "right_value"]
+    assert [step.upstreams[0].label for step in upstreams] == ["left", "right"]
     loaded.bind(sources=dict(bindings))
     assert loaded.sources == dict(bindings)

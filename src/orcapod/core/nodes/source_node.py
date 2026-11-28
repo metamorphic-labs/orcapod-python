@@ -881,8 +881,13 @@ class SourceNodeBase(TraceableBase, ABC):
                 "Rebuild the pipeline with the new slot label (ITL-1559)."
             )
         self._name = name
+        self._label = label
         self._saved_content_hash = None
         self._invalidate_content_hash_cache()
+
+    def computed_label(self) -> str:
+        """Return the default presentation label for this slot."""
+        return self.name
 
     def freeze_slot_name(self) -> None:
         """Keep this graph-owned slot's public key fixed (ITL-1559)."""
@@ -1548,6 +1553,9 @@ class SourceNode(SourceNodeBase):
             name=slot_name,
             tag_schema=tag_schema,
             data_schema=data_schema,
+            data_context=stream.data_context
+            if isinstance(stream, SourceNodeBase)
+            else None,
             arrow_schemas=(
                 stream._given_arrow_schemas
                 if isinstance(stream, SourceNodeBase)

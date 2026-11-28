@@ -218,6 +218,7 @@ def _source() -> DictSource:
         [{"id": i, "x": i} for i in range(3)],
         tag_columns=["id"],
         tag_only_columns=True,
+        label="src",
         source_id="src",
     )
 
@@ -513,6 +514,7 @@ def _one_row_source(value: int | float | str) -> DictSource:
         [{"id": 1, "x": value}],
         tag_columns=["id"],
         tag_only_columns=True,
+        label="src",
         source_id="src",
     )
 
@@ -593,6 +595,7 @@ class TestMemoInvalidation:
             [{"id": "one", "x": 1}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="other",
             source_id="other",
         )
 

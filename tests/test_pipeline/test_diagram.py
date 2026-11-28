@@ -62,6 +62,7 @@ def _units(rows: int = 4, source_id: str = "units") -> DictSource:
         [{"g": i % 2, "k": i, "x": 10 * i} for i in range(rows)],
         tag_columns=["g", "k"],
         tag_only_columns=True,
+        label=source_id,
         source_id=source_id,
     )
 
@@ -71,6 +72,7 @@ def _scales(source_id: str = "scales") -> DictSource:
         [{"g": 0, "scale": 1.0}, {"g": 1, "scale": 2.0}],
         tag_columns=["g"],
         tag_only_columns=True,
+        label=source_id,
         source_id=source_id,
     )
 
@@ -1106,7 +1108,7 @@ def test_a_loaded_node_whose_types_cannot_be_restored_is_drawn(tmp_path: Any) ->
         "job = PipelineJob(name='unknown', database=DeltaTableDatabase(root / 'store'))\n"
         "with job:\n"
         "    source = DictSource([{'id': 1, 'x': 2}], tag_columns=['id'],\n"
-        "                        tag_only_columns=True, source_id='numbers')\n"
+        "                        tag_only_columns=True, source_id='numbers', label='numbers')\n"
         "    make_payload.pod(source, label='producer')\n"
         "job.run()\n"
         "job.save(root / 'job.json')\n"

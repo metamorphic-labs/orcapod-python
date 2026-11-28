@@ -25,7 +25,11 @@ def _make_source(tag_col, data_col, data):
         }
     )
     return ArrowTableSource(
-        table, tag_columns=[tag_col], tag_only_columns=True, infer_nullable=True
+        table,
+        tag_columns=[tag_col],
+        tag_only_columns=True,
+        infer_nullable=True,
+        label=data_col,
     )
 
 

@@ -96,6 +96,7 @@ def make_source(xs: list[float], source_id: str = "s") -> ArrowTableSource:
         table,
         tag_columns=["subject", "session"],
         tag_only_columns=True,
+        label=source_id,
         source_id=source_id,
     )
 

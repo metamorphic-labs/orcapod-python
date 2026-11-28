@@ -56,6 +56,7 @@ def _arrow_source(
         pa.table({"id": ids, "x": xs}, schema=schema),
         tag_columns=["id"],
         tag_only_columns=True,
+        label="same",
         source_id="same",
     )
 
@@ -151,6 +152,7 @@ def test_a_narrower_source_is_accepted_and_moves_nothing(
             [{"id": 0, "x": 1}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="d",
             source_id="d",
         ),
     )
@@ -316,6 +318,7 @@ def test_zero_rows_have_the_types_of_rows(tmp_path: pathlib.Path) -> None:
                 [{"id": 0, "v": 1}],
                 tag_columns=["id"],
                 tag_only_columns=True,
+                label="o",
                 source_id="o",
             ),
             label="same",
@@ -372,7 +375,11 @@ def _csv_job(tmp_path: pathlib.Path, text: str) -> str:
     with job:
         _ = MapData({"x": "y"})(
             CSVSource(
-                str(csv), tag_columns=["id"], tag_only_columns=True, source_id="csv"
+                str(csv),
+                tag_columns=["id"],
+                tag_only_columns=True,
+                label="csv",
+                source_id="csv",
             ),
             label="renamed",
         )
@@ -411,6 +418,7 @@ def test_loaded_csv_of_another_type_is_left_unbound(
                 str(tmp_path / "fixed.csv"),
                 tag_columns=["id"],
                 tag_only_columns=True,
+                label="csv",
                 source_id="csv",
             )
         }
@@ -529,7 +537,11 @@ def test_columns_follow_the_declared_order(a_type: Any) -> None:
 def _mapped_stream() -> Any:
     """Return a stream (not a root source): a DictSource with ``q`` renamed to ``x``."""
     source = DictSource(
-        [{"id": 0, "q": 1}], tag_columns=["id"], tag_only_columns=True, source_id="m"
+        [{"id": 0, "q": 1}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        label="m",
+        source_id="m",
     )
     return MapData({"q": "x"})(source)
 
@@ -595,6 +607,7 @@ def test_meta_columns_of_a_narrower_stream_are_kept() -> None:
                 [{"id": 0, "v": 1}],
                 tag_columns=["id"],
                 tag_only_columns=True,
+                label="o",
                 source_id="o",
             ),
             label="same",
@@ -982,6 +995,7 @@ def test_a_structural_class_of_the_same_identity_is_accepted(
         tag_columns=["id"],
         tag_only_columns=True,
         data_schema={"id": int, "p": _PointB},
+        label="b",
         source_id="b",
     )
     assert source.output_schema()[1]["p"] is not _PointA

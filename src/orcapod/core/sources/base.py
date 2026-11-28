@@ -266,6 +266,9 @@ class RootSource(StreamBase):
     def as_slot(self, name: str | None = None) -> "SourceNode":
         """Declare a named input for a pipeline step.
 
+        The declaration carries the schemas and this source. The job creates
+        the live slot during capture.
+
         Args:
             name: Slot name. Defaults to this source's label.
 

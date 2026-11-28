@@ -34,7 +34,11 @@ def _make_source(tag_col: str, data_col: str, data: dict) -> ArrowTableSource:
         }
     )
     return ArrowTableSource(
-        table, tag_columns=[tag_col], tag_only_columns=True, infer_nullable=True
+        table,
+        tag_columns=[tag_col],
+        tag_only_columns=True,
+        infer_nullable=True,
+        label=data_col,
     )
 
 
@@ -80,7 +84,7 @@ class TestPipelineJobRecording:
         assert all(isinstance(n, SourceNode) for n in source_nodes)
 
     def test_concrete_source_stored_in_sources(self, store):
-        """Concrete sources from with-block are stored by source_id in job.sources."""
+        """Concrete sources from with-block are stored by slot label in job.sources."""
         src_a = ArrowTableSource(
             pa.table(
                 {
@@ -90,6 +94,7 @@ class TestPipelineJobRecording:
             ),
             tag_columns=["key"],
             tag_only_columns=True,
+            label="source_a",
             source_id="source_a",
             infer_nullable=True,
         )
@@ -102,6 +107,7 @@ class TestPipelineJobRecording:
             ),
             tag_columns=["key"],
             tag_only_columns=True,
+            label="source_b",
             source_id="source_b",
             infer_nullable=True,
         )
@@ -923,12 +929,12 @@ class TestPipelineJobSerialization:
         # bind() must not raise "no matching source slot".
         # A slot is named by its source's name, the id without the kind part.
         loaded.bind(
-            sources={src_a.source_name: src_a, src_b.source_name: src_b},
+            sources={src_a.label: src_a, src_b.label: src_b},
             database=store,
         )
 
-        assert loaded._sources[src_a.source_name] is src_a
-        assert loaded._sources[src_b.source_name] is src_b
+        assert loaded._sources[src_a.label] is src_a
+        assert loaded._sources[src_b.label] is src_b
 
     def test_load_is_not_runnable_after_bind(self, store, tmp_path):
         """Binding every source leaves a loaded job read-only."""
@@ -949,7 +955,7 @@ class TestPipelineJobSerialization:
         assert loaded.is_runnable("adder") is False
 
         loaded.bind(
-            sources={src_a.source_name: src_a, src_b.source_name: src_b},
+            sources={src_a.label: src_a, src_b.label: src_b},
             database=store,
         )
 

@@ -75,8 +75,9 @@ print(units.source_id)
 The source id, kind part included, is what the source's system tags and source-info tokens
 hold (`arrow_table_v1:units::row_0::rate`), and it is part of the source's identity, so the
 same rows read by another kind, or by another version of one kind, are another source. The
-record id names a row within its source and never holds the source id. A job names an input
-slot by the source's name (`job.bind(sources={"units": ...})`).
+record id names a row within its source. A job names an input slot from the
+source's label, which defaults to its class name. Give each role a distinct
+label or use `source.as_slot("role")`; bind with that role as the key.
 
 Each source content hash is registered to one Python object per pipeline or job.
 Build the source once and reuse that object wherever you read it. For sources
@@ -85,7 +86,9 @@ Two distinct objects with the same content hash raise
 `InconsistentSourceError` even when their rows agree, including sources that read
 rows later. Capture, binding, loading and execution all check for conflicts.
 Rebinding replaces a slot's source. On load, slots with identical saved source
-configurations share one reconstructed object.
+configurations share one reconstructed object. Jobs with two slots sharing
+one live source identity can be inspected. Running them requires distinct
+bindings (ITL-1559).
 
 A job accepts new steps only while every slot holds the exact source object
 it held when that slot was first compiled. A slot originally compiled unbound
@@ -570,7 +573,7 @@ keep. For such a value, filter without the `where`.
 
 <!-- docs-test: skip -->
 ```python
-events = SpiralDBTableSource("my-project-123456", "spike_event", source_id="spikes")
+events = SpiralDBTableSource("my-project-123456", "spike_event", source_id="spikes", label="spikes")
 one_unit = events.where(unit_id=106)  # or events.where({"unit_id": 106})
 one_session = one_unit.where(session_index=2)  # conditions add up
 same_session = events.where(unit_id=106, session_index=2)  # both in one call
@@ -590,7 +593,7 @@ print(summary.restricted_source_ids)
 ```
 
 (This sample needs a SpiralDB project, so it is not run with the documentation; `job` is a
-job built over `events`, whose slot is named by the source id.)
+job built over `events`, whose slot is named by its label.)
 
 To restrict on two columns, pass separate equality keywords such as
 `events.where(unit_id=106, session_index=2)`. Combining comparisons as

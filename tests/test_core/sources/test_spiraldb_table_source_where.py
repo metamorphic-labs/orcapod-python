@@ -75,6 +75,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _source(**kwargs: Any) -> SpiralDBTableSource:
     """Return a source over ``event`` with ``kwargs``."""
+    kwargs.setdefault("label", kwargs.get("source_id"))
     return SpiralDBTableSource(_PROJECT, "event", **kwargs)
 
 
@@ -1614,10 +1615,20 @@ _RESTRICTIONS: dict[str, _Restrict] = {
     "a condition": lambda s: s.where(subject_id="m1"),
     "several conditions": lambda s: s.where(subject_id="m1", flag=True),
     "a limit": lambda s: SpiralDBTableSource(
-        _PROJECT, "event", source_id="events", tag_only_columns=True, limit=3
+        _PROJECT,
+        "event",
+        label="events",
+        source_id="events",
+        tag_only_columns=True,
+        limit=3,
     ),
     "a condition and a limit": lambda s: SpiralDBTableSource(
-        _PROJECT, "event", source_id="events", tag_only_columns=True, limit=3
+        _PROJECT,
+        "event",
+        label="events",
+        source_id="events",
+        tag_only_columns=True,
+        limit=3,
     ).where(subject_id="m1"),
 }
 _CACHING = [CacheMode.LOG, CacheMode.REPLAY]
@@ -1745,7 +1756,7 @@ class TestOperatorCacheOverARestriction:
         )
         events = self._events()
         units = SpiralDBTableSource(
-            _PROJECT, "unit", source_id="units", tag_only_columns=True
+            _PROJECT, "unit", label="units", source_id="units", tag_only_columns=True
         )
         sources = {"events": events, "units": units}
         for name in restricted:
@@ -1944,7 +1955,11 @@ class TestOperatorCacheEntryPoints:
                 _rows(["m3", "m3"], [6, 7])
             )
             other = SpiralDBTableSource(
-                _PROJECT, "other", source_id="events", tag_only_columns=True
+                _PROJECT,
+                "other",
+                label="events",
+                source_id="events",
+                tag_only_columns=True,
             )
             assert sorted(_timestamps(other)) == [6, 7]
             node.attach_databases(
@@ -2005,6 +2020,7 @@ class TestRestrictionThroughWrappers:
             return DerivedSource(
                 _events().where(subject_id=subject),
                 tags_as_data={"subject_id": "copied"},
+                label=f"copy_{subject}",
                 source_id=f"copy_{subject}",
             )
 
@@ -2202,7 +2218,12 @@ class TestOneRestrictionPerSource:
             lambda: _events().where(subject_id="m2"),
             lambda: _events(),
             lambda: SpiralDBTableSource(
-                _PROJECT, "event", source_id="events", tag_only_columns=True, limit=2
+                _PROJECT,
+                "event",
+                label="events",
+                source_id="events",
+                tag_only_columns=True,
+                limit=2,
             ).where(subject_id="m1"),
         ],
         ids=["another condition", "no restriction", "the condition and a limit"],
@@ -2335,7 +2356,7 @@ class TestASlotOverTwoTables:
     @staticmethod
     def _others() -> SpiralDBTableSource:
         return SpiralDBTableSource(
-            _PROJECT, "other", source_id="others", tag_only_columns=True
+            _PROJECT, "other", label="others", source_id="others", tag_only_columns=True
         )
 
     @pytest.fixture()

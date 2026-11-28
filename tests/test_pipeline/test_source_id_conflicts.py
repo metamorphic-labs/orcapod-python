@@ -79,7 +79,7 @@ def consume_output(out: int) -> int:
 
 
 def _dict(x: int, name: str = "shared") -> DictSource:
-    return DictSource(data=[{"x": x}], source_id=name)
+    return DictSource(data=[{"x": x}], source_id=name, label=name)
 
 
 def _refused(
@@ -231,11 +231,11 @@ def test_derived_from_fixed_sources() -> None:
     _refused(derived(1), derived(100), PipelineJob(), with_copy.pod)
 
 
-def test_same_name_across_kinds_still_collides_at_capture_but_can_bind_separate_slots() -> (
+def test_same_label_across_kinds_collides_at_capture_but_can_bind_separate_slots() -> (
     None
 ):
     table = ArrowTableSource(
-        pa.table({"x": [100]}), infer_nullable=True, source_id="shared"
+        pa.table({"x": [100]}), infer_nullable=True, source_id="shared", label="shared"
     )
     dictionary = _dict(1)
     with pytest.raises(SourceSlotNameCollisionError):
@@ -347,7 +347,11 @@ def test_bind_checks_all_prospective_slots_atomically(
     assert job.sources["left"] is second
     with pytest.raises(InconsistentSourceError, match="distinct source objects"):
         job.bind(sources={"right": first})
-    job.bind(sources={"right": second})
+    with pytest.raises(InconsistentSourceError, match="ITL-1559"):
+        job.bind(sources={"right": second})
+    assert job.sources["left"] is second
+    assert job.sources.get("right") is before.get("right")
+    job.bind(sources={"left": _dict(5, "new_left"), "right": second})
     assert job.sources["right"] is second
     with pytest.raises(InconsistentSourceError, match="distinct source objects"):
         job.bind(sources={"left": _dict(100)})
@@ -403,8 +407,10 @@ def test_load_checks_schema_of_reconstructed_sources(tmp_path: Path) -> None:
     left.write_text("x\n1\n")
     right.write_text("x\ntext\n")
     with PipelineJob() as job:
-        increment.pod(CSVSource(str(left), source_id="left"), label="fa")
-        with_string.pod(CSVSource(str(right), source_id="right"), label="fb")
+        increment.pod(CSVSource(str(left), source_id="left", label="left"), label="fa")
+        with_string.pod(
+            CSVSource(str(right), source_id="right", label="right"), label="fb"
+        )
     path = tmp_path / "job.json"
     job.save(path)
     saved = json.loads(path.read_text())
@@ -422,6 +428,7 @@ def test_schema_conflicts_at_capture_and_bind() -> None:
             pa.table({"x": pa.array([1], type=kind)}),
             infer_nullable=True,
             source_id=name,
+            label=name,
         )
 
     first, second = source(pa.int32(), "shared"), source(pa.int64(), "shared")
@@ -602,6 +609,7 @@ def _semi_join_job() -> PipelineJob:
             tag_columns="k",
             tag_only_columns=True,
             source_id=name,
+            label=name,
         )
 
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
@@ -675,6 +683,7 @@ def _arranged(
         else [],
         record_id_columns=keys,
         source_id=source_id,
+        label=source_id,
     )
 
 

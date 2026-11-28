@@ -660,7 +660,7 @@ def test_a_job_storing_there_is_refused_before_anything_runs(project: Any) -> No
         calls.append(v)
         return 2 * v
 
-    source = DictSource([{"k": 1, "v": 1}], tag_columns=["k"], source_id="s")
+    source = DictSource([{"k": 1, "v": 1}], tag_columns=["k"], label="s", source_id="s")
     job = PipelineJob(name="j", database=ConnectorArrowDatabase(SpiralDBConnector("p")))
     with pytest.raises(SpiralDBWriteNotSupportedError):
         with job:

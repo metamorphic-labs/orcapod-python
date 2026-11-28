@@ -95,6 +95,7 @@ def build_job(
     sources = [
         ArrowTableSource(
             table,
+            label=name,
             source_id=name,
             tag_columns=["k"],
             tag_only_columns=True,

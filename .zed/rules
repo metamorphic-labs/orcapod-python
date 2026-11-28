@@ -622,7 +622,7 @@ algorithm produced it.**
   preimage table or digest input, feed `to_prefixed_digest()` (binary) or `to_string()`
   (text), never `.digest` or `to_hex()`. A logical-type cell is
   `<identifier>::<label>:<digest>`. Renaming a label moves every hash it feeds.
-- A hash inside a name (path component, column name, `uri`, slot name, run URI) is the bare
+- A hash inside a name (path component, column name, `uri`, run URI) is the bare
   hex digest: `to_hex()`. A name later fed into a hash (the function `uri` in a pod's
   identity, system-tag column names in an entry-id table) is still a name.
 - Source ids: every source id is `<kind>_v<N>:<name>` (ITL-1425). A default name built from
@@ -1364,6 +1364,14 @@ data. The rules:
   binds each leaf through SourceJobNode.from_stream, so a pipeline built directly over a
   raw ArrowTableStream is refused (developer, November 14, 2026; wrap the table as a
   source). Never pass a bound stream's own system tags through.
+- A job's source slot uses its captured label as its name (ITL-1565). The source's
+  assigned label or class name is the default. Use source.as_slot(name) to label only
+  the slot. Two slots sharing a name are refused, and slot labels are reserved before
+  generated step labels. A graph-owned slot cannot be renamed (ITL-1559). Dataset IDs,
+  system tags and source tokens use the source's identity. A bound slot takes the
+  content identity of its source, and the pipeline identity uses its Arrow schema.
+  For now, jobs refuse multiple slots with one live source identity and prebuilt
+  non-source leaves (ITL-1559). Capture the step within the job or pass node.as_source().
 - A source id is the source's name (developer, November 11, 2026; ITL-957; every source,
   November 15, 2026, ITL-1154), and every source id is <kind>_v<N>:<name> (developer,
   November 23, 2026, ITL-1425). The kind part names the kind and implementation version that
@@ -1381,10 +1389,7 @@ data. The rules:
   source_name, source_name_given (given or default: read back, never guessed, by
   RootSource._from_saved_name) and source_version apart (the kind is source_type); loaded where the class
   declares another version, the source has the installed version's id
-  (SourceVersionWarning), never a rewritten one. A slot (a job.nodes and bind key) is named
-  by the source's name, not its full id, and two different sources with one name are
-  refused in a job (SourceSlotNameCollisionError,
-  pipeline/base._refuse_sources_sharing_a_slot_name). A CachedSource presents its wrapped
+  (SourceVersionWarning), never a rewritten one. A CachedSource presents its wrapped
   source's id and refuses, when the cache is first read or checked and before the wrapped
   source is checked or read, a cache table whose rows name another
   id (CachedSourceIdMismatchError; once found, no wrapped row is read or returned and nothing

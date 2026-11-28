@@ -368,7 +368,11 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         slot_names: dict[str, str] = {}
         for upstream, upstream_key in zip(inputs, input_keys, strict=True):
-            if upstream_key in self._invocation_lut:
+            if upstream_key in self._invocation_lut or not isinstance(
+                upstream, (RootSource, SourceNodeBase)
+            ):
+                # A prebuilt step can match an invocation recorded later in this
+                # capture. Only compile knows whether it is truly a leaf.
                 continue
             name = source_slot_name(upstream)
             previous = self._captured_slot_names.get(upstream_key)
