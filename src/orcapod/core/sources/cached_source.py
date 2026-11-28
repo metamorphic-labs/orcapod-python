@@ -14,6 +14,7 @@ from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import parse_source_id
+from orcapod.core.sources.stream_builder import require_supported_nullable_types
 from orcapod.errors import (
     CachedSourceIdMismatchError,
     InputValidationError,
@@ -269,7 +270,10 @@ class CachedSource(RootSource):
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """The wrapped source's Arrow schemas: the cache stores that source's rows."""
-        return typed_arrow_schemas(self._source)
+        schemas = typed_arrow_schemas(self._source)
+        for schema in schemas:
+            require_supported_nullable_types(schema)
+        return schemas
 
     # -------------------------------------------------------------------------
     # Cache path — scoped to source's content hash
@@ -357,7 +361,15 @@ class CachedSource(RootSource):
         refuse_restricted_cache_input(self._source)
         require_same_data_context(self._source.data_context_key, self.data_context_key)
         live_table = self._source.as_table(
-            columns={"source": True, "system_tags": True}
+            columns={"source": True, "system_tags": True, "meta": True}
+        )
+        require_supported_nullable_types(live_table.schema)
+        live_table = live_table.drop(
+            [
+                name
+                for name in live_table.column_names
+                if name.startswith(constants.META_PREFIX)
+            ]
         )
 
         # Compute per-row record hashes for dedup: hash the full row including
@@ -519,6 +531,7 @@ class CachedSource(RootSource):
         )
         if records is None:
             return None
+        require_supported_nullable_types(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
@@ -669,6 +682,7 @@ class CachedSource(RootSource):
         merged.update(data_schema)
         type_converter = self.data_context.type_converter
         arrow_schema = type_converter.python_schema_to_arrow_schema(merged)
+        require_supported_nullable_types(arrow_schema)
         return pa.Table.from_pylist([], schema=arrow_schema)
 
     @property
@@ -716,7 +730,10 @@ class CachedSource(RootSource):
 
         See ``typed_zero_row_table``; neither the cache nor the source is read.
         """
-        return typed_zero_row_table(self._source)
+        table = typed_zero_row_table(self._source)
+        if table is not None:
+            require_supported_nullable_types(table.schema)
+        return table
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the wrapped source."""

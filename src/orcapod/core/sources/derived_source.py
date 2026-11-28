@@ -19,6 +19,7 @@ from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.core.sources.stream_builder import (
+    require_supported_nullable_types,
     SourceStreamBuilder,
     normalize_record_id_columns,
 )
@@ -36,7 +37,7 @@ from orcapod.core.streams.base import (
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import schema_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
@@ -483,9 +484,18 @@ class DerivedSource(RootSource):
         """
         if isinstance(self._origin, RootSource):
             return self._origin.as_table()
-        records = self._origin.get_all_records()
+        records = self._origin.get_all_records(all_info=True)
         if records is None:
             return None
+        require_supported_nullable_types(records.schema)
+        records = arrow_utils.drop_columns_with_prefix(
+            records,
+            (
+                constants.META_PREFIX,
+                constants.SOURCE_PREFIX,
+                constants.SYSTEM_TAG_PREFIX,
+            ),
+        )
         try:
             stored = stored_data_tags(records.schema)
         except ValueError as exc:
@@ -542,13 +552,16 @@ class DerivedSource(RootSource):
         names = list(dict.fromkeys([*tag_keys, *data_keys]))
         typed = typed_zero_row_table(self._origin)
         if isinstance(typed, pa.Table):
+            require_supported_nullable_types(typed.schema)
             return typed.select(names)
         # An origin that cannot type its zero-row table states its Arrow types (a
         # read-only loaded operator, from its saved text), or gives its declared
         # Python schema, converted (``typed_arrow_schemas``).
         tag_arrow, data_arrow = typed_arrow_schemas(self._origin)
         fields = {field.name: field for field in (*tag_arrow, *data_arrow)}
-        return pa.schema([fields[name] for name in names]).empty_table()
+        schema = pa.schema([fields[name] for name in names])
+        require_supported_nullable_types(schema)
+        return schema.empty_table()
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """This source's Arrow schemas: its origin's columns (ITL-640).
@@ -796,6 +809,7 @@ class DerivedSource(RootSource):
         """Return this source's stream over the origin rows ``table``."""
         if self._tags_as_data is not None:
             return self._derive_from(table, self._tags_as_data)
+        require_supported_nullable_types(table.schema)
         return ArrowTableStream(
             table,
             tag_columns=self._origin.keys()[0],

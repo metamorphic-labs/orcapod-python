@@ -39,6 +39,9 @@ if TYPE_CHECKING:
 class ExtensionAwareDatabase:
     """``ArrowDatabaseProtocol`` wrapper that auto-registers and applies extension types.
 
+    **Provisional.** This wrapper is expected to be integrated more closely with the
+    underlying database classes (ITL-1539), so its public form may change.
+
     All read methods delegate to the wrapped *db*, then:
 
     1. Walk the returned table's schema to find any extension types (from

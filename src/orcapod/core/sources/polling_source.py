@@ -28,6 +28,7 @@ from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
+    require_supported_nullable_types,
 )
 from orcapod.core.streams.view import (
     ViewStatus,
@@ -45,7 +46,7 @@ from orcapod.errors import (
 )
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Cursor, PollingConfig, Schema
-from orcapod.utils import arrow_utils, polars_data_utils
+from orcapod.utils import arrow_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
 from orcapod.utils.schema_utils import (
     _normalize_column_list,
@@ -329,6 +330,7 @@ class PollingSource(RootSource, Generic[T]):
         self._declared_arrow: pa.Schema | None = None
         unified_schema = self._impl.schema()
         if isinstance(unified_schema, pa.Schema):
+            require_supported_nullable_types(unified_schema)
             # Logical types in one form first: a field declared with its identifier
             # in ARROW:extension:* metadata is that logical type (ITL-640).
             self._declared_arrow = declaration_form_schema(
@@ -366,6 +368,7 @@ class PollingSource(RootSource, Generic[T]):
                 self._declared_arrow = declared_arrow_schema(
                     unified_schema, self.data_context.type_converter
                 )
+                require_supported_nullable_types(self._declared_arrow)
 
     # -------------------------------------------------------------------------
     # Schema helpers — fetch-free schema computation from declared schemas
@@ -558,6 +561,7 @@ class PollingSource(RootSource, Generic[T]):
             table = typed_zero_row_table(batch)
             if table is None:
                 return None
+            require_supported_nullable_types(table.schema)
             zero_rows = ArrowTableStream(table=table, tag_columns=self._tag_columns)
             result = zero_rows if result is None else self._combine(result, zero_rows)
         return typed_zero_row_table(result)
@@ -895,9 +899,9 @@ class PollingSource(RootSource, Generic[T]):
             )
             df = df.with_columns([pl.from_arrow(c) for c in sub_table])
 
-        df = polars_data_utils.drop_system_columns(df)
-
-        arrow_table = df.to_arrow()
+        raw = df.to_arrow()
+        require_supported_nullable_types(raw.schema)
+        arrow_table = arrow_utils.drop_system_columns(raw)
 
         # Establish canonical schema on first call; apply it on every call.
         if self._canonical_arrow_schema is None:
@@ -1080,6 +1084,7 @@ class PollingSource(RootSource, Generic[T]):
             ],
             promote_options="default",
         )
+        require_supported_nullable_types(combined.schema)
         return ArrowTableStream(table=combined, tag_columns=self._tag_columns)
 
     def _mark_new_rows(self, committed: ArrowTableStream | None) -> bool:
