@@ -79,10 +79,18 @@ def _recorded_at_field() -> "pa.Field[pa.DataType]":
 
 def _record_ids(records: pa.Table) -> list[tuple[str, ...]]:
     """Each row's record id: its record-id system-tag values, columns in name order."""
+    record_prefix = (
+        f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+    )
+    source_prefix = (
+        f"{constants.SYSTEM_TAG_SOURCE_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+    )
+    fields = set(records.column_names)
     names = sorted(
         name
-        for name in records.column_names
-        if name.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
+        for name in fields
+        if name.startswith(record_prefix)
+        and source_prefix + name.removeprefix(record_prefix) in fields
     )
     columns = [records.column(name).to_pylist() for name in names]
     return [tuple(values) for values in zip(*columns, strict=True)] if columns else []
@@ -448,6 +456,7 @@ class CachedSource(RootSource):
         ``SourceProxy``).
         """
         seen = self._source_modified_time()
+        self._cache_database.refresh_table(self.cache_path)
         # Before the wrapped source's rows are read: a cache of another source id is
         # refused without reading or writing any row (ITL-1425).
         self._require_rows_of_this_source()
@@ -613,11 +622,15 @@ class CachedSource(RootSource):
         records = self._cache_database.get_all_records(
             self.cache_path, record_id_column=self.HASH_COLUMN_NAME
         )
-        return (
-            None
-            if records is None
-            else validate_source_table(records, stored_cache=True)
-        )
+        if records is None:
+            return None
+        if SOURCE_RECORDED_AT_COL not in records.column_names:
+            raise InputValidationError(
+                f"CachedSource at {'/'.join(self.cache_path)!r} is missing "
+                f"{SOURCE_RECORDED_AT_COL!r}. Rebuild the cache from the source "
+                "using a new cache path or database."
+            )
+        return validate_source_table(records, stored_cache=True)
 
     def _read_cached_records(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context.

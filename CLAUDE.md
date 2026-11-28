@@ -1014,8 +1014,9 @@ current data context are the current entries.
   2026, ITL-1259; 0.3.0 was withdrawn). The pipeline, side-effect log and operator cache
   layouts moved to `v2` before that release, with the three row ids (developer, November 25,
   2026, ITL-1471; below, "Row ids"). A change to the common
-  bookkeeping columns of a table kind moves its layout version, so the table gets a new path.
-  Never add, rename or retype a stored column without it.
+  bookkeeping columns of a released table layout moves its layout version, so the table
+  gets a new path. ITL-1396 adds `__recorded_at` to the unreleased `sdb_v2` at the same
+  path. An earlier prerelease `sdb_v2` table without the column must be rebuilt.
 - A function result table is at
   `<function>/<output schema hash>/v<function major>/python.function.v1/rev1/rdb_v1`, three
   components with three owners (`docs/reference/data-function-types.md`):

@@ -20,7 +20,13 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.core.sources.cached_source import SOURCE_RECORDED_AT_COL
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import CachedSourceChangedRowError, InputValidationError
+from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
+from orcapod.databases.sqlite_connector import SQLiteConnector
+from orcapod.errors import (
+    CachedSourceChangedRowError,
+    InputValidationError,
+    UnstorableColumnError,
+)
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.sources import ArrowTableSource, CachedSource, CSVSource
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
@@ -363,6 +369,34 @@ def test_a_reloaded_job_refuses_a_changed_row(tmp_path: Path) -> None:
     assert _cache_rows(_cached(path, cache), cache) == before
 
 
+@pytest.mark.parametrize("warm_table", [True, False], ids=["present", "absent"])
+def test_a_delta_writer_checks_a_delivery_against_the_latest_snapshot(
+    tmp_path: Path, warm_table: bool
+) -> None:
+    path = tmp_path / "readings.csv"
+    cache_dir = str(tmp_path / "cache")
+    first_db = DeltaTableDatabase(cache_dir)
+    _write(path, ROWS[:1])
+    first = _cached(path, first_db)
+    if warm_table:
+        assert _presented(first) == ROWS[:1]
+    else:
+        assert first.get_all_records() is None
+
+    _write(path, ROWS[:2])
+    second_db = DeltaTableDatabase(cache_dir)
+    second = _cached(path, second_db)
+    assert _presented(second) == ROWS[:2]
+    before = _cache_rows(second, second_db)
+
+    _write(path, _changed(ROWS[:2], ("s1", 2)))
+    delivery = _cached(path, first_db)
+    with pytest.raises(CachedSourceChangedRowError, match='"session":2'):
+        _ = delivery.as_table()
+    fresh_db = DeltaTableDatabase(cache_dir)
+    assert _cache_rows(delivery, fresh_db) == before
+
+
 # ---------------------------------------------------------------------------
 # Record ids by position: one rule for every source
 # ---------------------------------------------------------------------------
@@ -441,9 +475,84 @@ def test_an_in_memory_source_is_held_to_the_same_rule() -> None:
     assert '{"session":2,"subject":"s1"}' in str(refused.value)
 
 
+@pytest.mark.parametrize("name", ["record_id_extra", "record_id", "record_id::custom"])
+def test_a_custom_record_id_like_tag_cannot_mask_a_changed_row(name: str) -> None:
+    cache = InMemoryArrowDatabase()
+
+    def cached(value: float, tag: str) -> CachedSource:
+        schema = pa.schema(
+            [
+                pa.field("subject", pa.large_string()),
+                pa.field("session", pa.int64()),
+                pa.field("value", pa.float64()),
+                pa.field("count", pa.int64()),
+                pa.field(name, pa.large_string(), nullable=False),
+            ]
+        )
+        table = pa.Table.from_pylist(
+            [{"subject": "s1", "session": 1, "value": value, "count": 10, name: tag}],
+            schema=schema,
+        )
+        return ArrowTableSource(
+            table,
+            tag_columns=["subject", "session"],
+            tag_only_columns=True,
+            record_id_columns=["subject", "session"],
+            system_tag_columns=[name],
+            source_id="readings",
+        ).cached(cache)
+
+    first = cached(1.0, "before")
+    assert _presented(first) == ROWS[:1]
+    before = _cache_rows(first, cache)
+
+    changed = cached(1.5, "after")
+    with pytest.raises(CachedSourceChangedRowError, match='"session":1'):
+        _ = changed.as_table()
+    assert _cache_rows(changed, cache) == before
+
+
 # ---------------------------------------------------------------------------
 # The recorded-at column
 # ---------------------------------------------------------------------------
+
+
+def test_sqlite_refuses_the_source_cache_timestamp_at_construction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "readings.csv"
+    _write(path, ROWS)
+    cache = ConnectorArrowDatabase(SQLiteConnector())
+    with pytest.raises(UnstorableColumnError, match=SOURCE_RECORDED_AT_COL):
+        _ = _cached(path, cache)
+    assert list(cache.list_table_paths(())) == []
+
+
+@pytest.mark.parametrize("ingest", [False, True], ids=["read", "ingest"])
+def test_a_prerelease_source_cache_without_recorded_at_requires_rebuild(
+    tmp_path: Path, ingest: bool
+) -> None:
+    path = tmp_path / "readings.csv"
+    _write(path, ROWS)
+    current_db = InMemoryArrowDatabase()
+    current = _cached(path, current_db)
+    assert _presented(current) == sorted(ROWS)
+    prerelease = _stored_cache(current, current_db).drop([SOURCE_RECORDED_AT_COL])
+    _write(path, [*ROWS, ("s2", 2, 4.0, 40)])
+
+    old_db = InMemoryArrowDatabase()
+    old = _cached(path, old_db)
+    old_db.add_records(
+        old.cache_path, prerelease, record_id_column=CachedSource.HASH_COLUMN_NAME
+    )
+    with pytest.raises(
+        InputValidationError, match=r"sdb_v2.*__recorded_at.*[Rr]ebuild"
+    ):
+        if ingest:
+            _ = old.as_table()
+        else:
+            _ = old.get_all_records()
+    assert _stored_cache(old, old_db).equals(prerelease)
 
 
 @pytest.mark.parametrize("arrangement", list(ARRANGEMENTS))
