@@ -243,8 +243,10 @@ A non-null column is created `NOT NULL` and reads back non-null. SQLite refuses 
 `double` column holding a NaN or `-0.0`, which it would read back as NULL and `0.0`. Any
 other type (lists,
 structs, dates or timestamps on SQLite, narrower integers and floats, logical types) is
-refused. PostgreSQL also refuses a column name or a table name longer than
-63 bytes, which it would truncate (`UnstorableTableNameError` for a table). A database on
+refused. PostgreSQL also refuses column names and explicit table identifiers longer than
+63 bytes, which it would truncate (`UnstorableTableNameError` for a table).
+SQLite and PostgreSQL stores generate table names within 63 bytes from the node's
+path, using a readable hint and a digest of the full path. A database on
 `SpiralDBConnector` refuses every write for now (`SpiralDBWriteNotSupportedError`): Orcapod
 reads SpiralDB only. The full list,
 type by type, is [Data types per database](../reference/database-types.md).

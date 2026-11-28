@@ -44,6 +44,7 @@ from orcapod.databases.utils import (
     first_changed_column,
     first_logical_identity_change,
     in_held_column_order,
+    sql_table_identifier,
 )
 from orcapod.errors import (
     InputValidationError,
@@ -269,27 +270,37 @@ class ConnectorArrowDatabase:
 
     # ── Committed data access ─────────────────────────────────────────────────
 
-    def _has_committed_table(self, table_name: str, full_path: tuple[str, ...]) -> bool:
-        """Check that this path owns a table in the backend."""
+    def _find_committed_table(
+        self, table_name: str, full_path: tuple[str, ...]
+    ) -> tuple[str | None, str] | None:
+        """Return the verified schema and name of a committed table."""
         if self._sql_store is None:
-            return table_name in self._connector.get_table_names()
-        for _, path_json in self._sql_store.get_store_table_paths(
+            if table_name in self._connector.get_table_names():
+                return None, table_name
+            return None
+        for schema, name, path_json in self._sql_store.get_store_table_paths(
             table_name, exact=True
         ):
             require_store_table_owner(
                 table_name, full_path, stored_path(table_name, path_json)
             )
-            return True
-        return False
+            return schema, name
+        return None
 
     def _get_committed_table(self, record_path: tuple[str, ...]) -> pa.Table | None:
         """Fetch all committed records for a path from the connector."""
         full_path = self._path_prefix + record_path
         table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
-        if not self._has_committed_table(table_name, full_path):
+        table = self._find_committed_table(table_name, full_path)
+        if table is None:
             return None
-        batches = list(self._connector.iter_batches(f'SELECT * FROM "{table_name}"'))
+        schema, name = table
+        batches = list(
+            self._connector.iter_batches(
+                f"SELECT * FROM {sql_table_identifier(name, schema)}"
+            )
+        )
         if not batches:
             return None
         return pa.Table.from_batches(batches)
@@ -312,17 +323,22 @@ class ConnectorArrowDatabase:
             stem = STORE_TABLE_NAME_PREFIX + table_name_hint(
                 full_prefix, hint_length=_SQL_HINT_LENGTH
             )
-            found_paths = {tuple(key.split("/")) for key in self._pending_batches}
-            for name, path_json in self._sql_store.get_store_table_paths(stem):
+            owners: dict[str, tuple[str, ...]] = {}
+            for _, name, path_json in self._sql_store.get_store_table_paths(stem):
                 path = stored_path(name, path_json)
                 if self._path_to_table_name(path) != name:
                     raise OrcapodDatabaseError(
                         f"Table {name!r} does not match its stored path {path!r}"
                     )
-                found_paths.add(path)
+                owners[name] = path
+            for key in self._pending_batches:
+                path = tuple(key.split("/"))
+                if path[: len(full_prefix)] == full_prefix:
+                    name = self._path_to_table_name(path)
+                    require_store_table_owner(name, path, owners.setdefault(name, path))
             return sorted(
                 path[len(self._path_prefix) :]
-                for path in found_paths
+                for path in owners.values()
                 if path[: len(full_prefix)] == full_prefix
             )
 
@@ -361,7 +377,7 @@ class ConnectorArrowDatabase:
         record_key = self._get_record_key(record_path)
         if self._sql_store is None and record_key in self._pending_batches:
             return True
-        return self._has_committed_table(table_name, full_path) or (
+        return self._find_committed_table(table_name, full_path) is not None or (
             record_key in self._pending_batches
         )
 
@@ -377,12 +393,14 @@ class ConnectorArrowDatabase:
         table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
         try:
-            if not self._has_committed_table(table_name, full_path):
+            table = self._find_committed_table(table_name, full_path)
+            if table is None:
                 pending = self._pending_batches.get(self._get_record_key(record_path))
                 return None if pending is None else pending.schema
+            schema, name = table
             return pa.schema(
                 pa.field(column.name, column.arrow_type, nullable=column.nullable)
-                for column in self._connector.get_column_info(table_name)
+                for column in self._column_info(name, schema)
             )
         except OrcapodDatabaseError:
             raise
@@ -528,6 +546,13 @@ class ConnectorArrowDatabase:
         self._connector.validate_records(records)
 
         record_key = self._get_record_key(record_path)
+        if self._sql_store is not None:
+            _ = self._find_committed_table(table_name, full_path)
+            if record_key not in self._pending_batches:
+                for key in self._pending_batches:
+                    queued_path = tuple(key.split("/"))
+                    if self._path_to_table_name(queued_path) == table_name:
+                        require_store_table_owner(table_name, full_path, queued_path)
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, so the connector always receives the stored order
         # (ITL-1367).
@@ -602,7 +627,15 @@ class ConnectorArrowDatabase:
             return list(pending.schema)
         return None
 
-    def _stored_columns(self, table_name: str) -> "list[pa.Field[Any]]":
+    def _column_info(self, table_name: str, schema: str | None) -> list[ColumnInfo]:
+        """Inspect the relation selected by the catalog when a schema was verified."""
+        if self._sql_store is not None:
+            return self._sql_store.get_column_info(table_name, schema=schema)
+        return self._connector.get_column_info(table_name)
+
+    def _stored_columns(
+        self, table_name: str, schema: str | None
+    ) -> "list[pa.Field[Any]]":
         """Read the columns of an existing table in its order and large types."""
         return [
             pa.field(
@@ -610,7 +643,7 @@ class ConnectorArrowDatabase:
                 normalize_to_large_types(c.arrow_type, keep_null=True),
                 nullable=c.nullable,
             )
-            for c in self._connector.get_column_info(table_name)
+            for c in self._column_info(table_name, schema)
         ]
 
     def _held_schemas(self, record_path: tuple[str, ...]) -> list[pa.Schema] | None:
@@ -627,10 +660,13 @@ class ConnectorArrowDatabase:
         full_path = self._path_prefix + record_path
         table_name = self._path_to_table_name(full_path)
         stored = self._stored_schemas.get(table_name)
-        if stored is None and self._has_committed_table(table_name, full_path):
-            stored = self._read_stored_schema(table_name)
-            if stored is not None:
-                self._stored_schemas[table_name] = stored
+        if stored is None:
+            table = self._find_committed_table(table_name, full_path)
+            if table is not None:
+                schema, name = table
+                stored = self._read_stored_schema(name, schema)
+                if stored is not None:
+                    self._stored_schemas[table_name] = stored
         if stored is not None:
             held.append(stored)
         return held
@@ -671,7 +707,9 @@ class ConnectorArrowDatabase:
                 f"{changed[0]!r}: {changed[1]}. Nothing was written."
             )
 
-    def _read_stored_schema(self, table_name: str) -> pa.Schema | None:
+    def _read_stored_schema(
+        self, table_name: str, schema: str | None
+    ) -> pa.Schema | None:
         """The schema a read of the stored table gives, its field metadata included.
 
         Read without rows from a connector that offers ``get_arrow_schema``
@@ -681,7 +719,12 @@ class ConnectorArrowDatabase:
         if callable(get_arrow_schema):
             return cast("pa.Schema", get_arrow_schema(table_name))
         first = next(
-            iter(self._connector.iter_batches(f'SELECT * FROM "{table_name}"')), None
+            iter(
+                self._connector.iter_batches(
+                    f"SELECT * FROM {sql_table_identifier(table_name, schema)}"
+                )
+            ),
+            None,
         )
         return None if first is None else first.schema
 
@@ -796,15 +839,15 @@ class ConnectorArrowDatabase:
         try:
             self._require_table_name(table_name)
             transaction = (
-                nullcontext(table_name in self._connector.get_table_names())
+                nullcontext((None, table_name in self._connector.get_table_names()))
                 if self._sql_store is None
                 else self._sql_store.store_table_transaction(
                     table_name, store_table_path_json(record_path).decode()
                 )
             )
-            with transaction as table_exists:
+            with transaction as (schema, table_exists):
                 self._write_ready_batch(
-                    record_key, table_name, pending, skip_existing, table_exists
+                    record_key, table_name, pending, skip_existing, table_exists, schema
                 )
         except BaseException:
             self._pending_commits.finish(record_key, committed=False)
@@ -821,11 +864,12 @@ class ConnectorArrowDatabase:
         pending: pa.Table,
         skip_existing: bool,
         table_exists: bool,
+        schema: str | None,
     ) -> None:
         """Check the current schema and write the ready rows."""
         columns = _arrow_schema_to_column_infos(pending.schema)
         # Look up the held schema inside the write transaction (ITL-1367).
-        existing = self._stored_columns(table_name) if table_exists else None
+        existing = self._stored_columns(table_name, schema) if table_exists else None
         check = self._pending_commits.schema_check(record_key)
         if check is not None:
             check(pending.schema if existing is None else pa.schema(existing))
@@ -854,15 +898,27 @@ class ConnectorArrowDatabase:
                 )
             pending = in_held_column_order(pending, existing)
 
-        self._connector.create_table_if_not_exists(
-            table_name, columns, pk_column=self.RECORD_ID_COLUMN
-        )
-        self._connector.upsert_records(
-            table_name,
-            pending,
-            id_column=self.RECORD_ID_COLUMN,
-            skip_existing=skip_existing,
-        )
+        if self._sql_store is None:
+            self._connector.create_table_if_not_exists(
+                table_name, columns, pk_column=self.RECORD_ID_COLUMN
+            )
+            self._connector.upsert_records(
+                table_name,
+                pending,
+                id_column=self.RECORD_ID_COLUMN,
+                skip_existing=skip_existing,
+            )
+        else:
+            self._sql_store.create_table_if_not_exists(
+                table_name, columns, pk_column=self.RECORD_ID_COLUMN, schema=schema
+            )
+            self._sql_store.upsert_records(
+                table_name,
+                pending,
+                id_column=self.RECORD_ID_COLUMN,
+                skip_existing=skip_existing,
+                schema=schema,
+            )
 
     # ── Read methods ──────────────────────────────────────────────────────────
 

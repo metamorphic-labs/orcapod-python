@@ -595,8 +595,7 @@ def test_an_all_duplicate_append_looks_up_no_order(tmp_path: Path) -> None:
 
 
 def test_an_aligned_append_looks_the_stored_table_up_once(tmp_path: Path) -> None:
-    """The connector database looks a table up once per flushed append, at the
-    flush, as main does: an append looks nothing up when it is queued."""
+    """Check ownership before queuing and inspect the current schema once per flush."""
     path = str(tmp_path / "store.db")
     ConnectorArrowDatabase(SQLiteConnector(path)).add_records(
         PATH, _rows([ID, "a", "c", "b"], [1]), record_id_column=ID, flush=True
@@ -610,18 +609,30 @@ def test_an_aligned_append_looks_the_stored_table_up_once(tmp_path: Path) -> Non
             wraps=connector.store_table_transaction,
         ) as registration,
         patch.object(
-            connector, "get_store_table_paths", side_effect=AssertionError("listed")
-        ),
+            connector, "get_store_table_paths", wraps=connector.get_store_table_paths
+        ) as catalog,
         patch.object(
             connector, "get_column_info", wraps=connector.get_column_info
         ) as info,
     ):
         _add(db, _rows([ID, "a", "c", "b"], [2]), flush=True)
-        assert (registration.call_count, info.call_count) == (1, 1)
+        assert (catalog.call_count, registration.call_count, info.call_count) == (
+            1,
+            1,
+            1,
+        )
         _add(db, _rows(["b", ID, "c", "a"], [3]))
-        assert (registration.call_count, info.call_count) == (1, 1)
+        assert (catalog.call_count, registration.call_count, info.call_count) == (
+            2,
+            1,
+            1,
+        )
         db.flush()
-        assert (registration.call_count, info.call_count) == (2, 2)
+        assert (catalog.call_count, registration.call_count, info.call_count) == (
+            2,
+            2,
+            2,
+        )
     _check(
         db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3]
     )

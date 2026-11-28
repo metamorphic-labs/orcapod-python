@@ -33,7 +33,12 @@ from psycopg import sql
 
 from orcapod.databases import ConnectorArrowDatabase, PostgreSQLConnector
 from orcapod.databases._sql_store import STORE_PATH_CATALOG
+from orcapod.errors import OrcapodDatabaseError
 from orcapod.types import ColumnInfo
+from tests.test_databases.test_sqlite_connector_integration import (
+    _check_catalog_operation,
+    _check_pending_collision,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -684,20 +689,24 @@ def test_catalog_uses_the_first_schema_on_the_search_path(
     connector: PostgreSQLConnector,
 ) -> None:
     _, _, _, primary = connector.current_location()
-    fallback = f"test_{uuid.uuid4().hex[:12]}"
+    fallback = f'JOIN."{uuid.uuid4().hex[:12]}'
     base_dsn = _base_dsn()
     path = ("job", "pdb_v2")
     with psycopg.connect(base_dsn, autocommit=True) as admin:
         _ = admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(fallback)))
         try:
             with (
-                PostgreSQLConnector(
-                    f"{base_dsn} options=-csearch_path={fallback}"
-                ) as other,
-                PostgreSQLConnector(
-                    f"{base_dsn} options=-csearch_path={primary},{fallback}"
-                ) as first,
+                PostgreSQLConnector(base_dsn) as other,
+                PostgreSQLConnector(base_dsn) as first,
             ):
+                _ = other._require_open().execute(
+                    sql.SQL("SET search_path TO {}").format(sql.Identifier(fallback))
+                )
+                _ = first._require_open().execute(
+                    sql.SQL("SET search_path TO {}, {}").format(
+                        sql.Identifier(primary), sql.Identifier(fallback)
+                    )
+                )
                 other_store = ConnectorArrowDatabase(other)
                 store = ConnectorArrowDatabase(first)
                 other_store.add_record(
@@ -722,7 +731,102 @@ def test_catalog_uses_the_first_schema_on_the_search_path(
                 assert fallback_rows is not None and fallback_rows.to_pylist() == [
                     {"value": 1}
                 ]
+                _ = first._require_open().execute(
+                    sql.SQL("SET search_path TO {}").format(sql.Identifier(fallback))
+                )
+                switched_rows = store.get_all_records(path)
+                assert switched_rows is not None and switched_rows.equals(fallback_rows)
         finally:
             _ = admin.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(fallback))
             )
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("operation", ["list", "read", "queue", "flush"])
+def test_unsupported_catalog_layout_is_refused(
+    connector: PostgreSQLConnector, operation: str
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("versioned",)
+    one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
+    db.add_record(path, b"id", one, flush=True)
+    if operation == "flush":
+        db.add_record(path, b"id", two)
+        connector._require_open().commit()
+    catalog = sql.Identifier(STORE_PATH_CATALOG)
+    with psycopg.connect(connector._dsn) as conn:
+        _ = conn.execute(
+            sql.SQL("ALTER TABLE {} DROP CONSTRAINT {}").format(
+                catalog, sql.Identifier(f"{STORE_PATH_CATALOG}_layout_version_check")
+            )
+        )
+        _ = conn.execute(sql.SQL("UPDATE {} SET layout_version = 2").format(catalog))
+    with pytest.raises(
+        OrcapodDatabaseError, match="unsupported catalog layout version 2"
+    ):
+        _check_catalog_operation(db, path, two, operation)
+    name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+    with psycopg.connect(connector._dsn) as conn:
+        assert conn.execute(
+            sql.SQL("SELECT value FROM {}").format(sql.Identifier(name))
+        ).fetchone() == (1,)
+
+
+@pytest.mark.postgres
+def test_store_writes_to_the_verified_schema_when_a_temp_table_shadows_its_name(
+    connector: PostgreSQLConnector,
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("shadow",)
+    db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+    name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+    conn = connector._require_open()
+    _ = conn.execute(
+        sql.SQL(
+            'CREATE TEMP TABLE {} ("__record_id" BYTEA PRIMARY KEY, value BIGINT)'
+        ).format(sql.Identifier(name))
+    )
+    temp = sql.Identifier("pg_temp", name)
+    _ = conn.execute(
+        sql.SQL("INSERT INTO {} VALUES (%s, %s)").format(temp), (b"id", 99)
+    )
+    db.add_record(path, b"id", pa.table({"value": [2]}), flush=True)
+    assert conn.execute(sql.SQL("SELECT value FROM {}").format(temp)).fetchone() == (
+        99,
+    )
+    rows = db.get_all_records(path)
+    assert rows is not None and rows.to_pylist() == [{"value": 2}]
+
+
+@pytest.mark.postgres
+def test_pending_path_is_refused_if_another_writer_claims_name(
+    connector: PostgreSQLConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orcapod.databases import store_table_names
+
+    monkeypatch.setattr(store_table_names, "store_table_digest", lambda path: "a" * 64)
+    with PostgreSQLConnector(connector._dsn) as other:
+        _check_pending_collision(connector, other)
+
+
+@pytest.mark.postgres
+def test_paths_with_a_forced_digest_collision_cannot_share_a_table(
+    connector: PostgreSQLConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orcapod.databases import store_table_names
+
+    monkeypatch.setattr(store_table_names, "store_table_digest", lambda path: "a" * 64)
+    db = ConnectorArrowDatabase(connector)
+    committed, colliding = ("name-part",), ("name:part",)
+    one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
+    db.add_record(committed, b"id", one)
+    with pytest.raises(OrcapodDatabaseError, match="name-part.*name:part"):
+        db.add_record(colliding, b"id", two)
+    db.flush_batch(committed)
+    with pytest.raises(OrcapodDatabaseError, match="name-part.*name:part"):
+        db.add_record(colliding, b"id", two)
+    with pytest.raises(OrcapodDatabaseError, match="name-part.*name:part"):
+        db.get_all_records(colliding)
+    rows = db.get_all_records(committed)
+    assert rows is not None and rows.equals(one)
