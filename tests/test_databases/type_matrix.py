@@ -18,12 +18,10 @@ back with ``get_all_records``, then compared exactly with what was written (ever
 - ``SILENT``: anything else (another type, other values, an error that does not name the
   column, a failed read). The test fails on any silent cell.
 
-The databases: in-memory, Delta Lake (local directory), the connector database over
-SQLite, over PostgreSQL and over SpiralDB. No PostgreSQL server and no SpiralDB is used:
-the PostgreSQL cell comes from the connector's own storability rule
+The databases: in-memory, Delta Lake (local directory), and the connector database over
+SQLite and PostgreSQL. The PostgreSQL cell comes from the connector's own storability rule
 (``unstorable_column_reason`` and ``validate_records``, over a mocked connection), so it
-is ``KEPT BY RULE`` or ``REFUSED``, never a measured read; the SpiralDB cell is measured
-through the disk fake (``tests/test_databases/fake_spiral_sdk.py``). No database tells tag
+is ``KEPT BY RULE`` or ``REFUSED``, never a measured read. No database tells tag
 columns from data columns: the connector databases tell only the record-id key, which
 Orcapod always writes as ``large_binary``.
 """
@@ -100,7 +98,13 @@ class Row:
     label: str
     group: str
     build: Callable[
-        [Path], tuple["pa.Field[Any]", "pa.Field[Any]", list[Any], list[Any]]
+        [Path],
+        tuple[
+            "pa.Field[Any]",
+            "pa.Field[Any]",
+            "list[Any] | pa.Array[Any]",
+            "list[Any] | pa.Array[Any]",
+        ],
     ]
     provisional: bool = False
 
@@ -227,6 +231,42 @@ def _upaths(root: Path) -> list[Any]:
     from upath import UPath
 
     return [UPath(f"memory://matrix/{i}") for i in range(3)]
+
+
+def _nested_extension(container: str) -> Callable[[Path], tuple[Any, Any, Any, Any]]:
+    """Build Arrow arrays nesting the registered Path type in both columns."""
+
+    def wrap(values: Any, mask: Any) -> Any:
+        if container == "struct child":
+            return pa.StructArray.from_arrays([values], names=["p"], mask=mask)
+        if container == "list item":
+            return pa.LargeListArray.from_arrays(
+                pa.array([0, 1, 2, 3], pa.int64()), values, mask=mask
+            )
+        if container == "map value":
+            from_arrays: Any = pa.MapArray.from_arrays
+            return from_arrays(
+                pa.array([0, 1, 2, 3], pa.int32()),
+                pa.array(["a", "b", "c"], pa.large_string()),
+                values,
+                mask=mask,
+            )
+        assert container == "dictionary values"
+        indices = pa.array([0, None if mask is not None else 1, 2], pa.int32())
+        return pa.DictionaryArray.from_arrays(indices, values)
+
+    def build(_root: Path) -> tuple[Any, Any, Any, Any]:
+        extension: Any = get_default_context().type_converter.python_type_to_arrow_type(
+            Path
+        )
+        values = extension.wrap_array(
+            pa.array(["/a", "/b", "/c"], type=extension.storage_type)
+        )
+        x = wrap(values, None)
+        y = wrap(values, pa.array([False, True, False]))
+        return pa.field("x", x.type), pa.field("y", y.type), x, y
+
+    return build
 
 
 ROWS: tuple[Row, ...] = (
@@ -481,6 +521,14 @@ ROWS: tuple[Row, ...] = (
         "string not null",
         "nullability",
         _plain(pa.string(), ["a", "b", "c"], nullable=False),
+    ),
+    *(
+        Row(
+            f"extension type in {place}",
+            "nested extension type",
+            _nested_extension(place),
+        )
+        for place in ("struct child", "list item", "map value", "dictionary values")
     ),
     Row("File", "Orcapod logical type", _logical(orcapod.File, _files)),
     Row("Directory", "Orcapod logical type", _logical(orcapod.Directory, _directories)),
@@ -854,9 +902,11 @@ def _attribute_changes(rows: pa.Table) -> list[tuple[str, pa.Table]]:
         changed = _nested_changed(field.type)
         if changed is None:
             return out
-        # Built from the values: the append must be refused, so they are never read.
-        column = pa.array(nested.column(index).to_pylist(), changed)
-        nested = nested.set_column(index, field.with_type(changed), column)
+        # Only the schema changes. Keep the original arrays, including extension
+        # children that Arrow cannot rebuild from Python values.
+        nested = nested.set_column(
+            index, field.with_type(changed), nested.column(index)
+        )
     out.append(("nested field metadata", nested))
     return out
 
@@ -1009,8 +1059,16 @@ it, with an error naming the column, before anything of the table is written: no
 it back as another type. The page is generated from a test that writes and reads each
 type through each database, so it cannot drift from the code. The rows are
 representative, not every Arrow type: dictionary-encoded columns are refused by every
-stream before they reach a database, and union, run-end-encoded and list-view types are
-not covered.
+stream before they reach a database (the dictionary row uses a raw Arrow table), and
+union, run-end-encoded and list-view types are not covered.
+
+Delta supports logical types only as whole top-level columns. A logical type nested
+in another Arrow type, including inside an extension's storage, is refused before
+buffering. The rule covers both extension arrays and fields with Arrow extension
+metadata, regardless of registration. Arrow's storage interchange cannot reliably
+preserve a nested extension. Use the corresponding Orcapod container or class type
+to keep the logical type: it stores its children in Arrow storage form within one
+top-level logical column.
 
 What a cell says:
 

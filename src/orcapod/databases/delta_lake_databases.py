@@ -8,7 +8,7 @@ import sys
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -1372,6 +1372,55 @@ def _holds_null_type(arrow_type: pa.DataType) -> bool:
     )
 
 
+def _nested_logical_type_path(
+    field: "pa.Field[Any]", *, top_level: bool = False
+) -> str | None:
+    """Find the first nested logical type, without consulting Arrow's registry.
+
+    Args:
+        field: A column or a field within its type.
+        top_level: Whether this field may itself carry a logical type.
+
+    Returns:
+        A relative path to the first unsupported field, or ``None``.
+    """
+    arrow_type = field.type
+    metadata = field.metadata or {}
+    annotation = any(key in metadata for key in _EXTENSION_KEYS)
+    if isinstance(arrow_type, pa.BaseExtensionType) or annotation:
+        if not top_level:
+            return ""
+        storage = (
+            arrow_type.storage_type
+            if isinstance(arrow_type, pa.BaseExtensionType)
+            else arrow_type
+        )
+        path = _nested_logical_type_path(pa.field("storage", storage))
+        return None if path is None else f"<storage>{path}"
+
+    t = pa.types
+    if t.is_dictionary(arrow_type):
+        children = (("<dictionary values>", pa.field("values", arrow_type.value_type)),)
+    elif t.is_map(arrow_type):
+        children = ((".key", arrow_type.key_field), (".value", arrow_type.item_field))
+    elif (
+        t.is_list(arrow_type)
+        or t.is_large_list(arrow_type)
+        or t.is_fixed_size_list(arrow_type)
+        or t.is_list_view(arrow_type)
+        or t.is_large_list_view(arrow_type)
+    ):
+        children = (("[]", arrow_type.value_field),)
+    else:
+        fields = (arrow_type.field(i) for i in range(arrow_type.num_fields))
+        children = ((f".{child.name}", child) for child in fields)
+    for step, child in children:
+        path = _nested_logical_type_path(child)
+        if path is not None:
+            return step + path
+    return None
+
+
 def _unmergeable_name_reason(name: str) -> str | None:
     """Say why Delta cannot commit to a table with a column named ``name``, or ``None``.
 
@@ -2322,8 +2371,9 @@ class DeltaTableDatabase:
         names are case-insensitive (ITL-1403).
 
         Raises:
-            UnstorableColumnError: For the first column Delta cannot hold, naming the
-                column, its Arrow type and Delta's reason.
+            UnstorableColumnError: Naming every column with an unsupported nested
+                extension type, or the first otherwise unstorable column, with
+                its Arrow type and Delta's reason.
         """
         position = _case_clash_position(schema.names)
         if position is not None:
@@ -2337,6 +2387,7 @@ class DeltaTableDatabase:
                 arrow_type=schema.field(position).type,
                 reason=_case_reason(*clash),
             )
+        self._require_top_level_logical_types(schema)
         for field in schema:
             reason = delta_unstorable_reason(field)
             if reason is not None:
@@ -2346,6 +2397,31 @@ class DeltaTableDatabase:
                     arrow_type=field.type,
                     reason=reason,
                 )
+
+    def _require_top_level_logical_types(
+        self, fields: "Iterable[pa.Field[Any]]"
+    ) -> None:
+        """Name each column whose logical type is nested within another type."""
+        unsupported = {}
+        for field in fields:
+            path = _nested_logical_type_path(field, top_level=True)
+            if path is not None:
+                unsupported.setdefault(field.name, (field.type, f"{field.name}{path}"))
+        if unsupported:
+            column, (arrow_type, _) = next(iter(unsupported.items()))
+            paths = ", ".join(repr(path) for _, path in unsupported.values())
+            raise UnstorableColumnError(
+                database_kind=type(self).__name__,
+                column=column,
+                arrow_type=arrow_type,
+                reason=(
+                    f"the Delta store does not support a logical type nested in another "
+                    f"type yet. Nested paths: {paths}. Arrow storage cannot reliably "
+                    "preserve these nested logical types. Use the corresponding Orcapod "
+                    "container or class type, which stores its children as Arrow storage "
+                    "within one top-level logical column, or use plain Arrow storage"
+                ),
+            )
 
     def _refuse_case_clash_with_pending(
         self, record_path: tuple[str, ...], schema: pa.Schema
@@ -2750,6 +2826,14 @@ class DeltaTableDatabase:
 
         if records.num_rows == 0:
             return
+
+        # Arrow type equality can overlook nested field metadata in extension
+        # storage and dictionary values. Check every chunk before any casts.
+        self._require_top_level_logical_types(
+            field.with_type(chunk.type)
+            for index, field in enumerate(records.schema)
+            for chunk in records.column(index).chunks
+        )
 
         # Convert view types up front so the whole write path (group_by dedup,
         # filters, storage) avoids string_view's missing kernels (ENG-601).

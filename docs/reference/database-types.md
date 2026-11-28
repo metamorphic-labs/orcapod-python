@@ -12,8 +12,16 @@ it, with an error naming the column, before anything of the table is written: no
 it back as another type. The page is generated from a test that writes and reads each
 type through each database, so it cannot drift from the code. The rows are
 representative, not every Arrow type: dictionary-encoded columns are refused by every
-stream before they reach a database, and union, run-end-encoded and list-view types are
-not covered.
+stream before they reach a database (the dictionary row uses a raw Arrow table), and
+union, run-end-encoded and list-view types are not covered.
+
+Delta supports logical types only as whole top-level columns. A logical type nested
+in another Arrow type, including inside an extension's storage, is refused before
+buffering. The rule covers both extension arrays and fields with Arrow extension
+metadata, regardless of registration. Arrow's storage interchange cannot reliably
+preserve a nested extension. Use the corresponding Orcapod container or class type
+to keep the logical type: it stores its children in Arrow storage form within one
+top-level logical column.
 
 What a cell says:
 
@@ -254,6 +262,15 @@ fields is not covered: a struct whose fields are in another order is another typ
 |---|---|---|---|---|
 | `int64 not null` | kept | kept | kept | kept (by rule) |
 | `string not null` | kept | kept | kept | kept (by rule) |
+
+## Nested extension type
+
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `extension type in struct child` | kept | refused | refused | refused |
+| `extension type in list item` | kept | refused | refused | refused |
+| `extension type in map value` | kept | refused | refused | refused |
+| `extension type in dictionary values` | kept | refused | refused | refused |
 
 ## Orcapod logical type
 
