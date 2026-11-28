@@ -132,7 +132,10 @@ def metadata_bytes(metadata: Mapping[Any, Any] | None) -> dict[bytes, bytes]:
 
 
 def appended_field_change(
-    held: "pa.Field[Any]", incoming: "pa.Field[Any]"
+    held: "pa.Field[Any]",
+    incoming: "pa.Field[Any]",
+    *,
+    delta_log_storage: bool = False,
 ) -> str | None:
     """Say why rows of ``incoming`` would not read back as written, appended to a
     column a database holds as ``held`` (ITL-1334).
@@ -149,6 +152,9 @@ def appended_field_change(
     Args:
         held: The column as the database holds it (stored or pending).
         incoming: The column of the rows to append.
+        delta_log_storage: The held type is the physical Delta log type. Within
+            extension storage the log cannot describe metadata on list items or
+            map keys and values. Struct field metadata is still known.
 
     Returns:
         The reason, naming the path (``x``, ``x.a``, ``x[]``, ``x.key``), or ``None``.
@@ -159,21 +165,41 @@ def appended_field_change(
         arrow_utils.normalize_to_large_types(held.type, keep_null=True),
         arrow_utils.normalize_to_large_types(incoming.type, keep_null=True),
         incoming.name,
+        delta_log_storage=delta_log_storage,
     )
 
 
 def _child_change(
-    held: "pa.Field[Any]", incoming: "pa.Field[Any]", path: str, *, metadata_only: bool
+    held: "pa.Field[Any]",
+    incoming: "pa.Field[Any]",
+    path: str,
+    *,
+    metadata_only: bool,
+    delta_log_storage: bool,
+    check_metadata: bool = True,
 ) -> str | None:
     if not metadata_only and held.name != incoming.name:
         return f"{path} is named {incoming.name!r}, the stored column's {held.name!r}"
-    if metadata_bytes(held.metadata) != metadata_bytes(incoming.metadata):
+    if check_metadata and metadata_bytes(held.metadata) != metadata_bytes(
+        incoming.metadata
+    ):
         return f"{path} has other field metadata than the stored column"
-    return _nested_change(held.type, incoming.type, path, metadata_only=metadata_only)
+    return _nested_change(
+        held.type,
+        incoming.type,
+        path,
+        metadata_only=metadata_only,
+        delta_log_storage=delta_log_storage,
+    )
 
 
 def _nested_change(
-    held: Any, incoming: Any, path: str, *, metadata_only: bool = False
+    held: Any,
+    incoming: Any,
+    path: str,
+    *,
+    delta_log_storage: bool,
+    metadata_only: bool = False,
 ) -> str | None:
     # Field metadata matters inside extension storage. Its layout is checked
     # separately, and may use physical field names (e.g. Delta's list "element").
@@ -193,10 +219,14 @@ def _nested_change(
                     field,
                     f"{path}.{field.name}",
                     metadata_only=metadata_only,
+                    delta_log_storage=delta_log_storage,
                 )
                 if found is not None:
                     return found
         return None
+    # Delta has no field annotation for these positions. Continue into their
+    # types because a struct child further down still has its own metadata.
+    collection_metadata_known = not (metadata_only and delta_log_storage)
     if t.is_map(held) and t.is_map(incoming):
         if not metadata_only and held.keys_sorted != incoming.keys_sorted:
             return (
@@ -208,11 +238,15 @@ def _nested_change(
             incoming.key_field,
             f"{path}.key",
             metadata_only=metadata_only,
+            delta_log_storage=delta_log_storage,
+            check_metadata=collection_metadata_known,
         ) or _child_change(
             held.item_field,
             incoming.item_field,
             f"{path}.item",
             metadata_only=metadata_only,
+            delta_log_storage=delta_log_storage,
+            check_metadata=collection_metadata_known,
         )
     lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
     if any(k(held) for k in lists) and any(k(incoming) for k in lists):
@@ -222,6 +256,8 @@ def _nested_change(
             cast(Any, incoming).value_field,
             f"{path}[]",
             metadata_only=metadata_only,
+            delta_log_storage=delta_log_storage,
+            check_metadata=collection_metadata_known,
         )
     return None
 

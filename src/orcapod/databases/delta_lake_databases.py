@@ -909,7 +909,9 @@ def _evolution_change(
     return None
 
 
-def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
+def _column_change(
+    held: "pa.Field[Any]", field: "pa.Field[Any]", *, from_delta_log: bool = False
+) -> str | None:
     """Say why rows of column ``field`` cannot be appended where ``held`` is held.
 
     The column's own field metadata and its nested field tree must be the held ones
@@ -924,13 +926,16 @@ def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
         held: The column as the table holds it (its record, else its stored type,
             with its field metadata; or a pending batch's column).
         field: The column of the rows to append.
+        from_delta_log: Whether the held column came from the Delta log.
 
     Returns:
         The reason, naming the path, or ``None``.
     """
+    held_metadata = metadata_bytes(held.metadata)
     changed = appended_field_change(
-        held.with_metadata(cast(Any, _metadata(held.metadata))),
+        held.with_metadata(cast(Any, _metadata(held_metadata))),
         field.with_metadata(cast(Any, _metadata(field.metadata))),
+        delta_log_storage=from_delta_log and ARROW_TYPE_KEY not in held_metadata,
     )
     if changed is not None or _is_logical(field) or _is_logical(held):
         return changed
@@ -1205,7 +1210,7 @@ def _append_refusal(
         held_folded.setdefault(name.lower(), name)
     for field in rows.schema:
         if field.name in held:
-            change = _column_change(held[field.name], field)
+            change = _column_change(held[field.name], field, from_delta_log=True)
             if change is not None:
                 return field.name, change
         elif schema_evolution:
@@ -2670,9 +2675,9 @@ class DeltaTableDatabase:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
             delta_table = None
-        held: list[dict[str, pa.Field[Any]]] = []
+        held: list[tuple[dict[str, pa.Field[Any]], bool]] = []
         if pending is not None:
-            held.append({f.name: f for f in pending.schema})
+            held.append(({f.name: f for f in pending.schema}, False))
         if delta_table is not None:
             # The identity rule on this very table, from its log, before its recorded
             # types are decoded: the table loaded here may not be the one
@@ -2684,12 +2689,14 @@ class DeltaTableDatabase:
                     f"{self._get_table_uri(record_path)!r}: column {found[0]!r}: "
                     f"{found[1]}. The stored rows are unchanged and nothing was written."
                 )
-            held.append(_held_columns(delta_table))
-        for given in held:
+            held.append((_held_columns(delta_table), True))
+        for given, from_delta_log in held:
             for field in schema:
                 if field.name not in given:
                     continue
-                change = _column_change(given[field.name], field)
+                change = _column_change(
+                    given[field.name], field, from_delta_log=from_delta_log
+                )
                 if change is not None:
                     raise InputValidationError(
                         f"Cannot append to the stored table "

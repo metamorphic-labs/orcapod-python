@@ -213,12 +213,18 @@ class TestNewTableWritePaths:
             STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
         }
 
+        other = DeltaTableDatabase(tmp_path)
+        other.add_records(PATH, rows(range(15, 30)))
         db.add_records(PATH, rows(range(10, 20)), flush=True)
         assert stats_warnings(capfd) == [], "append"
 
-        # One stored id among the new ones forces the MERGE path.
-        db.add_records(PATH, rows(range(15, 30)), skip_duplicates=True, flush=True)
+        # Five IDs were committed after the second handle queued them.
+        other.flush()
         assert stats_warnings(capfd) == [], "merge"
+        merge = deltalake.DeltaTable(str(tmp_path / "t")).history(1)[0]
+        assert merge["operation"] == "MERGE"
+        assert merge["operationMetrics"]["num_source_rows"] == 15
+        assert merge["operationMetrics"]["num_target_rows_inserted"] == 10
 
         # New columns (one binary, one int): schema evolution, through MERGE.
         db.add_records(PATH, rows(range(30, 40), extra=True), flush=True)

@@ -18,7 +18,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
-from orcapod.databases import ConnectorArrowDatabase
+from orcapod.databases import ConnectorArrowDatabase, DeltaTableDatabase
 from orcapod.errors import InputValidationError, UnstorableColumnError
 from tests.test_databases.test_connector_arrow_database import MockDBConnector
 from tests.test_databases.type_matrix import (
@@ -323,3 +323,40 @@ def test_metadata_inside_extension_storage_must_match(
             assert sorted(stored["id"].to_pylist()) == [b"a", b"c"]
     finally:
         pa.unregister_extension_type(first.extension_name)
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["list", "struct-of-list"])
+def test_delta_can_append_when_extension_list_item_metadata_is_unknown(
+    tmp_path: Path, nested: bool
+) -> None:
+    """The Delta log lacks list item metadata, including in extension storage."""
+
+    def rows(rid: bytes, unit: str) -> pa.Table:
+        storage_type = _list_item(unit).type
+        value = [1]
+        if nested:
+            storage_type = pa.struct([pa.field("a", storage_type)])
+            value = {"a": value}
+        extension = _StructExtension(storage_type)
+        storage = pa.array([value], type=storage_type)
+        return pa.table(
+            {"id": [rid], "x": pa.ExtensionArray.from_storage(extension, storage)}
+        )
+
+    first = rows(b"a", "m")
+    extension = first.schema.field("x").type
+    assert isinstance(extension, _StructExtension)
+    pa.register_extension_type(extension)  # pyright: ignore[reportArgumentType]  # Arrow accepts ExtensionType
+    try:
+        DeltaTableDatabase(tmp_path).add_records(PATH, first, flush=True)
+        fresh = DeltaTableDatabase(tmp_path)
+        fresh.add_records(PATH, rows(b"b", "m"))
+        with pytest.raises(InputValidationError, match="has other field metadata"):
+            fresh.add_records(PATH, rows(b"c", "s"))
+        fresh.flush()
+        fresh.add_records(PATH, rows(b"c", "s"), flush=True)
+        stored = fresh.get_all_records(PATH, record_id_column="id")
+        assert stored is not None
+        assert stored.sort_by("id")["id"].to_pylist() == [b"a", b"b", b"c"]
+    finally:
+        pa.unregister_extension_type(extension.extension_name)
