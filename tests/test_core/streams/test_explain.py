@@ -670,9 +670,13 @@ class TestReviewOfPr498:
         ids=["pick_str_subclasses", "index_subclasses"],
     )
     def test_names_and_keys_are_written_without_user_code(self, make, text):
+        source = DictSource(
+            [{"m": {"a": 1}, "xs": [1, 2]}],
+            data_schema={"m": dict[str, int], "xs": list[int]},
+        )
         op = make()
-        op._mode = "map"  # pyright: ignore[reportAttributeAccessIssue]  # Pick's dict mode, as validation sets it
-        assert op.rows_dropped_text(0, [], []) == text
+        op.validate_inputs(source)
+        assert op.rows_dropped_text(0, [], [source]) == text
 
     @pytest.mark.parametrize(
         ("other_tags", "left", "right"),

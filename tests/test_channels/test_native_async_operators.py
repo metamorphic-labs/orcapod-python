@@ -982,11 +982,16 @@ class TestSemiJoinBuildProbe:
         results = await output_ch.reader.collect()
         assert results == []
 
+    @pytest.mark.parametrize(
+        ("make_right", "expected"),
+        [(make_right_stream, 0), (make_disjoint_stream, 3)],
+        ids=["shared-tags", "disjoint-tags"],
+    )
     @pytest.mark.asyncio
-    async def test_empty_right_returns_empty_or_all(self):
-        """Empty right: if common keys, result is empty; if no common keys, left passes through.
-        Since both sides are empty-right, we rely on the barrier fallback."""
+    async def test_empty_right_returns_empty_or_all(self, make_right, expected):
+        """An empty right channel uses the keys validated for that input pair."""
         left = make_left_stream()
+        right = make_right()
 
         left_ch = Channel(buffer_size=64)
         right_ch = Channel(buffer_size=4)
@@ -996,15 +1001,14 @@ class TestSemiJoinBuildProbe:
         await right_ch.writer.close()
 
         op = SemiJoin()
+        op.validate_inputs(left, right)
         await op.async_execute(
             [left_ch.reader, right_ch.reader],
             output_ch.writer,
-            input_pipeline_hashes=[left.pipeline_hash(), root_hash("id", "value")],
+            input_pipeline_hashes=hashes(left, right),
         )
         results = await output_ch.reader.collect()
-        # With empty right and no schema information available,
-        # the implementation falls back to passing left through
-        assert len(results) == 3
+        assert len(results) == expected
 
     @pytest.mark.asyncio
     async def test_matches_sync_output(self):
