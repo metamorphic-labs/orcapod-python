@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from orcapod import PipelineJob, dataclass as structural_dataclass
+from orcapod import PipelineJob, dataclass as structural_dataclass, function_pod
 from orcapod.core.datagrams import Data
 from orcapod.core.executors import LocalPythonFunctionExecutor
 from orcapod.core.executors.capture_wrapper import make_capture_wrapper
@@ -197,6 +197,20 @@ def test_tuple_is_not_a_single_pod_output_type(annotation):
     """Tuple layouts in Arrow do not imply support for a single tuple output."""
     with pytest.raises(ValueError, match="Unsupported annotation"):
         make_pod(annotation, (1, None))
+
+
+def test_explicit_output_schema_overrides_nested_return_annotation() -> None:
+    def produce(x: int) -> list[int]:
+        return [None] * x  # pyright: ignore[reportReturnType]  # Exercise the conflicting annotation.
+
+    explicit = function_pod(
+        output_keys="returned", output_schema={"returned": list[int | None]}
+    )(produce)
+    annotated = function_pod(output_keys="returned")(produce)
+
+    assert explicit.pod(make_source()).as_table()["returned"].to_pylist() == [[None]]
+    with pytest.raises(OutputTypeError, match=r"\[0\] is NoneType"):
+        _ = annotated.pod(make_source()).as_table()
 
 
 def test_optional_logical_item_is_refused_at_construction():

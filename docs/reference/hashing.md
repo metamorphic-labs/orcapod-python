@@ -1738,7 +1738,9 @@ For example, `list[int]` and `list[int | None]` convert to the same Arrow type
 and yield the same Arrow schema hash for that column. An explicit Arrow field
 flag is preserved and hashed at every depth, including in a list item or struct
 child. A column's top-level nullable flag also enters the hash. Function output
-validation uses the return annotation independently of these storage flags.
+validation uses each declared output type independently of these storage flags.
+The type comes from the explicit `output_schema` for that output, or from the
+return annotation when the schema supplies no type for it.
 
 What a schema must therefore agree on to be one identity:
 

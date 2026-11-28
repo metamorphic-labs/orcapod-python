@@ -13,9 +13,10 @@ identical in diagnostics.
 
 **Decision (developer, November 28, 2026):** Keep implicit nullability for nested
 fields produced from Python declarations in data context v1. Keep every
-explicit Arrow flag and the boundary rule for whole columns. Enforce function
-return annotations at supported nested positions. A strict nested input policy
-is a future opt-in under ITL-1584.
+explicit Arrow flag and the boundary rule for whole columns. Enforce declared
+function output types at supported nested positions. Use the explicit
+`output_schema` for each output it declares and the return annotation for
+the other outputs. A strict nested input policy is a future opt-in under ITL-1584.
 
 **Fix:** Documented the input, output and storage rules. The shared function
 output checker now rejects null items in a required set element position.
