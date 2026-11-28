@@ -26,6 +26,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.channels import Channel
+from orcapod.config import HashingConfig, OrcapodConfig
 from orcapod.contexts import get_default_context, get_default_type_converter
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.data_function import PythonDataFunction
@@ -66,7 +67,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
-from orcapod.types import Condition, col
+from orcapod.types import Condition, ContentHash, col
 from orcapod.utils import arrow_utils
 
 # The ``semijoin_shared_data_column`` case shares a data column name on purpose; SemiJoin
@@ -1143,9 +1144,11 @@ def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
     calls: list[int] = []
     sort_system_tags = arrow_utils.sort_system_tag_values
 
-    def observe(table: pa.Table) -> pa.Table:
+    def observe(
+        table: pa.Table, *, tied_positions: Sequence[Sequence[int]] = ()
+    ) -> pa.Table:
         calls.append(sum(name.startswith(record_id) for name in table.column_names))
-        return sort_system_tags(table)
+        return sort_system_tags(table, tied_positions=tied_positions)
 
     monkeypatch.setattr(arrow_utils, "sort_system_tag_values", observe)
     [(tag, _)] = async_rows(join, *reversed(inputs))
@@ -1158,16 +1161,17 @@ def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
     assert calls == [arity]
 
 
-@pytest.mark.parametrize("same_declarations", [False, True])
+@pytest.mark.parametrize("declarations", ["different", "same", "missing"])
 @pytest.mark.parametrize("reverse_columns", [False, True])
 def test_tied_join_keeps_custom_system_tags_with_their_operand(
-    reverse_columns: bool, same_declarations: bool
+    reverse_columns: bool, declarations: str
 ) -> None:
     source_id, record_id, custom = (
         "_tag_source_id::seed",
         "_tag_record_id::seed",
         "_tag_rev::seed",
     )
+    same_declarations = declarations == "same"
     inputs = {}
     for name in "abc":
         schema = pa.schema(
@@ -1197,6 +1201,8 @@ def test_tied_join_keeps_custom_system_tags_with_their_operand(
             ],
             schema=schema,
         )
+        if declarations == "missing" and name == "b":
+            table = table.drop([source_id, record_id, custom])
         if reverse_columns:
             table = table.select(list(reversed(table.column_names)))
         inputs[name] = ArrowTableStream(
@@ -1214,6 +1220,7 @@ def test_tied_join_keeps_custom_system_tags_with_their_operand(
         names = sorted(
             name for name in expected.column_names if name.startswith("_tag_")
         )
+        assert sorted(name for name in prediction if name.startswith("_tag_")) == names
         target = expected.select(names)
         if canonical is None:
             canonical = target
@@ -1249,6 +1256,38 @@ def test_tied_join_keeps_custom_system_tags_with_their_operand(
             kernel.zero_row_result.as_table(columns=columns)
             .select(names)
             .schema.equals(target.schema, check_metadata=True)
+        )
+
+
+def test_distinct_join_inputs_keep_custom_tags_when_short_hashes_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom = "_tag_rev"
+    streams = [
+        ArrowTableStream(
+            pa.table({"k": [1], custom: pa.array([value], pa.large_string())}),
+            tag_columns=["k"],
+            data_tags=["k"],
+        )
+        for value in ("alpha", "omega")
+    ]
+    hashes = [ContentHash("semantic_v1", bytes([n]) * 32) for n in (16, 17)]
+    join = Join(config=OrcapodConfig(hashing=HashingConfig(system_tag_n_char=1)))
+    columns = {"system_tags": True}
+    names = [f"{custom}::1:{i}" for i in range(2)]
+    for ordered in (streams, streams[::-1]):
+        for stream, digest in zip(ordered, hashes, strict=True):
+            monkeypatch.setattr(stream, "pipeline_hash", lambda digest=digest: digest)
+        expected = [
+            stream.as_table(columns=columns)[custom][0].as_py() for stream in ordered
+        ]
+        result = join(*reversed(ordered)).as_table(columns=columns)
+        assert [result[name][0].as_py() for name in names] == expected
+        [(tag, _)] = async_rows(join, *reversed(ordered))
+        assert (
+            tag.as_table(columns=columns)
+            .select(names)
+            .equals(result.select(names), check_metadata=True)
         )
 
 

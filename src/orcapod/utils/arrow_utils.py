@@ -1810,32 +1810,36 @@ def _system_tag_position_groups(
 
 def _tied_custom_system_tags(
     names: Collection[str],
+    tied_positions: Sequence[Sequence[int]],
 ) -> list[dict[int, list[str]]]:
-    """Return tied Join operands that carry custom system tags, by suffix hash."""
-    groups: dict[str, dict[int, list[str]]] = {}
-    custom = set()
+    """Group whole system-tag declarations for ties that include a custom tag."""
+    by_position: dict[int, list[str]] = {
+        position: [] for group in tied_positions for position in group
+    }
+    custom: set[int] = set()
     ids = {constants.SYSTEM_TAG_SOURCE_ID_PREFIX, constants.SYSTEM_TAG_RECORD_ID_PREFIX}
     for name in names:
         if not name.startswith(constants.SYSTEM_TAG_PREFIX):
             continue
-        base, sep, suffix = name.rpartition(constants.BLOCK_SEPARATOR)
-        digest, _, position = suffix.rpartition(constants.FIELD_SEPARATOR)
-        if not sep or not position.isdigit():
+        parsed = _parse_system_tag_column(name)
+        if parsed is None:
             continue
-        positions = groups.setdefault(digest, {})
-        positions.setdefault(int(position), []).append(name)
-        if base.partition(constants.BLOCK_SEPARATOR)[0] not in ids:
-            custom.add(digest)
+        kind, _, suffix = parsed
+        position = int(suffix)
+        if position in by_position:
+            by_position[position].append(name)
+            if f"{constants.SYSTEM_TAG_PREFIX}{kind}" not in ids:
+                custom.add(position)
     return [
-        positions
-        for digest, positions in groups.items()
-        if digest in custom and len(positions) > 1
+        {position: by_position[position] for position in group}
+        for group in tied_positions
+        if custom.intersection(group)
     ]
 
 
 def _sort_equally_declared_system_tags(tables: list["pa.Table"]) -> list["pa.Table"]:
     """Put matched rows in a common order, keeping each operand's arrays together."""
-    if len(tables) < 2 or not tables[0].num_rows:
+    if len(tables) < 2 or not tables[0].num_rows or not tables[0].num_columns:
         return tables
     row_count = tables[0].num_rows
     stacked = pa.concat_tables(tables)
@@ -1859,19 +1863,23 @@ def _sort_equally_declared_system_tags(tables: list["pa.Table"]) -> list["pa.Tab
     return [stacked.take(pa.array(rows, type=pa.int64())) for rows in rows_by_position]
 
 
-def has_tied_custom_system_tags(names: Collection[str]) -> bool:
+def has_tied_custom_system_tags(
+    names: Collection[str], tied_positions: Sequence[Sequence[int]]
+) -> bool:
     """Whether tied Join operands include a custom system tag."""
-    return bool(_tied_custom_system_tags(names))
+    return bool(_tied_custom_system_tags(names, tied_positions))
 
 
-def sort_tied_custom_system_tags(table: "pa.Table") -> "pa.Table":
+def sort_tied_custom_system_tags(
+    table: "pa.Table", tied_positions: Sequence[Sequence[int]]
+) -> "pa.Table":
     """Assign tied operands with custom tags to canonical positions.
 
     Order whole system-tag declarations first. Only between operands with the
     same declaration, order each matched row's values as a bundle. In either
     case every field and value stays with its operand's other system tags.
     """
-    groups = _tied_custom_system_tags(table.column_names)
+    groups = _tied_custom_system_tags(table.column_names, tied_positions)
     if not groups:
         return table
     replacements: dict[str, tuple[pa.Field[Any], pa.ChunkedArray[Any]]] = {}
@@ -1916,11 +1924,12 @@ def sort_tied_custom_system_tags(table: "pa.Table") -> "pa.Table":
 
 def sorted_system_tag_nullability(
     nullable_by_name: Mapping[str, bool],
+    tied_positions: Sequence[Sequence[int]] = (),
 ) -> dict[str, bool]:
     """Return nullability for the source/record fields rebuilt by a tied sort."""
     custom_tags = {
         name
-        for group in _tied_custom_system_tags(nullable_by_name.keys())
+        for group in _tied_custom_system_tags(nullable_by_name.keys(), tied_positions)
         for bundle in group.values()
         for name in bundle
     }
@@ -1948,7 +1957,9 @@ def sorted_system_tag_field(field: "pa.Field[Any]", nullable: bool) -> "pa.Field
     return field.with_nullable(nullable).remove_metadata()
 
 
-def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
+def sort_system_tag_values(
+    table: "pa.Table", *, tied_positions: Sequence[Sequence[int]] = ()
+) -> "pa.Table":
     """Sort paired system tag values for columns that share the same provenance path.
 
     System tag columns come in (source_id, record_id) pairs. Columns that differ
@@ -1972,10 +1983,11 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
         return table
 
     nullable = sorted_system_tag_nullability(
-        {name: table.schema.field(name).nullable for name in sys_tag_cols}
+        {name: table.schema.field(name).nullable for name in sys_tag_cols},
+        tied_positions,
     )
     groups = _system_tag_position_groups(nullable.keys())
-    table = sort_tied_custom_system_tags(table)
+    table = sort_tied_custom_system_tags(table, tied_positions)
 
     source_id_field = constants.SYSTEM_TAG_SOURCE_ID_PREFIX[
         len(constants.SYSTEM_TAG_PREFIX) :
