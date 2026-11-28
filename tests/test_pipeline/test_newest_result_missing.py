@@ -246,7 +246,7 @@ def test_ephemeral_result_is_served_silently_when_persistent_result_is_gone(
         assert persistent_results is not None
         persistent_results.add_records(
             path,
-            records.filter(pc.equal(records["result"], 21)),
+            records.filter(pc.field("result") == 21),
             record_id_column=DATA_RECORD_ID,
             flush=True,
         )
