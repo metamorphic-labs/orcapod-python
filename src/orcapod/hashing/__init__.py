@@ -21,7 +21,7 @@ Built-in hashers (importable for custom registry setup):
 
 File hashing:
   FileHasher                           -- content hasher for individual files
-  FileHashKey                          -- frozen dataclass cache key (path, mtime_ns, size)
+  FileHashKey                          -- frozen dataclass cache key (path, mtime_ns, size, algorithm)
   CachedFileHasher                     -- caching decorator around FileContentHasherProtocol
   InMemoryHashCacher                   -- dict-backed cacher for testing
   SqliteHashCacher                     -- SQLite-backed persistent cacher
