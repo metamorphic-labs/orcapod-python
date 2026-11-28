@@ -66,6 +66,7 @@ def _source(
     keyed: bool = True,
     extra: bool = False,
     config: OrcapodConfig | None = None,
+    custom: dict[str, str] | None = None,
 ) -> Any:
     cells = {
         "subject": pa.array([r[0] for r in rows], pa.large_string()),
@@ -78,6 +79,8 @@ def _source(
     table = pa.table({name: cells[name] for name in names})
     if extra:
         table = table.append_column("extra", pa.nulls(len(rows), pa.int32()))
+    for name, value in (custom or {}).items():
+        table = table.append_column(name, pa.array([value] * len(rows), pa.string()))
     return ArrowTableSource(
         table.cast(
             pa.schema([f.with_nullable(f.name == "extra") for f in table.schema])
@@ -86,6 +89,7 @@ def _source(
         tag_only_columns=True,
         source_id="readings",
         config=config,
+        system_tag_columns=tuple(custom or ()),
         **kwargs,
     )
 
@@ -210,6 +214,59 @@ def test_a_changed_delivery_compares_record_ids_across_declared_schemas(
     ):
         source.as_table()
 
+    assert _stored(seed, cache) == before
+
+
+@pytest.mark.parametrize("arrangement", list(ARRANGEMENTS))
+def test_a_delta_delivery_cannot_alias_the_stored_record_id_as_custom(
+    tmp_path: Path, arrangement: str
+) -> None:
+    cache = DeltaTableDatabase(tmp_path, allow_schema_evolution=False)
+    path = ("fixed",)
+    original = _source(ROWS[:1], arrangement)
+    seed = original.cached(cache, cache_path=path)
+    _ = seed.as_table()
+    before = _stored(seed, cache)
+    original_row = original.as_table(columns={"system_tags": True}).to_pylist()[0]
+    custom = {
+        name.removeprefix("_tag_"): value
+        for name, value in original_row.items()
+        if name.startswith("_tag_")
+    }
+    changed_rows = _changed(ROWS[:1], ("s1", 1))
+    reader = _source(changed_rows, arrangement, custom=custom).cached(
+        cache, cache_path=path
+    )
+
+    with pytest.raises(CachedSourceChangedRowError, match="the source delivered"):
+        reader.as_table()
+    assert _stored(seed, cache) == before
+
+    # A conflict already in storage is also visible through the aliased declaration.
+    write_outside_the_rule(_source(changed_rows, arrangement), cache, path)
+    for read in ("head", "get_all_records"):
+        with pytest.raises(CachedSourceChangedRowError, match="1 record id"):
+            READS[read](reader)
+
+
+@pytest.mark.parametrize("arrangement", list(ARRANGEMENTS))
+def test_a_clean_delta_cache_is_readable_after_removing_custom_provenance(
+    tmp_path: Path, arrangement: str
+) -> None:
+    cache = DeltaTableDatabase(tmp_path)
+    path = ("fixed",)
+    custom = {
+        "record_id::legacy": "other-id",
+        "source_id::legacy": "arrow_table_v1:readings",
+    }
+    seed = _source(ROWS[:1], arrangement, custom=custom).cached(cache, cache_path=path)
+    _ = seed.as_table()
+    before = _stored(seed, cache)
+    expected = seed.get_all_records()
+    reader = _source(ROWS[:1], arrangement, extra=True).cached(cache, cache_path=path)
+
+    assert "not read yet" in str(reader.head())
+    assert reader.get_all_records() == expected
     assert _stored(seed, cache) == before
 
 
