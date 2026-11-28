@@ -93,8 +93,8 @@ class UnstorableDatetimeError(ValueError):
     ``datetime`` (``universal_converter.storable_instant``) raises a subclass for what
     the converter stores: a function's outputs, sync or async, at the top level or
     inside a list, dict or class field, and the Python values of ``DictSource`` and
-    ``ListSource``. A ``DataFrameSource`` given a plain dict or list is not covered
-    (Polars converts the values first; ITL-1330). ``reason`` and
+    ``ListSource``. A ``DataFrameSource`` takes no Python values: it refuses a dict or
+    a list when it is built (ITL-1330). ``reason`` and
     ``hint`` name no value, so a function's ``OutputTypeError`` shows them as they
     are; the message adds the value.
 

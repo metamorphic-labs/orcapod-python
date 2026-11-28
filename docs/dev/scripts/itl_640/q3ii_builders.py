@@ -74,7 +74,20 @@ def build(root: Path) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for label, make in (
         ("DictSource", lambda: DictSource(ROWS, **kw)),
-        ("DataFrameSource(pandas)", lambda: DataFrameSource(pd.DataFrame(ROWS), **kw)),
+        (
+            "DataFrameSource(pandas)",
+            lambda: DataFrameSource(
+                pd.DataFrame(ROWS).astype(
+                    {
+                        "k": "string",
+                        "s": "string",
+                        "d": pd.ArrowDtype(pa.date32()),
+                        "li": pd.ArrowDtype(pa.list_(pa.int64())),
+                    }
+                ),
+                **kw,
+            ),
+        ),
         ("DataFrameSource(polars)", lambda: DataFrameSource(pl.DataFrame(ROWS), **kw)),
         (
             "ArrowTableSource(from_pylist)",

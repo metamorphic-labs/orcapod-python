@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import polars as pl
 import pyarrow as pa
 import pytest
 
@@ -269,7 +270,9 @@ class TestNoneWhereTheTypeDoesNotAllowOne:
     def test_a_data_frame_source_raises_at_read(self) -> None:
         # Polars keeps the null inner list; reading it to Python raises.
         source = DataFrameSource(
-            {"id": [1], "v": [[None, [1]]]}, tag_columns=["id"], tag_only_columns=True
+            pl.DataFrame({"id": [1], "v": [[None, [1]]]}),
+            tag_columns=["id"],
+            tag_only_columns=True,
         )
         with pytest.raises(ValueError, match=r"(?s)Column 'v'.*ITL-1144"):
             _read_v(source)

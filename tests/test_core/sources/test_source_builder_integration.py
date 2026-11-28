@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import polars as pl
 import pyarrow as pa
 import pytest
 
@@ -70,7 +71,7 @@ class TestDictSourceBuilder:
 class TestDataFrameSourceBuilder:
     def test_no_arrow_source_attr(self):
         src = DataFrameSource(
-            data={"id": [1, 2], "x": [10, 20]},
+            data=pl.DataFrame({"id": [1, 2], "x": [10, 20]}),
             tag_columns=["id"],
             tag_only_columns=True,
         )
@@ -78,7 +79,7 @@ class TestDataFrameSourceBuilder:
 
     def test_has_stream_attr(self):
         src = DataFrameSource(
-            data={"id": [1, 2], "x": [10, 20]},
+            data=pl.DataFrame({"id": [1, 2], "x": [10, 20]}),
             tag_columns=["id"],
             tag_only_columns=True,
         )
@@ -86,7 +87,7 @@ class TestDataFrameSourceBuilder:
 
     def test_iter_data(self):
         src = DataFrameSource(
-            data={"id": [1, 2], "x": [10, 20]},
+            data=pl.DataFrame({"id": [1, 2], "x": [10, 20]}),
             tag_columns=["id"],
             tag_only_columns=True,
         )
@@ -94,7 +95,9 @@ class TestDataFrameSourceBuilder:
 
     def test_identity_starts_with_the_source_id(self):
         src = DataFrameSource(
-            data={"id": [1], "x": [10]}, tag_columns=["id"], tag_only_columns=True
+            data=pl.DataFrame({"id": [1], "x": [10]}),
+            tag_columns=["id"],
+            tag_only_columns=True,
         )
         identity = src.identity_structure()
         assert identity[0] == src.source_id

@@ -180,8 +180,9 @@ def storable_instant(value: object, timezone_policy: str) -> datetime:
     converter maps to an instant at microsecond precision (``timestamp[us, tz=UTC]``).
     It covers what the converter converts: a function's outputs at any depth, and the
     Python values of a source that converts them through the converter (``DictSource``,
-    ``ListSource``). A ``DataFrameSource`` given a plain dict or list hands the values to
-    Polars first and is not covered (ITL-1330).
+    ``ListSource``). A ``DataFrameSource`` takes data frames only and refuses a dict or a
+    list of Python values (ITL-1330), so no Python ``datetime`` reaches storage around
+    this rule.
 
     An aware value of any zone is stored as the instant it names. Arrow computes the
     instant from the value's UTC offset but drops the part of an offset below one

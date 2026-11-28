@@ -921,7 +921,11 @@ def test_dataframe_source_declares_native_custom_system_tag_required_large_strin
         "x": [1, 2],
         "extra": ["one", "two"],
     }
-    data = pd.DataFrame(values) if representation == "pandas" else pl.DataFrame(values)
+    data = (
+        pd.DataFrame(values).astype({"g": "string", "k": "string", "extra": "string"})
+        if representation == "pandas"
+        else pl.DataFrame(values)
+    )
     source = DataFrameSource(data, tag_columns=TAGS, system_tag_columns=["extra"])
     field = source.as_table(columns={"system_tags": True}).schema.field("_tag_extra")
     assert field.type == pa.large_string()
@@ -943,6 +947,8 @@ def test_dataframe_source_rejects_invalid_native_custom_system_tag(
     }
     data = (
         pd.DataFrame(data_values)
+        .astype({"g": "string", "k": "string"})
+        .convert_dtypes()
         if representation == "pandas"
         else pl.DataFrame(data_values)
     )
