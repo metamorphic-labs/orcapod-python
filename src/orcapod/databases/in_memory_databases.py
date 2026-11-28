@@ -11,6 +11,7 @@ import pyarrow.compute as pc
 
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
+from orcapod.databases._write_tracking import note_queued_write
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
@@ -336,6 +337,7 @@ class InMemoryArrowDatabase:
             )
         pending_ids = cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
         self._pending_record_ids[record_key].update(pending_ids)
+        note_queued_write(self._pending_commits)
 
         if flush:
             self.flush()

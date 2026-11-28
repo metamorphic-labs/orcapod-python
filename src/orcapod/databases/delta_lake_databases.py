@@ -26,6 +26,7 @@ from orcapod.databases._row_index import (
     matching_rows,
     rows_at,
 )
+from orcapod.databases._write_tracking import note_queued_write
 from orcapod.databases.delta_arrow_types import (
     ARROW_TYPE_KEY,
     first_column_out_of_stored_range,
@@ -2852,6 +2853,7 @@ class DeltaTableDatabase:
 
         # Step 7: Add to pending batch (no overwrite logic needed)
         self._add_to_pending_batch(record_path, schema_compatible_table)
+        note_queued_write(self._pending_commits)
 
         # Step 8: Flush if asked to; otherwise commit this table alone once its
         # pending batch reaches batch_size. Only the full table: committing every

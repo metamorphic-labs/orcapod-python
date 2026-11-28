@@ -26,7 +26,6 @@ from orcapod.pipeline.run_summary import (
 )
 from orcapod.pipeline.restrictions import restrictions_in_force, source_name
 from orcapod.pipeline.result import StreamsOnRead
-from orcapod.types import CacheMode
 from orcapod.utils.database_errors import flush_best_effort
 
 if TYPE_CHECKING:
@@ -129,33 +128,22 @@ def refuse_unloadable_inputs(node: Any) -> None:
         )
 
 
-def run_databases(nodes: Sequence[Any]) -> list[ArrowDatabaseProtocol]:
-    """Collect distinct database objects the given nodes can write to.
+def _databases(nodes: list[Any]) -> list[ArrowDatabaseProtocol]:
+    """The distinct databases the given nodes write to, each node's results first.
 
-    Results come first to release any pending records that depend on them
-    (ITL-1412). Separate objects at the same storage location can hold different
-    pending writes.
+    A function node's result database comes before its pipeline database, so the
+    end-of-run commit stores results before the records that point at them (ITL-919),
+    also when the results are in a separate database (ITL-1408).
     """
-    from orcapod.core.nodes.function_node import FunctionJobNode
-    from orcapod.core.nodes.operator_node import OperatorJobNode
-
-    results: list[ArrowDatabaseProtocol] = []
-    pipelines: list[ArrowDatabaseProtocol] = []
+    found: list[ArrowDatabaseProtocol] = []
     for node in nodes:
-        if isinstance(node, OperatorJobNode) and node.cache_mode != CacheMode.LOG:
-            continue
         pipeline_database = getattr(node, "_pipeline_database", None)
-        if pipeline_database is not None:
-            pipelines.append(pipeline_database)
         cached_pod = getattr(node, "_cached_function_pod", None)
         result_database = getattr(cached_pod, "result_database", None)
-        if result_database is not None:
-            results.append(result_database)
-        if isinstance(node, FunctionJobNode) and node.node_config.is_result_ephemeral:
-            ephemeral = node.ephemeral_result_database
-            if ephemeral is not None:
-                results.append(ephemeral)
-    return list({id(database): database for database in results + pipelines}.values())
+        for database in (result_database, pipeline_database):
+            if database is not None and not any(database is d for d in found):
+                found.append(database)
+    return found
 
 
 def _job_name(node: Any) -> str:
@@ -457,7 +445,7 @@ def run_with_dependencies(
 
     visit(target)
     plan = plan_run(graph, load_only=load_only, outside=outside)
-    databases = [] if load_only else run_databases(plan.to_run)
+    databases = _databases(plan.to_run)
     counter = RunCountingObserver()
     try:
         _ = SyncPipelineOrchestrator().run(
