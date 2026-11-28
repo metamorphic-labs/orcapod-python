@@ -726,7 +726,7 @@ async def test_unknown_direct_logical_projection_explains_validation(kind: str) 
     )
     assert source.pipeline_hash() != other.pipeline_hash()
     op.validate_inputs(other)
-    with pytest.raises(ValueError, match=r"validate_inputs\(stream\)"):
+    with pytest.raises(ValueError, match=r"'c'.*validate_inputs\(stream\)"):
         _ = await _execute_rows(op, source)
     op.validate_inputs(source)
     assert await _execute_rows(op, source)

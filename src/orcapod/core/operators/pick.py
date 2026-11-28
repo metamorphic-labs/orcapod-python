@@ -308,7 +308,7 @@ class Pick(UnaryOperator):
         if projection.python_type is None and isinstance(column_type, pa.ExtensionType):
             raise ValueError(
                 "Pick requires validation for direct async execution on logical "
-                "columns. Call validate_inputs(stream) for the current input."
+                f"column {self.column!r}. Call validate_inputs(stream) for the current input."
             )
         col_val = data[self.column]
 
@@ -467,13 +467,15 @@ class Pick(UnaryOperator):
             ValueError: If the hash count is wrong or a direct call needs a
                 logical projection type that has not been validated.
         """
+        from orcapod.core.nodes.operator_node import job_input_stream
+
         try:
             output = WithoutMetaWriter(output)
             if len(input_pipeline_hashes) != 1:
                 raise ValueError(
                     "Pick requires exactly one entry in input_pipeline_hashes."
                 )
-            stream: StreamProtocol | None = getattr(inputs[0], "stream", None)
+            stream = job_input_stream(inputs[0])
             if stream is not None:
                 projection = self._resolve_projection(stream)
             else:

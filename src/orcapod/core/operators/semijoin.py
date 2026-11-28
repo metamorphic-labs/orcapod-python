@@ -359,11 +359,13 @@ class SemiJoin(BinaryOperator):
         Raises:
             InputValidationError: If a direct call supplies an unvalidated pair.
         """
+        from orcapod.core.nodes.operator_node import job_input_stream
+
         left_rows: _LeftRows | None = None
         try:
             output = WithoutMetaWriter(output)
-            left_stream: StreamProtocol | None = getattr(inputs[0], "stream", None)
-            right_stream: StreamProtocol | None = getattr(inputs[1], "stream", None)
+            left_stream = job_input_stream(inputs[0])
+            right_stream = job_input_stream(inputs[1])
             validated_keys = self._validated_keys.get(tuple(input_pipeline_hashes))
             if (left_stream is None or right_stream is None) and validated_keys is None:
                 raise InputValidationError(

@@ -186,6 +186,13 @@ class _InputTap:
         return [item async for item in self]
 
 
+def job_input_stream(
+    reader: ReadableChannel[tuple[TagProtocol, DataProtocol]],
+) -> StreamProtocol | None:
+    """Return the upstream description carried by an operator job's input tap."""
+    return reader.stream if type(reader) is _InputTap else None
+
+
 # ---------------------------------------------------------------------------
 # OperatorNodeBase — shared base (no DB)
 # ---------------------------------------------------------------------------
