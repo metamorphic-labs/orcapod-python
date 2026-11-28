@@ -17,6 +17,7 @@ import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import wraps
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -1009,6 +1010,56 @@ class _WriteErrorWithStringSubclass(OSError):
     @override
     def __str__(self) -> str:
         return _UnformattableMessage("failed to write")
+
+
+@pytest.mark.parametrize("forward_warning", [False, True], ids=["direct", "forwarded"])
+def test_observer_warning_filter_raises_through_forwarding_call(
+    forward_warning: bool,
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, StatusObserver], RunSummary],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forwarding warning call preserves promotion of the loss warning."""
+    warn_explicit = warnings.warn_explicit
+
+    @wraps(warn_explicit)
+    def forward(*args: Any, **kwargs: Any) -> None:
+        warn_explicit(*args, **kwargs)
+
+    if forward_warning:
+        monkeypatch.setattr(warnings, "warn_explicit", forward)
+    job = _job(arrangement)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ObserverEventsLostWarning)
+        with pytest.raises(ObserverEventsLostWarning):
+            _ = run_job(job, StatusObserver(_database()))
+
+    assert job.last_run is not None and job.last_run.ok
+    assert _rows(job) == EXPECTED_ROWS
+
+
+def test_observer_loss_displays_escape_control_bytes(
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, StatusObserver], RunSummary],
+) -> None:
+    """NUL, terminal escape sequences and other controls are shown as text."""
+
+    class WriteError(OSError):
+        @override
+        def __str__(self) -> str:
+            return "bad bytes: \x00\x1b[2K\t\x7f\nsecond line"
+
+    job = _job(arrangement)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ObserverEventsLostWarning)
+        summary = run_job(job, StatusObserver(_database(error=WriteError)))
+
+    (warning,) = [item for item in caught if item.category is ObserverEventsLostWarning]
+    notebook = summary._repr_html_()  # pyright: ignore[reportPrivateUsage]  # notebook display protocol
+    assert notebook is not None
+    for display in (repr(summary), notebook, str(warning.message)):
+        assert r"bad bytes: \x00\x1b[2K\x09\x7f ..." in display
+        assert all(control not in display for control in "\x00\x1b\t\x7f")
 
 
 def _run_with_non_ascii_caller(

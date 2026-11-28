@@ -12,6 +12,7 @@ import json
 import logging
 import threading
 import traceback
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _NOOP_LOGGER = NoOpLogger()
+_ASCII_CONTROL_ESCAPES = {code: f"\\x{code:02x}" for code in (*range(0x20), 0x7F)}
 _ASYNC_ATTRIBUTION_NOTE = (
     "Computed and from-store counts reflect this run. Equal inputs may arrive in a "
     "different order or be computed concurrently."
@@ -274,11 +276,12 @@ class RunSummary:
         Returns:
             One clause per kind, joined, or ``""`` when no event was lost.
         """
-        return "; ".join(
+        details = "; ".join(
             f"{lost.count} {lost.kind} {'event' if lost.count == 1 else 'events'} "
             f"(first error: {_first_line(lost.first_error)})"
             for lost in self.lost_observer_events.values()
         )
+        return ascii_loss_text(details).translate(_ASCII_CONTROL_ESCAPES)
 
     def _lost_events_line(self) -> str | None:
         """The line counting the observer events that were not recorded, if any."""
@@ -427,7 +430,11 @@ def _error_line(error: BaseException | None) -> str:
     """``Type: first line of the message``."""
     if error is None:
         return ""
-    first = _first_line(str(error))
+    message = str(error)
+    lines = message.splitlines()
+    first = lines[0] if lines else ""
+    if len(lines) > 1:
+        first += " ..."
     return f"{type(error).__name__}: {first}" if first else type(error).__name__
 
 
@@ -475,7 +482,7 @@ def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
     from orcapod.errors import ObserverEventsLostWarning
     from orcapod.utils.warning_utils import warn_at_frame
 
-    details = ascii_loss_text(summary.lost_observer_events_message())
+    details = summary.lost_observer_events_message()
     message = (
         "Observer events were not recorded in this run: "
         + f"{details}. The run's results are not "
@@ -487,12 +494,13 @@ def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
     try:
         warn_at_frame(warning, ObserverEventsLostWarning, caller)
     except BaseException as error:
-        # A filter promoting this warning raises it directly in warn_at_frame.
-        # Python rendering adds frames, even if a renderer raises the same instance.
-        if error is warning and warning.__traceback__ is not None:
-            issuing_frame = warning.__traceback__.tb_next
-            if issuing_frame is not None and issuing_frame.tb_next is None:
-                raise
+        # Python dispatches accepted warnings through _showwarnmsg. An error filter
+        # raises the instance before that dispatch, even through forwarding wrappers.
+        if error is warning and not any(
+            frame.f_globals is vars(warnings) and frame.f_code.co_name == "_showwarnmsg"
+            for frame, _ in traceback.walk_tb(error.__traceback__)
+        ):
+            raise
         try:
             logger.warning("%s", message)
         except BaseException:
