@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections import UserDict
 from dataclasses import make_dataclass
+from typing import Any
 
 import pytest
 
@@ -31,6 +33,23 @@ def test_removed_hashing_subclass_field_is_refused(key: str, value: int | None) 
 
 
 @pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)
+@pytest.mark.parametrize("value", [0, None])
+@pytest.mark.parametrize("entry_point", ["constructor", "with_updates"])
+def test_removed_programmatic_hashing_mapping_field_is_refused(
+    key: str, value: int | None, entry_point: str
+) -> None:
+    from orcapod.config import DEFAULT_CONFIG, OrcapodConfig
+
+    # Exercise a runtime input beyond the constructor's annotated HashingConfig.
+    hashing: Any = UserDict({key: value})
+    factory = (
+        OrcapodConfig if entry_point == "constructor" else DEFAULT_CONFIG.with_updates
+    )
+    with pytest.raises(ValueError, match=rf"hashing\.{key}"):
+        factory(hashing=hashing)
+
+
+@pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)
 def test_removed_hashing_mapping_field_is_refused(key: str) -> None:
     from orcapod.config import OrcapodConfig
 
@@ -39,12 +58,17 @@ def test_removed_hashing_mapping_field_is_refused(key: str) -> None:
 
 
 @pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)
-def test_removed_hashing_toml_field_is_refused(key: str, tmp_path) -> None:
+@pytest.mark.parametrize(
+    "toml",
+    ["[hashing]\n{key} = 6\n", "[[hashing]]\n[[hashing]]\n{key} = 6\n"],
+    ids=["table", "array-of-tables"],
+)
+def test_removed_hashing_toml_field_is_refused(key: str, toml: str, tmp_path) -> None:
     from orcapod.config import load_config
 
     project_cfg = tmp_path / "orcapod_config.toml"
-    project_cfg.write_text(f"[hashing]\n{key} = 6\n")
-    with pytest.raises(ValueError, match=key):
+    project_cfg.write_text(toml.format(key=key))
+    with pytest.raises(ValueError, match=rf"hashing\.{key}"):
         load_config(project_cfg, tmp_path / "missing.toml")
 
 

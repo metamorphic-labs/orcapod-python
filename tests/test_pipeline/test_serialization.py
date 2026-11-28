@@ -50,8 +50,38 @@ def spec_pipeline(tmp_path):
     return pipeline, tmp_path
 
 
-def test_saved_pipeline_accepts_old_default_hashing_settings(spec_pipeline) -> None:
-    pipeline, tmp_path = spec_pipeline
+@pytest.fixture(params=[False, True], ids=["forward", "reverse"])
+def hashing_settings_pipeline(request):
+    """Build the same join with two tag, data and operand arrangements."""
+
+    def build(left_config: OrcapodConfig = DEFAULT_CONFIG) -> Pipeline:
+        def schema(*names: str) -> Schema:
+            order = names[::-1] if request.param else names
+            return Schema({name: int for name in order})
+
+        left = SourceNode(
+            name="left",
+            tag_schema=schema("k1", "k2", "k3"),
+            data_schema=schema("a", "b", "c"),
+            config=left_config,
+        )
+        right = SourceNode(
+            name="right",
+            tag_schema=schema("k1", "k2", "k3"),
+            data_schema=schema("d", "e", "f"),
+        )
+        inputs = (right, left) if request.param else (left, right)
+        with Pipeline(name="hashing_settings") as pipeline:
+            Join()(*inputs, label="joiner")
+        return pipeline
+
+    return build
+
+
+def test_saved_pipeline_accepts_old_default_hashing_settings(
+    hashing_settings_pipeline, tmp_path
+) -> None:
+    pipeline = hashing_settings_pipeline()
     path = tmp_path / "pipeline.json"
     pipeline.save(path)
     saved = json.loads(path.read_text())
@@ -79,7 +109,9 @@ def test_saved_pipeline_accepts_old_default_hashing_settings(spec_pipeline) -> N
     assert operator["config"]["hashing"] == {}
 
 
-def test_pipeline_save_omits_removed_hashing_settings(tmp_path) -> None:
+def test_pipeline_save_omits_removed_hashing_settings(
+    hashing_settings_pipeline, tmp_path
+) -> None:
     @dataclasses.dataclass(frozen=True)
     class LegacyHashingConfig(HashingConfig):
         system_tag_n_char: int = 6
@@ -89,18 +121,7 @@ def test_pipeline_save_omits_removed_hashing_settings(tmp_path) -> None:
     config = OrcapodConfig(display=DisplayConfig(max_rows=17))
     # Simulate a legacy typed object reaching save without constructor validation.
     object.__setattr__(config, "hashing", LegacyHashingConfig())
-    tags = Schema({"k1": int, "k2": int})
-    left = SourceNode(
-        name="left",
-        tag_schema=tags,
-        data_schema=Schema({"a": int, "b": int}),
-        config=config,
-    )
-    right = SourceNode(
-        name="right", tag_schema=tags, data_schema=Schema({"c": int, "d": int})
-    )
-    with Pipeline(name="legacy_config") as pipeline:
-        Join()(left, right, label="joined")
+    pipeline = hashing_settings_pipeline(config)
 
     path = tmp_path / "pipeline.json"
     pipeline.save(path)
@@ -111,22 +132,22 @@ def test_pipeline_save_omits_removed_hashing_settings(tmp_path) -> None:
     assert "left" in Pipeline.load(path).nodes
 
 
-@pytest.mark.parametrize(
-    ("node_type", "key"),
-    [("source", "schema_n_char"), ("operator", "system_tag_n_char")],
-)
+@pytest.mark.parametrize("node_type", ["source", "operator"])
+@pytest.mark.parametrize("key", ["system_tag_n_char", "schema_n_char", "path_n_char"])
+@pytest.mark.parametrize("as_array", [False, True], ids=["object", "array"])
 def test_saved_pipeline_refuses_removed_hashing_settings(
-    spec_pipeline, node_type: str, key: str
+    hashing_settings_pipeline, tmp_path, node_type: str, key: str, as_array: bool
 ) -> None:
-    pipeline, tmp_path = spec_pipeline
+    pipeline = hashing_settings_pipeline()
     path = tmp_path / "pipeline.json"
     pipeline.save(path)
     saved = json.loads(path.read_text())
     node = next(n for n in saved["nodes"].values() if n["node_type"] == node_type)
-    node["config"] = {"hashing": {key: 6}}
+    fields = {key: 6}
+    node["config"] = {"hashing": [{}, fields] if as_array else fields}
     path.write_text(json.dumps(saved))
 
-    with pytest.raises(ValueError, match=key):
+    with pytest.raises(ValueError, match=rf"hashing\.{key}"):
         Pipeline.load(path)
 
 

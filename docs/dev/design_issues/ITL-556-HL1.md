@@ -11,6 +11,7 @@ digests could also collide and silently combine columns for distinct provenance.
 The `path_n_char` setting had no callers.
 
 **Fix:** Removed all three length settings and used full digests in system-tag
-column names and logical table paths. Typed configurations refuse the removed
-fields, and pipeline saves omit them. The loader accepts the null defaults
-older writers included automatically.
+column names and logical table paths. Programmatic configurations refuse the
+removed fields in typed objects and mappings. Loaders identify removed settings
+in both tables and arrays of tables. Pipeline saves omit the fields, and the
+loader accepts the null defaults older writers included automatically.

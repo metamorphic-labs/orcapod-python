@@ -21,6 +21,17 @@ def _reject_removed_hashing_keys(keys: Iterable[str]) -> None:
         raise ValueError(f"Removed hash-length settings: {settings}. Use full digests.")
 
 
+def _hashing_setting_keys(section: object, *, allow_null: bool) -> Iterable[str]:
+    """Read setting names from a table or an array of tables."""
+    if isinstance(section, Mapping):
+        yield from (
+            key for key, value in section.items() if value is not None or not allow_null
+        )
+    elif isinstance(section, (list, tuple)):
+        for table in section:
+            yield from _hashing_setting_keys(table, allow_null=allow_null)
+
+
 def reject_removed_hashing_settings(config: object) -> None:
     """Refuse values for removed hash-length settings.
 
@@ -35,11 +46,8 @@ def reject_removed_hashing_settings(config: object) -> None:
     """
     if not isinstance(config, Mapping):
         return
-    hashing = config.get("hashing")
-    if not isinstance(hashing, Mapping):
-        return
     _reject_removed_hashing_keys(
-        key for key, value in hashing.items() if value is not None
+        _hashing_setting_keys(config.get("hashing"), allow_null=True)
     )
 
 
@@ -136,7 +144,10 @@ class OrcapodConfig:
     datetime: DatetimeConfig = field(default_factory=DatetimeConfig)
 
     def __post_init__(self) -> None:
-        """Refuse removed settings supplied through a typed hashing section."""
+        """Refuse removed settings supplied through a programmatic hashing section."""
+        _reject_removed_hashing_keys(
+            _hashing_setting_keys(self.hashing, allow_null=False)
+        )
         _reject_removed_hashing_keys(
             key for key in _REMOVED_HASHING_SETTINGS if hasattr(self.hashing, key)
         )
