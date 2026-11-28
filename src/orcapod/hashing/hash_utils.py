@@ -122,8 +122,46 @@ def _to_path(file_path: PathLike) -> Path | UPath:
     return Path(file_path)
 
 
+SHA256_ALGORITHM = "sha256"
+_PATH_HASH_ALGORITHM = "hash_path"
+_XXH64_ALGORITHM = "xxh64"
+_CRC32_ALGORITHM = "crc32"
+
+_FIXED_DIGEST_SIZES = {
+    _PATH_HASH_ALGORITHM: 32,
+    _XXH64_ALGORITHM: 8,
+    _CRC32_ALGORITHM: 4,
+}
+
+
+def file_hash_digest_size(algorithm: str) -> int:
+    """Return the digest length in bytes of a ``hash_file`` hash made with ``algorithm``.
+
+    Args:
+        algorithm: An algorithm ``hash_file`` accepts (its hashes' label).
+
+    Returns:
+        The exact length of every digest ``hash_file`` returns for ``algorithm``.
+
+    Raises:
+        ValueError: If the algorithm name is unsupported or its digest has no
+            fixed length.
+    """
+    if algorithm in _FIXED_DIGEST_SIZES:
+        return _FIXED_DIGEST_SIZES[algorithm]
+    try:
+        size = hashlib.new(algorithm).digest_size
+    except (ValueError, TypeError):  # hashlib may use TypeError for an embedded NUL
+        raise ValueError(f"No file hash algorithm named {algorithm!r}") from None
+    if size == 0:  # an extendable-output function (shake_*): no fixed length
+        raise ValueError(
+            f"File hash algorithm {algorithm!r} has no fixed digest length"
+        )
+    return size
+
+
 def hash_file(
-    file_path: PathLike, algorithm="sha256", buffer_size=65536
+    file_path: PathLike, algorithm=SHA256_ALGORITHM, buffer_size=65536
 ) -> ContentHash:
     """Calculate the hash of a file using the specified algorithm.
 
@@ -145,12 +183,12 @@ def hash_file(
         raise FileNotFoundError(f"The file {file_path} does not exist")
 
     # Hash the path string itself rather than file content
-    if algorithm == "hash_path":
+    if algorithm == _PATH_HASH_ALGORITHM:
         hasher = hashlib.sha256()
         hasher.update(str(file_path).encode("utf-8"))
         return ContentHash(method=algorithm, digest=hasher.digest())
 
-    if algorithm == "xxh64":
+    if algorithm == _XXH64_ALGORITHM:
         hasher = xxhash.xxh64()
         with path.open("rb") as file:
             while True:
@@ -160,7 +198,7 @@ def hash_file(
                 hasher.update(data)
         return ContentHash(method=algorithm, digest=hasher.digest())
 
-    if algorithm == "crc32":
+    if algorithm == _CRC32_ALGORITHM:
         crc = 0
         with path.open("rb") as file:
             while True:

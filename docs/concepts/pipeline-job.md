@@ -62,11 +62,19 @@ Among `job.run()`'s optional arguments, the tutorial
 [Handling errors](../tutorial/handling-errors.md) demonstrates `orchestrator=` (for example
 `SyncPipelineOrchestrator(error_policy="fail_fast")` to stop at the first failing row; the
 default policy skips failed rows and continues) and `observer=` (`StatusObserver`,
-`LoggingObserver`) to record what happened during the run. An observer only watches: one
+`LoggingObserver`) to record what happened during the run. Both observers raise
+`SpiralDBObserverNotSupportedError` at setup if given a SpiralDB store, so give them
+another database such as Delta (ITL-1540). An observer only watches: one
 that changes the job, its nodes or its bound sources during a run is unsupported, and what
 the run then does is undefined (ITL-1369). `load_only=True` fills the nodes
 from what is already stored and computes nothing; see
 [Loading without computing](function-pods.md#loading-without-computing-runload_onlytrue).
+
+Use `await job.run_async()` or pass an `AsyncPipelineOrchestrator` to `job.run()` to
+execute nodes concurrently. Each function pod defaults to a limit based on the usable
+CPU count, clamped to 1–16 in-flight calls during an async run. The
+[function pod concurrency settings](function-pods.md#limiting-in-flight-calls) show how
+to choose a limit for a particular pod.
 
 ## Nodes
 
@@ -243,15 +251,19 @@ type by type, is [Data types per database](../reference/database-types.md).
 
 Orcapod's own stored tables hold such columns. A function node's result table holds
 list-valued executor columns and `__`-prefixed columns. A side-effect node's log holds a UTC
-timestamp and `__data_context`, and an operator cache and a cached source hold
-`__data_context` too. So a job refuses these nodes when it is built, before anything runs:
+timestamp and `__data_context`. An operator cache holds `__data_context`, the row's entry id
+and a UTC timestamp, the time the row was first stored (`__recorded_at`). A cached source
+holds `__data_context` too. So a job refuses these nodes when it is built, or when a database
+is attached to them, before anything runs:
 
 - every function node, on SQLite and PostgreSQL;
 - every side-effect node, on SQLite;
+- every operator node with caching on (`CacheMode.LOG` or `REPLAY`), on SQLite: the SQLite
+  connector has no column type for a timestamp (adding one is ITL-1482);
 - every node that stores anything, on SpiralDB.
 
-An operator cache or cached source on a SQL connector is refused when it is written, before
-anything is stored, if one of its columns has a type or name the connector does not store. On
+An operator cache or cached source on a SQL connector is also refused when it is written, before
+anything is stored, if one of its own columns has a type or name the connector does not store. On
 PostgreSQL that is every operator cache with caching on: its system-tag column names
 (`_tag_source_id::` and a 64-character hash) are longer than 63 bytes.
 A table's name is its Orcapod path joined by `__`, and every node table and cached source path
@@ -491,7 +503,11 @@ result database's, when one was given) and how each source was configured. `Pipe
 Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
 is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
 at a database that has moved, and `PipelineJob.load(path, result_database=...)` at a result
-database. The file records each node's own Arrow types, so saving types
+database. A connector database (SQLite, PostgreSQL, SpiralDB) is never rebuilt from the
+file: pass it, built over your connector, or the load raises an error that names what to
+pass. Saving a loaded job writes the database actually bound, the one you passed, in place of
+the recorded one. The recorded one is kept only while nothing is bound in its slot, which
+happens when a database of another kind could not be rebuilt and none was passed. The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that
 preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
 previews.

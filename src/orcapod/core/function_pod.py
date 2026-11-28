@@ -14,6 +14,7 @@ import pyarrow as pa
 from orcapod import contexts
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
+import orcapod.core.row_ids as row_ids
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
@@ -191,11 +192,13 @@ class _FunctionPodBase(TraceableBase):
     ) -> Any:
         """Build a per-row ``InvocationContext`` for ctx-aware pods.
 
-        Uses the same preimage as ``SideEffectPod._execute_side_effect_row`` and
-        ``FunctionJobNode._build_entry_id_preimage``: system-tag columns +
-        ``INPUT_DATA_HASH_COL`` (``large_binary``) + recomputation index 0.
-        ``NODE_CONTENT_HASH_COL`` is intentionally excluded — it is redundant,
-        fully determined by the table path (``pipeline_hash()``) plus system tags.
+        The record-level component is the row's entry id (``row_ids.entry_id``:
+        its tags, system tags and input data hash), the id a side-effect pod keys
+        its deliveries by. The row's source-info tokens are no part of it, so a
+        row that arrives again with other tokens has the same invocation hash
+        (ITL-1471). ``NODE_CONTENT_HASH_COL`` is intentionally excluded — it is
+        redundant, fully determined by the table path (``pipeline_hash()``) plus
+        system tags.
 
         Args:
             tag: The input tag for this row.
@@ -205,22 +208,15 @@ class _FunctionPodBase(TraceableBase):
         Returns:
             An ``InvocationContext`` instance.
         """
-        import pyarrow as pa
-        from orcapod.core.nodes.function_node import _build_record_id_preimage
         from orcapod.invocation import InvocationContext, InvocationHashConfig
-        from orcapod.side_effects import _SIDE_EFFECT_RECOMPUTATION_INDEX_COL
 
-        preimage = _build_record_id_preimage(tag, data).append_column(
-            _SIDE_EFFECT_RECOMPUTATION_INDEX_COL,
-            pa.array([0], type=pa.int32()),
-        )
-        record_id_hash = self.data_context.arrow_hasher.hash_table(preimage)
+        entry_id = row_ids.entry_id(self.data_context.arrow_hasher, tag, data)
 
         return InvocationContext(
             pod_name=self.label,
             pipeline_run_id=run_id,
             _pipeline_hash_ch=self.pipeline_hash(),
-            _record_id_hash_ch=record_id_hash,
+            _entry_id_hash_ch=entry_id,
             _hash_config=InvocationHashConfig(),
             _track_completion=True,
         )
@@ -307,7 +303,7 @@ class _FunctionPodBase(TraceableBase):
             raise ValueError(
                 f"{error}. {unread} are data-tags of the input (each a tag "
                 "and a data column of one name) that the function does not read, and "
-                "the exact form, pod.process(stream) or pod(stream, strict=True), "
+                "the exact form, pod.process(stream) or pod(stream, strict_columns=True), "
                 f"hands every data column to the function: {way_out}"
             ) from error
         self._validate_output_keys(tag_schema.keys())
@@ -482,10 +478,10 @@ class _FunctionPodBase(TraceableBase):
         Returns:
             A ``PostRunPayload`` ready to pass to registered hooks.
         """
-        record_id = str(output_data.datagram_uuid) if output_data is not None else None
+        result_id = str(output_data.datagram_uuid) if output_data is not None else None
         invocation_context = self._build_invocation_context(tag, data, run_id=run_id)
         return PostRunPayload(
-            record_id_hash=record_id,
+            result_id=result_id,
             tag=tag,
             input=data,
             output=output_data,
@@ -679,7 +675,7 @@ class _FunctionPodBase(TraceableBase):
         """Streaming async execution with per-data concurrency control.
 
         Each input (tag, data) is dispatched as an independent async task.
-        A semaphore limits how many tasks are in-flight concurrently.
+        A semaphore limits in-flight tasks unless the effective limit is ``None``.
         Observer hooks fire per item: ``on_data_start`` before processing,
         ``on_data_end(cached=False)`` on success, ``on_data_crash`` on error.
 
@@ -785,7 +781,7 @@ class _FunctionPodBase(TraceableBase):
         self,
         *streams: StreamProtocol,
         label: str | None = None,
-        strict: bool = False,
+        strict_columns: bool = False,
     ) -> StreamProtocol:
         """Apply the pod, dropping the data columns its function does not take.
 
@@ -801,7 +797,7 @@ class _FunctionPodBase(TraceableBase):
         Args:
             *streams: Input streams to process.
             label: Optional label for tracking.
-            strict: If ``True``, an extra data column is an error, as in
+            strict_columns: If ``True``, an extra data column is an error, as in
                 ``process``. It decides only that; it is part of no identity.
 
         Returns:
@@ -809,14 +805,14 @@ class _FunctionPodBase(TraceableBase):
 
         Raises:
             ValueError: If a parameter without a default has no column, a column's
-                type is incompatible with its parameter, or (``strict=True``) the
+                type is incompatible with its parameter, or (``strict_columns=True``) the
                 input carries a data column that is not a parameter.
         """
         logger.debug("Invoking pod %s on streams through __call__: %s", self, streams)
         # A function that accepts arbitrary keywords takes every column, so
         # nothing is unused and no select is added (developer, November 12, 2026,
         # ITL-807). No data function kind accepts them today.
-        if strict or self.data_function.accepts_arbitrary_keywords:
+        if strict_columns or self.data_function.accepts_arbitrary_keywords:
             return self.process(*streams, label=label)
 
         input_stream = self.handle_input_streams(*streams)
@@ -1017,7 +1013,7 @@ class FunctionPod(_FunctionPodBase):
         self,
         *streams: StreamProtocol,
         label: str | None = None,
-        strict: bool = False,
+        strict_columns: bool = False,
     ) -> FunctionPodStream:
         """Apply the pod, dropping the data columns its function does not take.
 
@@ -1027,13 +1023,14 @@ class FunctionPod(_FunctionPodBase):
         Args:
             *streams: Input streams to process.
             label: Optional label for tracking.
-            strict: If ``True``, an extra data column is an error, as in ``process``.
+            strict_columns: If ``True``, an extra data column is an error, as in ``process``.
 
         Returns:
             A ``FunctionPodStream`` wrapping the computation.
         """
         return cast(
-            FunctionPodStream, super().__call__(*streams, label=label, strict=strict)
+            FunctionPodStream,
+            super().__call__(*streams, label=label, strict_columns=strict_columns),
         )
 
     def to_config(self) -> dict[str, Any]:
@@ -1049,7 +1046,7 @@ class FunctionPod(_FunctionPodBase):
             "pod_config": None,
             "ctx_arg_name": self.ctx_arg_name,
         }
-        if self._pod_config.max_concurrency is not None:
+        if self._pod_config.max_concurrency != "inherit":
             config["pod_config"] = {
                 "max_concurrency": self._pod_config.max_concurrency,
             }

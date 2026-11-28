@@ -22,6 +22,10 @@ from orcapod.core.sources.polling_source import PollingSource
 from orcapod.streams import ViewStatus
 from orcapod.types import ColumnConfig, Cursor, Schema
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 ROWS = 8
 # Not in tag order, with the tag order's first rows last.
 ORDER = [5, 2, 7, 0, 6, 1, 4, 3]

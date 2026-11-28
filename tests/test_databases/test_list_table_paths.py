@@ -32,12 +32,12 @@ Store = InMemoryArrowDatabase | DeltaTableDatabase | ConnectorArrowDatabase
 
 # Paths whose components need no sanitizing, so every backend returns them as given.
 PATHS = [
-    ("job", "double", "h1", "pdb_v2"),
+    ("job", "double", "h1", "pdb_v1"),
     ("job", "double", "h1"),  # a table with another table below it
-    ("job", "double", "h2", "pdb_v1"),
-    ("job", "doubled", "h3", "pdb_v1"),  # shares a string prefix, not a component
+    ("job", "double", "h2", "pdb_v2"),
+    ("job", "doubled", "h3", "pdb_v2"),  # shares a string prefix, not a component
     ("job", "_result", "double", "h1", "rdb_v1"),
-    ("other", "double", "h1", "pdb_v1"),
+    ("other", "double", "h1", "pdb_v2"),
 ]
 
 
@@ -80,8 +80,8 @@ class TestEveryBackend:
         _fill(make_store())
         assert make_store().list_table_paths(("job", "double")) == [
             ("job", "double", "h1"),
-            ("job", "double", "h1", "pdb_v2"),
-            ("job", "double", "h2", "pdb_v1"),
+            ("job", "double", "h1", "pdb_v1"),
+            ("job", "double", "h2", "pdb_v2"),
         ]
 
     def test_a_table_at_the_prefix_itself_is_listed(
@@ -91,7 +91,7 @@ class TestEveryBackend:
         _fill(make_store())
         assert make_store().list_table_paths(("job", "double", "h1")) == [
             ("job", "double", "h1"),
-            ("job", "double", "h1", "pdb_v2"),
+            ("job", "double", "h1", "pdb_v1"),
         ]
 
     def test_prefix_without_tables_gives_nothing(self, make_store: Callable[[], Store]):
@@ -112,8 +112,8 @@ class TestEveryBackend:
         scoped = make_store().at("job")
         assert scoped.list_table_paths(("double",)) == [
             ("double", "h1"),
-            ("double", "h1", "pdb_v2"),
-            ("double", "h2", "pdb_v1"),
+            ("double", "h1", "pdb_v1"),
+            ("double", "h2", "pdb_v2"),
         ]
         assert scoped.at("_result").list_table_paths() == [("double", "h1", "rdb_v1")]
 
@@ -141,8 +141,8 @@ class TestInMemory:
     def test_tables_not_flushed_yet_are_listed(self):
         """A table with a record added but not flushed is listed."""
         store = InMemoryArrowDatabase()
-        store.add_record(("job", "f", "pdb_v1"), b"r", pa.table({"x": [1]}))
-        assert store.list_table_paths(("job",)) == [("job", "f", "pdb_v1")]
+        store.add_record(("job", "f", "pdb_v2"), b"r", pa.table({"x": [1]}))
+        assert store.list_table_paths(("job",)) == [("job", "f", "pdb_v2")]
 
 
 class TestDelta:
@@ -158,19 +158,19 @@ class TestDelta:
         """A plain directory and a stray file under the root are left out of the
         listing.
         """
-        _fill(DeltaTableDatabase(tmp_path), [("job", "f", "pdb_v1")])
+        _fill(DeltaTableDatabase(tmp_path), [("job", "f", "pdb_v2")])
         (tmp_path / "job" / "f" / "notes").mkdir()
         (tmp_path / "job" / "stray.txt").write_text("x")
         assert DeltaTableDatabase(tmp_path).list_table_paths() == [
-            ("job", "f", "pdb_v1")
+            ("job", "f", "pdb_v2")
         ]
 
     def test_a_directory_symlink_is_not_followed(self, tmp_path: Path):
         """A link to an ancestor does not send the walk in circles."""
-        _fill(DeltaTableDatabase(tmp_path), [("job", "f", "pdb_v1")])
+        _fill(DeltaTableDatabase(tmp_path), [("job", "f", "pdb_v2")])
         (tmp_path / "job" / "loop").symlink_to(tmp_path, target_is_directory=True)
         assert DeltaTableDatabase(tmp_path).list_table_paths() == [
-            ("job", "f", "pdb_v1")
+            ("job", "f", "pdb_v2")
         ]
 
     def test_missing_root_gives_nothing(self, tmp_path: Path):
@@ -222,8 +222,8 @@ class TestDeltaOnCloudStorage:
         store = DeltaTableDatabase("s3://bucket/root")
         assert store.list_table_paths(("job", "double")) == [
             ("job", "double", "h1"),
-            ("job", "double", "h1", "pdb_v2"),
-            ("job", "double", "h2", "pdb_v1"),
+            ("job", "double", "h1", "pdb_v1"),
+            ("job", "double", "h2", "pdb_v2"),
         ]
         assert store.at("job").list_table_paths(("_result",)) == [
             ("_result", "double", "h1", "rdb_v1")
@@ -379,7 +379,7 @@ class TestWrappers:
     def test_no_op_database_holds_no_table(self):
         """A ``NoOpArrowDatabase`` lists nothing even after a record is added."""
         store = NoOpArrowDatabase()
-        store.add_record(("job", "f", "pdb_v1"), b"r", pa.table({"x": [1]}))
+        store.add_record(("job", "f", "pdb_v2"), b"r", pa.table({"x": [1]}))
         assert store.list_table_paths() == []
         assert store.list_table_paths(("job",)) == []
 
@@ -396,6 +396,6 @@ def test_s3_lists_tables_and_nested_tables(s3_base_uri, s3_storage_options):
     ).list_table_paths(("job", "double"))
     assert listed == [
         ("job", "double", "h1"),
-        ("job", "double", "h1", "pdb_v2"),
-        ("job", "double", "h2", "pdb_v1"),
+        ("job", "double", "h1", "pdb_v1"),
+        ("job", "double", "h2", "pdb_v2"),
     ]

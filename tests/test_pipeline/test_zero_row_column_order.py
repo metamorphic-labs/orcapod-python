@@ -58,6 +58,10 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.core_protocols.operator_pod import OperatorPodProtocol
 from orcapod.types import CacheMode
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 ORCHESTRATORS = {
     "sync": SyncPipelineOrchestrator,
     "async": AsyncPipelineOrchestrator,
@@ -402,7 +406,7 @@ def _write_in_operator_order(source_dir: Any, target_dir: Any) -> tuple[str, ...
     data, system tags, source info) and the bookkeeping (``__``) columns where they were.
     """
     source = DeltaTableDatabase(source_dir)
-    (path,) = [p for p in source.list_table_paths() if p[-1] == "odb_v1"]
+    (path,) = [p for p in source.list_table_paths() if p[-1] == "odb_v2"]
     rows = source.get_all_records(
         path, record_id_column=OperatorJobNode.HASH_COLUMN_NAME
     )

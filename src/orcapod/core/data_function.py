@@ -30,6 +30,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
 from orcapod.core.result_cache import ResultCache
 from orcapod.errors import (
     NoOutputsDeclaredError,
+    OutputContainerTypeError,
     OutputTypeError,
     UnstorableDatetimeError,
 )
@@ -37,6 +38,7 @@ from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
     PythonFunctionExecutorProtocol,
+    PythonFunctionReturnCheckProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.semantic_types.output_conformance import (
@@ -47,6 +49,10 @@ from orcapod.types import ContentHash, DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
+from orcapod.utils.output_containers import (
+    UnexpectedOutputContainer,
+    output_container_mismatch,
+)
 from orcapod.utils.tensor_conversions import describe, tensor_conversions, warn_once
 
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
@@ -79,7 +85,7 @@ def _get_sync_executor():
 
 
 def parse_function_outputs(
-    output_keys: Sequence[str], values: Any
+    output_keys: Sequence[str], values: Any, return_container: type = tuple
 ) -> dict[str, DataValue]:
     """
     Map raw function return values to a keyed output dict.
@@ -89,30 +95,30 @@ def parse_function_outputs(
           returned value other than ``None`` before this is called (ITL-1257).
         - ``output_keys = ["result"]``: any value (including iterables) is stored as-is
           under the single key.
-        - ``output_keys = ["a", "b", ...]``: ``values`` must be iterable and its length
-          must match the number of keys.
+        - ``output_keys = ["a", "b", ...]``: ``values`` must match the declared container
+          and hold one value per key.
 
     Args:
         output_keys: Ordered list of output key names.
         values: Raw return value from the function.
+        return_container: Runtime type required for several outputs.
 
     Returns:
         Dict mapping each output key to its corresponding value.
 
     Raises:
-        ValueError: If ``values`` is not iterable when multiple keys are given, or if
-            the number of values does not match the number of keys.
+        UnexpectedOutputContainer: If the value is not an accepted output container.
+        ValueError: If the number of values does not match the number of keys.
     """
     if len(output_keys) == 0:
         output_values: list[Any] = []
     elif len(output_keys) == 1:
         output_values = [values]
-    elif isinstance(values, Iterable):
-        output_values = list(values)
     else:
-        raise ValueError(
-            "Values returned by function must be sequence-like if multiple output keys are specified"
-        )
+        returned_type = output_container_mismatch(values, return_container)
+        if returned_type is not None:
+            raise UnexpectedOutputContainer(returned_type)
+        output_values = list(values)
 
     if len(output_values) != len(output_keys):
         raise ValueError(
@@ -678,7 +684,7 @@ PYTHON_FUNCTION = DataFunctionTypeDeclaration(
             str,
             _TEXT,
             True,
-            "the executor that ran the function (local, ray, none)",
+            "the executor that ran the function (local, ray.v0, none)",
         ),
         StoredColumn(
             "executor_info",
@@ -732,6 +738,30 @@ def declaration_for(type_id: str) -> DataFunctionTypeDeclaration:
             f"Unknown data function type {type_id!r}; this version of Orcapod knows "
             + ", ".join(repr(known) for known in sorted(DECLARATIONS))
         ) from None
+
+
+def output_source_info(
+    uri: tuple[str, ...], result_id: str, columns: Iterable[str]
+) -> dict[str, str]:
+    """Build the source-info token of each output column of one result.
+
+    A token is ``<function uri>::<result id>::<column>``, the uri's parts joined
+    by ``:``. This is the one place an output's tokens are built: a computed
+    result gives its id as hex text, and the placeholder of an ephemeral result
+    that is gone gives the sentinel ``row_ids.EPHEMERAL_RESULT_GONE`` in its
+    place (ITL-1471).
+
+    Args:
+        uri: The data function's uri.
+        result_id: The text that names the result: the hex of its id, or the
+            sentinel.
+        columns: The output columns.
+
+    Returns:
+        The token of each column, by column name, in the order given.
+    """
+    source = ":".join(uri)
+    return {column: f"{source}::{result_id}::{column}" for column in columns}
 
 
 class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
@@ -824,7 +854,12 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         )
 
         # extract input and output schema from the function signature
-        self._input_schema, self._output_schema = schema_utils.extract_function_schemas(
+        (
+            self._input_schema,
+            self._output_schema,
+            self._return_container,
+            self._container_annotation,
+        ) = schema_utils.extract_function_schemas_with_container(
             self._function,
             self._output_keys,
             input_typespec=input_schema,
@@ -975,7 +1010,12 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             # No output keys declare an empty return (ITL-1257): a returned value
             # contradicts the declaration and is refused, never dropped.
             raise NoOutputsDeclaredError(self.canonical_function_name, values)
-        output_data = parse_function_outputs(self._output_keys, values)
+        try:
+            output_data = parse_function_outputs(
+                self._output_keys, values, self._return_container
+            )
+        except UnexpectedOutputContainer as exc:
+            raise self._output_container_error(exc) from exc
         output_schema = self.output_data_schema
         for key, value in output_data.items():
             mismatch = check_conformance(
@@ -1008,14 +1048,8 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                     "unchanged. Return value.detach().cpu() to avoid this warning.",
                 )
 
-        def combine(*components: tuple[str, ...]) -> str:
-            inner_parsed = [":".join(component) for component in components]
-            return "::".join(inner_parsed)
-
         new_record_uuid = uuid.UUID(bytes=uuid7().bytes)
-        source_info = {
-            k: combine(self.uri, (new_record_uuid.hex,), (k,)) for k in output_data
-        }
+        source_info = output_source_info(self.uri, new_record_uuid.hex, output_data)
 
         if not output_data:
             return Data(
@@ -1041,6 +1075,25 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             record_uuid=new_record_uuid,
             data_context=self.data_context,
         )
+
+    def _output_container_error(
+        self, error: UnexpectedOutputContainer
+    ) -> OutputContainerTypeError:
+        """Attach the function and its declaration to a container mismatch."""
+        return OutputContainerTypeError(
+            self.canonical_function_name,
+            error.returned_type,
+            self._return_container,
+            self._container_annotation,
+        )
+
+    def _executor_return_options(self) -> dict[str, object] | None:
+        """Request a container check from an executor that can check before transport."""
+        if len(self._output_keys) > 1 and isinstance(
+            self._executor, PythonFunctionReturnCheckProtocol
+        ):
+            return self._executor.return_container_options(self._return_container)
+        return None
 
     def _convert_outputs(
         self, output_data: dict[str, DataValue], output_schema: Schema
@@ -1155,9 +1208,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         if self._executor is not None:
             if not self._active:
                 return None
-            raw = self._executor.execute_callable(
-                self._function, {**data.as_dict(), **kwargs}, logger=logger
-            )
+            try:
+                raw = self._executor.execute_callable(
+                    self._function,
+                    {**data.as_dict(), **kwargs},
+                    executor_options=self._executor_return_options(),
+                    logger=logger,
+                )
+            except UnexpectedOutputContainer as exc:
+                raise self._output_container_error(exc) from exc
             return self._build_output_data(raw)
         if logger is not None:
             import warnings
@@ -1180,9 +1239,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         if self._executor is not None:
             if not self._active:
                 return None
-            raw = await self._executor.async_execute_callable(
-                self._function, {**data.as_dict(), **kwargs}, logger=logger
-            )
+            try:
+                raw = await self._executor.async_execute_callable(
+                    self._function,
+                    {**data.as_dict(), **kwargs},
+                    executor_options=self._executor_return_options(),
+                    logger=logger,
+                )
+            except UnexpectedOutputContainer as exc:
+                raise self._output_container_error(exc) from exc
             return self._build_output_data(raw)
         if logger is not None:
             import warnings

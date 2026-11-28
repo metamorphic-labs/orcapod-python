@@ -47,6 +47,10 @@ from orcapod.core.data_tags import (
 from orcapod.errors import InputValidationError, SemiJoinIgnoredColumnWarning
 from orcapod.utils import arrow_utils
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 
 def _ref(rows: Sequence[Mapping[str, Any]], tags: list[str], sid: str, **kw: Any):
     return op.sources.DictSource(rows, tag_columns=tags, source_id=sid, **kw)

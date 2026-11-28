@@ -25,7 +25,7 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.contexts import get_default_type_converter
-from orcapod.core.nodes.function_node import _build_record_id_preimage
+from orcapod.core.row_ids import entry_id_preimage
 from orcapod.core.operators import Batch, GroupBy, MergeJoin
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.errors import InputValidationError
@@ -321,7 +321,7 @@ class TestSyncChains:
         for tag, data in chain.result.iter_data():
             assert data.content_hash() is not None
             assert tag.content_hash() is not None
-            assert hasher.hash_table(_build_record_id_preimage(tag, data)) is not None
+            assert hasher.hash_table(entry_id_preimage(tag, data)) is not None
         assert chain.result.content_hash() is not None
         assert chain.result.pipeline_hash() is not None
         assert chain.result.as_table(all_info=True).num_rows > 0

@@ -18,6 +18,7 @@ import pytest
 from orcapod import PipelineJob
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import InputValidationError
 from orcapod.operators import Batch
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
@@ -29,6 +30,10 @@ from tests.test_core.operators.test_row_built_form import (
     _source_table,  # pyright: ignore[reportPrivateUsage]
     _with_source_x,  # pyright: ignore[reportPrivateUsage]
 )
+
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
 
 _UNCONVERTIBLE = pa.large_list(_NESTED)
 
@@ -949,10 +954,8 @@ def test_a_null_system_tag_raises_at_the_operator_as_main_does() -> None:
     assert ("end", "marked") not in observer.events
 
 
-def test_a_source_table_with_other_system_tags_is_not_its_rows() -> None:
-    """The source route's guard: an exact ``ArrowTableSource`` whose system tag is a
-    narrow integer has a table that is not its rows (they give ``int64``); a stock
-    source's system tags are what the rows give."""
+def test_a_source_refuses_a_non_text_custom_system_tag() -> None:
+    """Source-built system tags must be non-nullable text."""
     from orcapod.core.streams.base import system_tags_as_rows_give
 
     schema = pa.schema(
@@ -962,17 +965,17 @@ def test_a_source_table_with_other_system_tags_is_not_its_rows() -> None:
             pa.field("region", pa.int16(), nullable=False),
         ]
     )
-    narrow = ArrowTableSource(
-        pa.Table.from_pylist(
-            [{"k": 1, "x": 10, "region": 1}, {"k": 2, "x": 20, "region": 2}],
-            schema=schema,
-        ),
-        tag_columns=["k"],
-        tag_only_columns=True,
-        system_tag_columns=["region"],
-        source_id="s",
-    )
-    assert not system_tags_as_rows_give(narrow.as_table(columns={"system_tags": True}))
+    with pytest.raises(InputValidationError, match=r"'region'.*non-nullable string"):
+        ArrowTableSource(
+            pa.Table.from_pylist(
+                [{"k": 1, "x": 10, "region": 1}, {"k": 2, "x": 20, "region": 2}],
+                schema=schema,
+            ),
+            tag_columns=["k"],
+            tag_only_columns=True,
+            system_tag_columns=["region"],
+            source_id="s",
+        )
     stock = _plain()
     assert system_tags_as_rows_give(stock.as_table(columns={"system_tags": True}))
 
@@ -1204,6 +1207,9 @@ def _system_tag_outcome(case: str, asynchronous: bool) -> Any:
         node._stored_table_path,  # pyright: ignore[reportPrivateUsage]  # the raw LOG table
         record_id_column="_record_hash",
     )
+    if stored is not None:
+        # The insertion time differs between two runs; everything else is compared.
+        stored = stored.drop(["__recorded_at"])
     successor = job.nodes["b"].as_table(columns={"system_tags": True, "source": True})
     return (
         str(kept.schema),
@@ -1289,7 +1295,15 @@ def _held_job() -> tuple[Any, Any, Any]:
 def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> None:
     """Sync: a held node whose rows cannot make one table (source-info tokens of two
     shapes) is built where its successor reads it, after an independent node has run,
-    and raises the rows' ``ArrowTypeError``, as ``main`` rebuilt the rows there."""
+    and raises the rows' ``ArrowTypeError``, as ``main`` rebuilt the rows there.
+
+    Known difference (ITL-1491): this asserts today's behaviour. The async
+    orchestrator sends the same held rows on as they are, and the function node
+    records them (the test below), so the two paths differ on this route. The
+    build here types each token again from its value
+    (``StaticOutputOperatorPod._rows_to_table``); ITL-1491 makes it read the typed
+    token columns the rows carry, after which this run completes as the async one
+    does. On ``main`` the two paths differed for these rows too."""
     from orcapod.core.operators.static_output_pod import rows_on_read
 
     held, after, independent = _held_job()
@@ -1309,9 +1323,18 @@ def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> 
 
 def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
     """Async: the held rows are sent on as the plan took them, never built into one
-    table first: the function node after the held node starts every row and ends,
-    and the run raises the rows' ``ArrowTypeError``. ``main`` ca1c35d6 gives the same
-    events and error."""
+    table first: the function node after the held node starts every row and ends.
+
+    The rows are valid Arrow: their token column is a nested list whose values
+    cannot be typed again from Python values. The node records each row with the
+    typed token column it carries (ITL-1471: the stored columns are the ones the
+    instance id was made from), so the run completes and both rows are stored. On
+    ``main`` ca1c35d6 the events are the same and the run then raised the rows'
+    ``ArrowTypeError``, when the record typed the tokens again.
+
+    Known difference (ITL-1491): the sync orchestrator still builds the held rows
+    into one table at the successor's edge and raises there (the test above).
+    ITL-1491 makes that build read the typed token columns too."""
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     held, after, _ = _held_job()
@@ -1324,11 +1347,73 @@ def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
             self.events.append(("data", node_label))
 
     observer = DataStarts()
-    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
-        AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
+    AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
     assert observer.events == [
         ("start", "after"),
         ("data", "after"),
         ("data", "after"),
         ("end", "after"),
     ]
+    database = after._pipeline_database  # pyright: ignore[reportPrivateUsage]  # the stored rows
+    database.flush()
+    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v2"]
+    stored = database.get_all_records(path)
+    assert stored is not None and stored.num_rows == 2
+    assert stored.schema.field("_source_x").type == _UNCONVERTIBLE
+    assert stored.column("_source_x").to_pylist() == [[None, [[]]], [None, [[]]]]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_an_inactive_function_node_passes_rows_with_nested_tokens(
+    asynchronous: bool,
+) -> None:
+    """A node that looks a row up never types the row's tokens again (ITL-1471).
+
+    A function node finds a row by its instance id, which is made from the row's
+    source-info tokens. The tokens are read as the typed Arrow columns the row
+    carries, so rows with a nested token column (valid Arrow of a declared type,
+    whose values cannot be typed again from Python values: ``_unconvertible``) are
+    looked up without an error. The function is inactive: it is not called, gives no
+    output, and nothing is recorded. Review of PR #583: the lookup had typed the
+    tokens again from their values and raised ``ArrowTypeError`` before the function
+    was reached; ``main`` completes.
+    """
+    import asyncio
+
+    from orcapod import function_pod
+    from orcapod.channels import Channel
+    from orcapod.core.data_function import PythonDataFunction
+    from orcapod.core.function_pod import FunctionPod
+    from orcapod.core.nodes.function_node import FunctionJobNode
+
+    @function_pod(output_keys="y")
+    def never(x: int) -> int:
+        raise AssertionError("an inactive function must not be called")
+
+    pod = never.pod
+    assert isinstance(pod, FunctionPod)
+    data_function = pod.data_function
+    assert isinstance(data_function, PythonDataFunction)
+    data_function.set_active(False)
+    rows = _unconvertible()
+    database = InMemoryArrowDatabase()
+    node = FunctionJobNode(pod, rows, pipeline_database=database)
+
+    async def through_channels() -> list[Any]:
+        sent: Channel[Any] = Channel()
+        received: Channel[Any] = Channel()
+        for row in rows.iter_data():
+            await sent.writer.send(row)
+        await sent.writer.close()
+        await node.async_execute(sent.reader, received.writer)
+        return await received.reader.collect()
+
+    if asynchronous:
+        out = asyncio.run(through_channels())
+    else:
+        out = list(node.execute(rows).iter_data())
+    assert out == []
+    assert database.list_table_paths() == []
+    # Each row has its own instance id, read from the typed token column.
+    ids = [node.compute_instance_id(tag, data) for tag, data in rows.iter_data()]
+    assert len(set(ids)) == 2

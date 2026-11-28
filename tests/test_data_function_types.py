@@ -34,6 +34,8 @@ from orcapod.core.data_function import (
     declaration_for,
 )
 from orcapod.core.datagrams import Data
+from orcapod.core.executors import LocalPythonFunctionExecutor
+from orcapod.core.executors.ray import RayExecutor
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.data_function_types import snapshot_path
 from orcapod.core.result_cache import COMMON_RESULT_COLUMNS
@@ -148,6 +150,18 @@ def test_the_python_function_type_is_v1_rev1() -> None:
         declaration_for("python.function.v0")
 
 
+def test_the_declared_executor_type_meaning_lists_the_stored_values() -> None:
+    column = next(c for c in PYTHON_FUNCTION.execution if c.name == "executor_type")
+    declared_values = column.meaning.split("(", 1)[1].removesuffix(")").split(", ")
+    # Reading the identifier does not require initializing a Ray executor.
+    ray_executor = RayExecutor.__new__(RayExecutor)
+    assert set(declared_values) == {
+        LocalPythonFunctionExecutor().executor_type_id,
+        ray_executor.executor_type_id,
+        "none",
+    }
+
+
 @pytest.mark.parametrize("name", list(FUNCTIONS))
 def test_the_data_function_reports_exactly_the_declared_columns(name: str) -> None:
     fn, keys = FUNCTIONS[name]
@@ -228,7 +242,7 @@ def test_a_job_writes_its_result_and_pipeline_tables_at_the_declared_paths(
     # The pipeline table carries no revision.
     assert pipeline[0][-(len(uri) + 2) : -2] == uri[:-1] + ("python.function.v1",)
     assert pipeline[0][-2].startswith("schema:")
-    assert pipeline[0][-1] == PIPELINE_DB_SCHEMA_VERSION == "pdb_v1"
+    assert pipeline[0][-1] == PIPELINE_DB_SCHEMA_VERSION == "pdb_v2"
     assert "rev1" not in pipeline[0]
     assert _stored_columns(database, result[0]) == _expected_result_columns(
         PythonDataFunction(fn, output_keys=keys)
@@ -278,8 +292,11 @@ def _run_and_fingerprint(name: str) -> dict[str, Any]:
         "node_pipeline_hash": node.pipeline_hash().to_string(),
         "rows": rows,
         "pipeline_path": pipeline_path,
-        "pipeline_record_ids": sorted(
-            str(record_id) for record_id in pipeline_table.column("_id").to_pylist()
+        # A record id holds the result id, which is random: the instance ids are
+        # compared (ITL-1471).
+        "pipeline_instance_ids": sorted(
+            str(instance)
+            for instance in pipeline_table.column("__pipeline_instance_id").to_pylist()
         ),
         "result_path": result_path,
     }

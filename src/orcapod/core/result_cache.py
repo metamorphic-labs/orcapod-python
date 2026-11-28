@@ -60,7 +60,7 @@ COMMON_RESULT_COLUMNS: tuple[StoredColumn, ...] = (
         datetime,
         "timestamp[us, tz=UTC]",
         True,
-        "when the result was stored; the newest wins when two rows share an input",
+        "when the result was stored; the newest wins, with ties broken by the greater result id",
     ),
     StoredColumn(
         constants.DATA_CONTEXT_COL,
@@ -233,7 +233,8 @@ class ResultCache:
         *additional_constraints* can narrow the match further (e.g. by
         function variation hash for stricter cache invalidation).
 
-        If multiple records match, the most recent (by timestamp) wins.
+        If multiple records match, the newest stored timestamp wins. On a tie,
+        the greater result id (UUIDv7, compared as bytes) wins.
 
         Args:
             input_data: The input data whose content hash is the
@@ -281,12 +282,12 @@ class ResultCache:
         if result_table.num_rows > 1:
             logger.info(
                 "Cache conflict resolution: %d records for constraints %s, "
-                "taking most recent",
+                "taking newest timestamp, with ties broken by the greater result id",
                 result_table.num_rows,
                 list(constraints.keys()),
             )
             result_table = result_table.sort_by(
-                [(constants.POD_TIMESTAMP, "descending")]
+                [(constants.POD_TIMESTAMP, "descending"), (RECORD_ID_COL, "descending")]
             ).take([0])
 
         record_id_bytes = result_table.to_pylist()[0][RECORD_ID_COL]
@@ -400,6 +401,69 @@ class ResultCache:
                 raise OrcapodDatabaseWriteError(
                     self._result_database.base_path, flush=True
                 ) from exc
+
+    def store_if_missing(
+        self,
+        input_data: DataProtocol,
+        output_data: DataProtocol,
+        variation_datagram: "DatagramProtocol",
+        execution_datagram: "DatagramProtocol",
+        *,
+        data_context_key: str,
+    ) -> DataProtocol | None:
+        """Store ``output_data`` unless a result for ``input_data`` is stored (ITL-1503).
+
+        The conditional write: the table is looked up as ``lookup`` does (input
+        data hash and data context; committed and queued rows alike). When a
+        result is there, nothing is written and that result is returned: the
+        caller discards its own and uses the stored one. Otherwise
+        ``output_data`` is stored.
+
+        The guarantee, and its whole extent: on one event loop or one thread,
+        over one database object and its views, two computations for one input
+        data hash and data context store one result, when no conditional write
+        for that table is made from inside a callback that runs between another
+        conditional write's lookup and the end of its commit (a schema guard
+        during a commit, or a custom logical-type encoder during serialization,
+        are examples). The lookup and the write are synchronous with no await
+        between them, and nothing more: there is no lock.
+
+        Not covered:
+
+        - several threads on one database object (two jobs run in threads, or a
+          batch commit of the table that overlaps the lookup);
+        - a conditional write for the table made from inside a callback that
+          runs between another conditional write's lookup and the end of its
+          commit. Two examples: a schema guard during a commit (the write's own
+          flush or a separate one; the rows being committed are in neither the
+          queue nor the table), and a custom logical-type encoder while the row
+          is serialized (after the lookup missed, before the row is queued);
+        - another database handle or another process;
+        - an unconditional ``store`` (a function with its own result database,
+          called with ``skip_cache_lookup=True``, stores another row).
+
+        Args:
+            input_data: The input data (its content hash is the key).
+            output_data: The computed output data.
+            variation_datagram: Function variation metadata as a Datagram.
+            execution_datagram: Execution environment metadata as a Datagram.
+            data_context_key: Key of the caller's data context.
+
+        Returns:
+            The result already stored, as ``lookup`` returns it, or ``None`` when
+            ``output_data`` was stored.
+        """
+        stored = self.lookup(input_data, data_context_key=data_context_key)
+        if stored is not None:
+            return stored
+        self.store(
+            input_data,
+            output_data,
+            variation_datagram,
+            execution_datagram,
+            data_context_key=data_context_key,
+        )
+        return None
 
     def get_all_records(
         self, data_context_key: str, include_system_columns: bool = False

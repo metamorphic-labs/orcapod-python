@@ -39,8 +39,8 @@ An operator may add a tag, never data. A tag labels rows; it is not a data value
 [`AddTags`](#addtags) can add tags with constant values while every data column passes through
 unchanged.
 
-The filters are the operators that read data columns: `Filter` and `PolarsFilter` evaluate
-their conditions on values, and `DropNulls` reads only whether a value is present (its
+The filters are the operators that read data columns: `Filter` evaluates its condition on
+values (as does `PolarsFilter`, which is not recommended: see [PolarsFilter](#polarsfilter)), and `DropNulls` reads only whether a value is present (its
 validity), never the value. They decide which rows exist; none synthesizes a value.
 
 No operator carries its inputs' meta columns: the `__`-prefixed columns, such as a cached
@@ -263,7 +263,8 @@ The rules:
   result's table. A stream reports one data context, and so do the rows it yields one by
   one (`iter_data`), as for any stream whose table holds rows of several (ITL-1359). Only the default
   data context ships, so this matters only for a stream built in another one. A known limitation
-  (ITL-1339): some operators (`PolarsFilter` and `MergeJoin`, likely `Join` and
+  (ITL-1339): some operators (`MergeJoin` and `PolarsFilter`, which is not recommended
+  for another reason, see [PolarsFilter](#polarsfilter); likely `Join` and
   `SemiJoin` too) return their rows in the default data context whatever their input's,
   so in another data context the rows of a branch through one of them match nothing
   beside a branch that kept its context.
@@ -784,10 +785,35 @@ The conditions are:
 | two columns | `col(a) < col(b)` and the other comparisons | two columns of one Arrow type |
 | combined | several arguments and keywords (all hold), `a & b`, `a \| b`, `~a` | |
 
-Write `&`, `|` and `~`, never `and`, `or` and `not`, and put each comparison in parentheses
-when you combine it, as in Polars. Python cannot refuse `and` between two conditions:
-`(col("t") > 1.0) and (col("t") < 2.0)` silently keeps only the second. A list given as a keyword value is
-refused: membership is `col(c).is_in([...])`.
+A condition has no Python truth value. Testing it with `if`, `not` or `bool()` raises
+`TypeError`, as does a chained comparison such as `1.0 <= col("t") <= 2.0` or using a
+condition as the left operand of `and` or `or`. Expressions such as `True and c` and
+`False or c` return `c` directly. To combine conditions, use `&`, `|` and `~` with each
+comparison in parentheses, or pass separate conditions to `filter()` to require all of
+them. Use `col("t").between(1.0, 2.0)` for a range that includes both ends.
+
+```python
+try:
+    recorded.filter(1.0 <= col("t") <= 2.0)
+except TypeError as error:
+    print(str(error).split(".")[0])
+# Condition has no truth value
+
+bounds = (col("t") >= 1.0) & (col("t") <= 2.0)
+assert kept(recorded.filter(bounds)) == kept(recorded.filter(col("t").between(1.0, 2.0)))
+assert kept(recorded.filter(bounds)) == kept(recorded.filter(col("t") >= 1.0, col("t") <= 2.0))
+print(kept(recorded.filter(bounds)))
+# [('s1', 7), ('s1', 9)]
+
+either_session = (col("session") == "s1") | (col("session") == "s2")
+print(kept(recorded.filter(either_session & ~(col("unit") == 9))))
+# [('s1', 3), ('s1', 7), ('s2', 3), ('s2', 7)]
+
+assert (True and bounds) is bounds
+assert (False or bounds) is bounds
+```
+
+Use `col(c).is_in([...])` to test membership in a list.
 
 A condition that no row can satisfy is kept as written and keeps zero rows: Orcapod does not
 try to tell a contradiction (there is no general way). Naming one column twice in one call
@@ -869,15 +895,9 @@ print(recorded.filter(col("t") >= 1.0).head(3).as_table().num_rows)
 # 2
 ```
 
-**`where` and `filter`.** A source that can restrict what it reads (`where`, see
-[Restricting a source](sources.md#restricting-a-source-versus-filtering-in-the-pipeline)) takes the same equalities. The two give the
-same rows, except on a float column for a NaN or a signed zero (`where` uses the table
-system's equality, `filter` Orcapod's: a NaN may match no row under `where` and matches the
-NaN rows under `filter`) and on a source with a `limit` (the limit then counts the matching
-rows). `where` is not a step of the pipeline: it changes no hash, while `filter` is a
-node whose condition enters the identity of every step after it. Explore with `where`; keep
-the selection with `filter` when it becomes part of what the pipeline computes. `where`
-takes only equalities today and refuses any other condition, pointing to `filter`.
+**`where` and `filter`.** `SpiralDBTableSource.where` restricts the rows read from the source.
+`filter` adds a pipeline node whose condition enters the identity of every step after it.
+For supported equalities and ranges, see [Restricting a source](sources.md#restricting-a-source-versus-filtering-in-the-pipeline).
 
 **What is read, and what is applied after reading.** `stream.explain()` (new in this
 release) says, for every source a stream reads, what the source applies itself (its `where`
@@ -895,50 +915,52 @@ print(recorded.filter(col("t") >= 1.0, label="late").drop_nulls(["rate"]).explai
 
 Every source gets one block, in source-name order, and the steps are listed from the source
 upward. A join's unmatched rows are listed too (`rows without a match in 'probes' are
-dropped (Join)`), as are `SemiJoin`, `MergeJoin`, `Rejoin`, `DropNulls`, `PolarsFilter`,
+dropped (Join)`), as are `SemiJoin`, `MergeJoin`, `Rejoin`, `DropNulls`,
+`PolarsFilter` (not recommended: see [PolarsFilter](#polarsfilter)),
 `Batch(drop_partial_batch=True)` and `Pick` or `Index` when a miss drops the row. A derived or
 cached source cannot say what it reads (it reads rows stored earlier): its block says "not
 known for this source kind". The result is an `Explanation` (`orcapod.types`), plain data
 whose `text()` is what it prints. The preview of a `Filter` directly over a source shows the
 same split in one line of its header.
 
-When `filter` cannot say what you need (arithmetic between columns, a string function), use
+When `filter` cannot say what you need (arithmetic between columns, a string function),
+compute the test as a column in a function pod and filter on that column. `PolarsFilter`
+takes such an expression directly, but it is not recommended: see the warning in
 [PolarsFilter](#polarsfilter).
 
 ### PolarsFilter
+
+!!! warning "Not recommended: it can change the values it passes through"
+    `PolarsFilter` passes every column of its input through Polars, also the columns its
+    predicates do not read, and Polars does not hold every Arrow type exactly. The known
+    case: a `date64` value that is not at midnight comes back at midnight, with no error
+    (ITL-1296, not fixed). A `decimal256` column, read by a predicate or not, makes Polars
+    panic: the filter raises `pyo3_runtime.PanicException`, which is a `BaseException` and not
+    an `Exception`, so `except Exception` does not catch it (`except BaseException` does),
+    and no row is returned. Use [`Filter`](#filter), which passes every value through as it
+    is. Building a `PolarsFilter` (the class, or `stream.polars_filter(...)`) issues
+    `PolarsFilterWarning` (`orcapod.errors`) every time, and loading a saved job issues it
+    once for each `PolarsFilter` the job holds. The samples below issue it when they run.
 
 !!! warning "Provisional"
     `PolarsFilter` is a [provisional operator](#provisional-operators): its identity is not
     frozen with data context v1 and may change in a later release (ITL-1247). Building one
     issues `ProvisionalHashWarning` once per process.
 
-Filter rows using Polars expressions:
-
-```python
-import polars as pl
-from orcapod.operators import PolarsFilter
-
-filt = PolarsFilter(predicates=[pl.col("age") > 10])
-filtered = filt.process(source)
-for tag, pkt in filtered:
-    print(f"{tag.as_dict()} -> {pkt.as_dict()}")
-# {'subject_id': 'mouse_01'} -> {'age': 12, 'weight': 25.3}
-# {'subject_id': 'mouse_03'} -> {'age': 15, 'weight': 27.8}
-```
-
-You can also filter by exact values using `constraints`:
-
-```python
-filt = PolarsFilter(constraints={"subject_id": "mouse_01"})
-print(filt(source).as_table().to_pylist())
-# [{'subject_id': 'mouse_01', 'age': 12, 'weight': 25.3}]
-```
+`PolarsFilter(predicates=[...], constraints={...})`, or `stream.polars_filter(*predicates,
+**constraints)`, keeps the rows that satisfy every Polars expression in `predicates` and
+equal every value in `constraints`. An equality or a comparison of a column with a value is
+written with [`Filter`](#filter) instead: `stream.filter(col("age") > 10)`,
+`stream.filter(subject_id="mouse_01")`.
 
 An expression predicate is part of the filter's identity, so a filtered stream can feed a
 join, a function pod or a `PipelineJob`. Two filters written with the same expression share
 their hashes, even when the expression is spelled differently:
 
 ```python
+import polars as pl
+from orcapod.operators import PolarsFilter
+
 by_operator = PolarsFilter(predicates=[pl.col("age") > 10])(source)
 by_method = source.polars_filter(pl.col("age").gt(10))
 print(by_operator.pipeline_hash() == by_method.pipeline_hash())
@@ -980,7 +1002,7 @@ except ValueError as exc:
 each named column from `T | None` to `T`. `DropNulls()`, with no names, does this for every
 tag and data column (see [Every column](#every-column) below). Use it when a column is nullable by specification
 but a function needs a value: a pod whose parameter is a plain `int` refuses an `int | None`
-column, and `Filter` or `PolarsFilter` can drop the null rows but leave the type as it was.
+column, and `Filter` can drop the null rows but leaves the type as it was.
 
 ```python
 import pyarrow as pa
@@ -1216,7 +1238,7 @@ November 19, 2026). Each name maps to the issue that decides its identity or out
 | `MapTags` | its rename rules for data-tags (ITL-1018) |
 | `MapColumns` | its behaviour with data-tags (ITL-1022) |
 | `Pick`, `Index` | the policy for a miss, which changes the output (ITL-439) |
-| `PolarsFilter` | whether the order of its predicates belongs to its identity (ITL-1247) |
+| `PolarsFilter` (not recommended: see [PolarsFilter](#polarsfilter)) | whether the order of its predicates belongs to its identity (ITL-1247) |
 | `TagBy`, `AddTags` | days old, their identities just changed: the review of the tag operators (ITL-1290) |
 | `Filter` | new: a row filter over a condition, provisional until its first use has shown what the canonical form of a condition must hold; its spelling and literal rule await the developer's decision (ITL-1374) |
 | `Rejoin` | new: puts the branches of one stream back together by matching system tags (ITL-1336); its matching rule changed in this release (ITL-1355) |
@@ -1228,7 +1250,10 @@ column selections (`SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`,
 What you get with a provisional operator: the same results as with any other operator, a
 warning, and, should a later release change the operator's identity, a recomputation of its
 steps (and of every step downstream) instead of reuse; nothing stored is lost or wrong.
-Building one, directly, through a stream method such as `group_by` or `polars_filter`, or by
+One provisional operator has a fault of its own, apart from being provisional:
+`PolarsFilter` is not recommended, because it can change the values it passes through (see
+[PolarsFilter](#polarsfilter)).
+Building one, directly, through a stream method such as `group_by` or `filter`, or by
 loading a saved job that holds one, issues `orcapod.errors.ProvisionalHashWarning` once per
 operator per process. It reads, for example, `GroupBy is provisional: its identity is not
 frozen with data context v1 and may change in a later release. ...` and points to this
@@ -1340,7 +1365,9 @@ operators or function pods.
 Every stream also exposes the operators as methods, which reads well when chaining:
 `join`, `semi_join`, `batch`, `group_by`, `select_tag_columns`, `select_data_columns`,
 `drop_tag_columns`, `drop_data_columns`, `select_columns`, `drop_columns`, `map_tags`,
-`map_data`, `map_columns`, `add_tags`, `filter`, `polars_filter`, `drop_nulls`, `pick` and `index`.
+`map_data`, `map_columns`, `add_tags`, `filter`, `drop_nulls`, `pick` and `index`. There is a `polars_filter`
+method too; it is not recommended, because it can change the values it passes through, and it
+warns at every call: see [PolarsFilter](#polarsfilter).
 
 ```python
 adults = subjects.join(measurements).filter(col("age") > 10)

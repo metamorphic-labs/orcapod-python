@@ -3,7 +3,7 @@ import functools
 import itertools
 import json
 from collections.abc import Callable, Collection, Mapping, Sequence
-from typing import Any, ClassVar
+from typing import Any, ClassVar, get_args
 
 import polars as pl
 import pyarrow as pa
@@ -44,7 +44,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
 )
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, ContentHash, DataValue, Schema
+from orcapod.types import ColumnConfig, ContentHash, DataType, DataValue, Schema
 from orcapod.utils import arrow_utils, schema_utils
 
 # The row-number columns of the frames Polars joins (``_inner_join``); a tag, so a
@@ -429,7 +429,7 @@ class Join(NonZeroInputOperator):
         n_char = self.orcapod_config.hashing.system_tag_n_char
         ordered_streams = self.order_input_streams(*streams)
 
-        system_tag_fields: dict[str, type] = {}
+        system_tag_fields: dict[str, DataType] = {}
         for idx, stream in enumerate(ordered_streams):
             stream_tag_schema, _ = stream.output_schema(columns={"system_tags": True})
             for col_name, col_type in stream_tag_schema.items():
@@ -439,7 +439,18 @@ class Join(NonZeroInputOperator):
                         f"{stream.pipeline_hash().to_hex(n_char)}:{idx}"
                     )
                     system_tag_fields[new_name] = col_type
-        return Schema(system_tag_fields)
+        nullable = arrow_utils.sorted_system_tag_nullability(
+            {
+                name: kind is type(None) or type(None) in get_args(kind)
+                for name, kind in system_tag_fields.items()
+            }
+        )
+        return Schema(
+            {
+                name: kind | None if nullable[name] else kind
+                for name, kind in system_tag_fields.items()
+            }
+        )
 
     def static_process(self, *streams: StreamProtocol) -> StreamProtocol:
         """Join the streams on their shared tag columns.

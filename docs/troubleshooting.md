@@ -12,6 +12,18 @@ it is.
 
 These are raised at the line that makes the mistake, before any data is processed.
 
+### `TypeError: Condition has no truth value`
+
+**Cause.** A comparison built from `col()` describes which rows to keep. Python
+asks for a single Boolean in a chained comparison such as `1 <= col("t") <= 5`, in
+`and`, `or` and `not`, and in `if condition` or `bool(condition)`.
+
+**Fix.** Use `stream.filter(col("t").between(1, 5))` for an inclusive range or
+`stream.filter(col("t") >= 1, col("t") <= 5)` for separate comparisons. To combine
+comparisons explicitly, parenthesize each and use `&`, `|` or `~`. For a source's
+`where()`, pass separate equality keywords. To check whether a condition has any
+requirements, use `condition.is_empty`.
+
 ### `ValueError: tag_columns not found in table: {...}. Available columns: [...]`
 
 **Cause.** A name in `tag_columns` is not a column of the data.
@@ -114,7 +126,7 @@ the message names the first offending column:
   `pa.table(...)` without a schema has nullable columns.
 - `column 'q' is not a parameter of the function`: the stream has a column the function
   does not take. `pod(stream)` drops such columns for you (it adds a `SelectDataColumns`
-  step), so you see this only from `pod.process(stream)`, from `pod(stream, strict=True)`,
+  step), so you see this only from `pod.process(stream)`, from `pod(stream, strict_columns=True)`,
   or when **no** column of the stream is a parameter.
 
 **Fix.** For a missing column, rename with `stream.map_data({"old": "new"})`. For a type
@@ -140,14 +152,16 @@ are *list-valued tag columns*, the stream came from `batch`; group before batchi
 
 ### `ValueError: Cannot hash the Polars expression '...' for an Orcapod identity`
 
-**Cause.** A `polars_filter` predicate calls a Python function (`map_elements`,
+**Cause.** A `polars_filter` predicate (`polars_filter` is not recommended, see the fix) calls a Python function (`map_elements`,
 `map_batches`) or uses another expression Orcapod cannot identify. The message lists what it
 can. Ordinary comparisons such as `pl.col("x") > 1` work everywhere.
 
 **Fix.** Use `filter` (`stream.filter(column=value)`, `stream.filter(col("x") > 1)`), which
 takes equalities, comparisons, `is_in`, `between` and null tests and needs no Polars
 expression, or compute a boolean column in a function pod and filter on it. See
-[Filter](concepts/operators.md#filter) and [PolarsFilter](concepts/operators.md#polarsfilter).
+[Filter](concepts/operators.md#filter). `polars_filter` is not recommended: it can change
+the values it passes through, and warns every time one is built; see the warning in
+[PolarsFilter](concepts/operators.md#polarsfilter).
 
 ### `AttributeError: 'PipelineJob' has no attribute 'show_graph'. Available node labels: [...]`
 
@@ -166,6 +180,12 @@ for a text listing, or `job.diagram().save("pipeline.html")` for a page; the sam
 **Fix.** Correct the path, or use `op.Directory` for a folder.
 
 ## Errors when running a job
+
+### An async function pod uses too much memory
+
+Lower the pod's `max_concurrency` if several simultaneous calls hold more memory than the
+run can spare. For example, use `PodConfig(max_concurrency=1)` to allow one call at a time
+for that pod. See [Limiting in-flight calls](concepts/function-pods.md#limiting-in-flight-calls).
 
 ### `ValueError: PipelineJob.run() requires a database.`
 
@@ -345,11 +365,18 @@ on a worker thread. If that cleanup runs while the interpreter is shutting down,
 cannot take the GIL and never finishes, and Arrow's thread pool waits for it forever. Your data
 is not affected: the hang happens after every write has completed.
 
+Any column type written in Python (a `pyarrow.ExtensionType` subclass) has the same problem,
+whatever the filesystem: Arrow's worker threads hold references to the types of the columns they
+read, and destroying the last reference to such a type takes the GIL.
+
 **What Orcapod does.** `DeltaTableDatabase` and `DeltaTableSource` read **local** Delta tables
-through a native pyarrow filesystem, so they are not affected. Tables on cloud storage
+through a native pyarrow filesystem, and the column types of Orcapod's logical types live until
+the process ends, so reading them is not affected. Tables on cloud storage
 (`s3://`, `gs://`, `az://` and similar) still use deltalake's reader and can still hang at exit.
 Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table()` or
-`to_pyarrow_dataset()` is affected too, whatever the storage.
+`to_pyarrow_dataset()` is affected too, whatever the storage. So is a logical type of your own whose
+Arrow type you wrote as a class: build it with `make_arrow_extension_type`, which keeps it alive
+([Logical type identifiers](concepts/logical-type-identifiers.md#declaring-the-identifier-of-your-own-type)).
 
 **Workarounds.**
 
@@ -360,7 +387,8 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
   `atexit` handlers and other cleanup, so close files and flush databases first.
 - When reading local Delta tables directly with deltalake, pass a native filesystem. Resolve
   `dt.table_uri` first: it is percent-encoded, and newer deltalake versions return a
-  `file://` URI.
+  `file://` URI. A native filesystem avoids Python filesystem cleanup at shutdown.
+  Handwritten Arrow extension types still require separate lifetime management.
 
   For example, with a small local Delta table opened as `dt`:
 

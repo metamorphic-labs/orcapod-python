@@ -6,9 +6,10 @@ import hashlib
 import json as _json
 import logging
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from functools import partial
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from orcapod.types import Schema
 from orcapod.logical_types.canonical_form import (
@@ -26,7 +27,13 @@ from orcapod.logical_types.identifier import (
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
+    from orcapod.pipeline.composite_observer import CompositeObserver
+    from orcapod.pipeline.logging_observer import LoggingObserver
+    from orcapod.pipeline.status_observer import StatusObserver
+    from orcapod.protocols.database_protocols import (
+        ArrowDatabaseProtocol,
+        DatabaseRegistryProtocol,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -350,10 +357,11 @@ OPERATOR_REGISTRY: dict[str, type] = _build_operator_registry()
 DATA_FUNCTION_REGISTRY: dict[str, type] = _build_data_function_registry()
 
 
-_observer_registry: dict[str, Any] | None = None
+_Observer: TypeAlias = "StatusObserver | LoggingObserver | CompositeObserver"
+_observer_registry: dict[str, type[_Observer]] | None = None
 
 
-def _get_observer_registry() -> dict[str, Any]:
+def _get_observer_registry() -> dict[str, type[_Observer]]:
     global _observer_registry
     if _observer_registry is None:
         from orcapod.pipeline.status_observer import StatusObserver
@@ -361,9 +369,9 @@ def _get_observer_registry() -> dict[str, Any]:
         from orcapod.pipeline.composite_observer import CompositeObserver
 
         _observer_registry = {
-            "status": lambda cfg, reg: StatusObserver.from_config(cfg, reg),
-            "logging": lambda cfg, reg: LoggingObserver.from_config(cfg, reg),
-            "composite": lambda cfg, reg: CompositeObserver.from_config(cfg, reg),
+            "status": StatusObserver,
+            "logging": LoggingObserver,
+            "composite": CompositeObserver,
         }
     return _observer_registry
 
@@ -382,14 +390,46 @@ def resolve_observer_from_config(config: dict, db_registry: dict | None = None) 
     Raises:
         ValueError: If observer type is unknown.
     """
+    return _prepare_observer_from_config(
+        cast("dict[str, object]", config),
+        cast("dict[str, object] | None", db_registry),
+    )()
+
+
+def _prepare_observer_from_config(
+    config: dict[str, object], db_registry: dict[str, object] | None
+) -> Callable[[], _Observer]:
+    """Resolve and check a config before constructing any observers."""
+    from orcapod.pipeline._observer_database import require_observer_database
+    from orcapod.pipeline.composite_observer import CompositeObserver
+
     registry = _get_observer_registry()
-    obs_type = config.get("type")
+    obs_type = cast(str, config.get("type"))
     if obs_type not in registry:
         raise ValueError(
             f"Unknown observer type: {obs_type!r}. "
             f"Known types: {sorted(registry.keys())}"
         )
-    return registry[obs_type](config, db_registry)
+    observer_class = registry[obs_type]
+    if issubclass(observer_class, CompositeObserver):
+        children = prepare_composite_observers(config, db_registry)
+        return lambda: observer_class(*(build() for build in children))
+
+    db_config = cast("dict[str, object]", config["database"])
+    database = cast(
+        "ArrowDatabaseProtocol",
+        resolve_database_from_config(db_config, db_registry=db_registry),
+    )
+    require_observer_database(database)
+    return partial(observer_class, database)
+
+
+def prepare_composite_observers(
+    config: dict[str, object], db_registry: dict[str, object] | None
+) -> list[Callable[[], _Observer]]:
+    """Resolve every child before any logging observer installs capture."""
+    children = cast("list[dict[str, object]]", config["observers"])
+    return [_prepare_observer_from_config(child, db_registry) for child in children]
 
 
 def _ensure_registries() -> None:
@@ -442,8 +482,7 @@ def resolve_database_from_config(
         return root_db.at(*config["path"])
     if db_type not in DATABASE_REGISTRY:
         raise ValueError(
-            f"Unknown database type: {db_type!r}. "
-            f"Known types: {sorted(DATABASE_REGISTRY.keys())}"
+            f"Unknown database type. Known types: {sorted(DATABASE_REGISTRY.keys())}"
         )
     if db_type == "in_memory":
         logger.warning(
@@ -452,6 +491,82 @@ def resolve_database_from_config(
         )
     cls = DATABASE_REGISTRY[db_type]
     return cls.from_config(config)
+
+
+#: The kinds of connector a message may name.
+_CONNECTOR_KINDS = ("sqlite", "postgresql", "spiraldb")
+
+
+def saved_database_kind(config: Any) -> str:
+    """The kind of a saved database configuration, for a message: never the saved text.
+
+    Args:
+        config: A saved database configuration.
+
+    Returns:
+        A key of ``DATABASE_REGISTRY``, or ``"unknown database kind"``.
+    """
+    if isinstance(config, dict):
+        kind = cast("dict[str, Any]", config).get("type")
+        for known in DATABASE_REGISTRY:
+            if kind == known:
+                return known
+    return "unknown database kind"
+
+
+def saved_source_kind(config: Any) -> str:
+    """The kind of a saved source configuration, for a message: never the saved text.
+
+    Args:
+        config: A saved source configuration.
+
+    Returns:
+        The ``SOURCE_KIND`` of one of Orcapod's sources, or ``"unknown source kind"``.
+    """
+    from orcapod.core.sources.db_table_source import DBTableSource
+    from orcapod.core.sources.polling_source import PollingSource
+
+    if isinstance(config, dict):
+        kind = cast("dict[str, Any]", config).get("source_type")
+        for known in (
+            *SOURCE_REGISTRY,
+            # Written by a save, rebuilt by no load.
+            DBTableSource.SOURCE_KIND,
+            PollingSource.SOURCE_KIND,
+        ):
+            if kind == known:
+                return known
+    return "unknown source kind"
+
+
+def saved_connector_kind(config: Any) -> str | None:
+    """The kind of connector a saved database configuration is over, or ``None``.
+
+    A connector is not rebuilt from a saved file: the user supplies it at load
+    (developer, 2026-11-22, ITL-1391). Never the saved text.
+
+    Args:
+        config: A saved database configuration, or ``None``.
+
+    Returns:
+        ``"sqlite"``, ``"postgresql"`` or ``"spiraldb"``, ``"unknown connector kind"``
+        for anything else the file says, or ``None`` for a database that is not over
+        a connector.
+    """
+    from orcapod.databases.connector_arrow_database import CONNECTOR_DATABASE_TYPE
+
+    if not isinstance(config, dict):
+        return None
+    saved = cast("dict[str, Any]", config)
+    if saved.get("type") != CONNECTOR_DATABASE_TYPE:
+        return None
+    connector = saved.get("connector")
+    if isinstance(connector, dict):
+        kind = cast("dict[str, Any]", connector).get("connector_type")
+        for known in _CONNECTOR_KINDS:
+            if kind == known:
+                return known
+    return "unknown connector kind"
 
 
 def resolve_operator_from_config(config: dict[str, Any]) -> Any:

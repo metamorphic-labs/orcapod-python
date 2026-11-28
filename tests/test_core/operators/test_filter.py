@@ -9,6 +9,7 @@ read back through the stream's methods. The kernel's semantics term by term are 
 from __future__ import annotations
 
 import itertools
+import json
 import struct
 import warnings
 from decimal import Decimal
@@ -390,6 +391,19 @@ class TestConfig:
         assert rebuilt.condition == condition
         assert rebuilt.content_hash() == op.content_hash()
         assert _kept(rebuilt(_units())) == _kept(op(_units()))
+
+    def test_equalities_are_saved_in_canonical_order(self):
+        """The saved form never follows the order given (ITL-998, ITL-1271); a config
+        saved in the order given loads to the same operator."""
+        forward = Filter(Condition.of(session="s1", probe="imec0"))
+        backward = Filter(Condition.of(probe="imec0", session="s1"))
+
+        assert json.dumps(forward.to_config()) == json.dumps(backward.to_config())
+        assert list(forward.to_config()["config"]["condition"]) == ["probe", "session"]
+        earlier = forward.to_config()
+        earlier["config"]["condition"] = {"session": "s1", "probe": "imec0"}
+        rebuilt = _build_operator_registry()["Filter"].from_config(earlier)
+        assert rebuilt.content_hash() == forward.content_hash()
 
 
 class TestProvisional:

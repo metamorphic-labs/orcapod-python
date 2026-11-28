@@ -55,9 +55,14 @@ from ..operators.several_items import (
     presentation,
 )
 
-pytestmark = pytest.mark.filterwarnings(
-    "ignore::orcapod.core.data_tags.DataTagMaterializationWarning"
-)
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore::orcapod.core.data_tags.DataTagMaterializationWarning"
+    ),
+    # PolarsFilter is built here on purpose; the warning of every construction is tested in
+    # test_polars_filter_warning.py (ITL-1296).
+    pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning"),
+]
 
 # The stream methods are on the stream classes, not on ``StreamProtocol``.
 Build = Callable[[ArrowTableSource, Sequence[Any]], StreamProtocol]

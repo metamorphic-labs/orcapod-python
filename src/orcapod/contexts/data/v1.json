@@ -6,17 +6,14 @@
     "previous": "std:v0.1:default",
     "file_hasher": {
         "_class": "orcapod.hashing.file_hashers.FileHasher",
-        "_config": {
-            "algorithm": "sha256"
-        }
+        "_config": {}
     },
     "directory_hasher": {
         "_class": "orcapod.hashing.directory_hashers.BasicDirectoryHasher",
         "_config": {
             "file_hasher": {
                 "_ref": "file_hasher"
-            },
-            "algorithm": "sha256"
+            }
         }
     },
     "type_converter": {
@@ -253,19 +250,19 @@
                 "digest": "373ad66e7e9cc3a411708a4470a30d2176aedf9c9ba1ecdbe1111359ceb25867"
             },
             {
-                "date": "2026-11-23",
+                "date": "2026-11-26",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "af19c4b5bafcd7428011db8bf5ddb125f8b59083b7c085613411eae36e9e23c2"
+                    "pipeline-02.json": "fcc0de37838f5d59003c953c5e3650b45495ea2cad13800e68247ebb265a6958"
                 },
                 "previous": "373ad66e7e9cc3a411708a4470a30d2176aedf9c9ba1ecdbe1111359ceb25867",
-                "digest": "57215540370eca6c81d5170c471e0d979482ee04235e47e4bfd05317936f2a27"
+                "digest": "5799c75e5b382a8699151a44822fdb9b608b77763f8cae47b96e79d72caedb44"
             }
         ],
         "provisional": {
             "arrow.json": "a44e0f9b4312a2ac5edeedf9f3e35bda43a3ee012bd7c5a1e66f7269eaacd05e",
             "datagram.json": "7b5331ac948712ed3cebf79d3e6d33aafbe594f832386e1cdcc1b7e24e8ccc58",
-            "pipeline.json": "5d6f9319f17368d8318064a5f2e6fec83f910b570bdfe2af63c2fcf59815d50d",
+            "pipeline.json": "0d4d32606de1a40e9795b6b3a581835f003ac2fb6ebfe7d5cf1827b6ff6f5ab5",
             "schema.json": "4177b86267f0384ce5b383b40372a0e7008ff3668e55d215adc137888672d1d6",
             "semantic.json": "03c079117e3c05f9e2532445defdc9d110d846e6c6e54a35cdc03b6ea2fa68c4",
             "torch.json": "f345e94fe42fd7493a77296b8fd894bf69e3d228d6a86f7bde4d9bc72ed4b803"

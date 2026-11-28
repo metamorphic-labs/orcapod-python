@@ -14,16 +14,18 @@ from __future__ import annotations
 import asyncio
 import warnings
 from collections.abc import Callable
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob
 from orcapod.channels import Channel
+from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.operators import PolarsFilter, SemiJoin
-from orcapod.core.sources import ArrowTableSource
-from orcapod.databases import InMemoryArrowDatabase
-from orcapod.errors import SemiJoinIgnoredColumnWarning
+from orcapod.core.sources import ArrowTableSource, CSVSource
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import InputValidationError, SemiJoinIgnoredColumnWarning
 from orcapod.protocols.core_protocols import StreamProtocol
 from tests.test_core.operators.test_async_sync_equivalence import (
     Row,
@@ -34,6 +36,10 @@ from tests.test_core.operators.test_async_sync_equivalence import (
     assert_same_provenance,
     sync_rows,
 )
+
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
 
 
 def left_source() -> ArrowTableSource:
@@ -193,14 +199,16 @@ async def _async_rows(
 def test_async_rows_equal_sync_rows(
     make_right: Callable[[], ArrowTableSource], kept: list[int], ignored: Ignored
 ) -> None:
-    """The async path keys on the same columns; called without validation it warns once."""
+    """The async path keys on the same columns and validation warns once."""
     left, right = left_source(), make_right()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SemiJoinIgnoredColumnWarning)
         expected = sync_rows(SemiJoin(), left, right)
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
-        actual = asyncio.run(_async_rows(SemiJoin(), left, right))
+        op = SemiJoin()
+        op.validate_inputs(left, right)
+        actual = asyncio.run(_async_rows(op, left, right))
     found = [w for w in record if issubclass(w.category, SemiJoinIgnoredColumnWarning)]
     assert len(found) == (1 if ignored else 0)
     assert len(expected) == len(kept)
@@ -270,7 +278,7 @@ def test_filter_without_the_warning() -> None:
     assert left_ids(result) == [2]
 
 
-@pytest.mark.parametrize("path", ["sync", "async_validated", "async_unvalidated"])
+@pytest.mark.parametrize("path", ["sync", "async"])
 def test_shared_meta_column_is_neither_a_key_nor_warned_about(path: str) -> None:
     """A meta (``__``) column of the same name on both inputs is not a user column
     (ITL-1080): no match key, no ``SemiJoinIgnoredColumnWarning``, not in the output."""
@@ -285,8 +293,7 @@ def test_shared_meta_column_is_neither_a_key_nor_warned_about(path: str) -> None
             ids = left_ids(result)
             meta = [n for n in result.as_table(all_info=True).column_names if "__" in n]
         else:
-            if path == "async_validated":
-                _ = op(left, right)
+            op.validate_inputs(left, right)
             rows = asyncio.run(_async_rows(op, left, right))
             ids = [tag.as_dict()["id"] for tag, _ in rows]
             meta = [
@@ -297,3 +304,240 @@ def test_shared_meta_column_is_neither_a_key_nor_warned_about(path: str) -> None
             ]
     assert ids == [1, 3]
     assert meta == []
+
+
+def _shared_operator_inputs(
+    data_tags: bool, reverse_tags: bool
+) -> tuple[ArrowTableSource, ArrowTableSource, ArrowTableSource]:
+    """Build two left inputs, exactly one of which shares both right tags."""
+
+    def source(
+        names: tuple[str, str],
+        tags: tuple[str, str],
+        data: tuple[str, str],
+        values: list[int],
+        source_id: str,
+    ) -> ArrowTableSource:
+        columns = {
+            names[0]: [1, 2, 3],
+            names[1]: values,
+            data[0]: [4, 5, 6],
+            data[1]: [7, 8, 9],
+        }
+        schema = pa.schema(
+            [pa.field(name, pa.int64(), nullable=False) for name in columns]
+        )
+        return ArrowTableSource(
+            pa.Table.from_pydict(columns, schema=schema),
+            tag_columns=tags,
+            tag_only_columns=not data_tags,
+            source_id=source_id,
+        )
+
+    left_tags = ("b", "a") if reverse_tags else ("a", "b")
+    return (
+        source(("a", "b"), left_tags, ("x", "y"), [10, 20, 30], "left"),
+        source(("c", "d"), ("c", "d"), ("m", "n"), [10, 20, 30], "other"),
+        source(
+            ("a", "b"), (left_tags[1], left_tags[0]), ("u", "v"), [10, 99, 30], "right"
+        ),
+    )
+
+
+@pytest.mark.parametrize("data_tags", [False, True], ids=["plain-tags", "data-tags"])
+@pytest.mark.parametrize("reverse_tags", [False, True])
+@pytest.mark.parametrize("keyed_first", [True, False])
+@pytest.mark.parametrize("empty", [True, False], ids=["empty-right", "nonempty-right"])
+@pytest.mark.asyncio
+async def test_job_semijoin_reused_across_different_keys(
+    data_tags: bool, reverse_tags: bool, keyed_first: bool, empty: bool
+) -> None:
+    """Each job step uses its own key set when another step shares its operator."""
+
+    def build_job() -> PipelineJob:
+        left, other, right = _shared_operator_inputs(data_tags, reverse_tags)
+        op = SemiJoin()
+        job = PipelineJob(name="reused_semijoin", database=InMemoryArrowDatabase())
+        with job:
+            filter_input = right.polars_filter(u=0, label="empty") if empty else right
+            steps = [("keyed", left), ("unkeyed", other)]
+            for label, stream in steps if keyed_first else reversed(steps):
+                _ = op(stream, filter_input, label=label)
+        return job
+
+    sync_job = build_job()
+    async_job = build_job()
+    _ = sync_job.run()
+    _ = await async_job.run_async()
+    assert [
+        len(sync_job.nodes[label].as_table()) for label in ("keyed", "unkeyed")
+    ] == [0 if empty else 2, 3]
+    for label in ("keyed", "unkeyed"):
+        expected = list(sync_job.nodes[label].iter_data())
+        actual = list(async_job.nodes[label].iter_data())
+        assert_equivalent(expected, actual)
+        assert_same_provenance(expected, actual)
+
+
+@pytest.mark.asyncio
+async def test_direct_empty_right_uses_its_own_validation() -> None:
+    """A keyed pair retains its keys after an unkeyed pair is validated."""
+    left, other, right = _shared_operator_inputs(False, False)
+    empty = right.polars_filter(u=0)
+    op = SemiJoin()
+    _ = op(left, empty)
+    _ = op(other, empty)
+    assert (
+        await _async_rows(op, left, empty) == sync_rows(SemiJoin(), left, empty) == []
+    )
+
+
+@pytest.mark.parametrize("validate_other", [False, True])
+@pytest.mark.parametrize("empty_right", [False, True])
+@pytest.mark.asyncio
+async def test_direct_async_requires_validation_for_this_pair(
+    validate_other: bool, empty_right: bool
+) -> None:
+    """Direct row channels require validation of the exact ordered input pair."""
+    left, other, right = _shared_operator_inputs(False, False)
+    actual_right = right.polars_filter(u=0) if empty_right else right
+    op = SemiJoin()
+    if validate_other:
+        op.validate_inputs(other, actual_right)
+    with pytest.raises(
+        InputValidationError,
+        match=r"SemiJoin .*validate_inputs\(left, right\)",
+    ):
+        _ = await _async_rows(op, left, actual_right)
+
+
+@pytest.mark.asyncio
+async def test_direct_unknown_pair_refuses_before_emitting_a_warning() -> None:
+    """An unrelated validation cannot turn the refusal into an ignored-name warning."""
+    left = left_source()
+    op = SemiJoin()
+    op.validate_inputs(left, right_tags_only())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        with pytest.raises(InputValidationError, match="validate_inputs"):
+            _ = await _async_rows(op, left, right_same_tag_other_y())
+
+
+@pytest.mark.asyncio
+async def test_empty_right_after_operator_node_is_rewired() -> None:
+    """A node rewired to an unkeyed pair passes through its left rows."""
+    left, other, right = _shared_operator_inputs(False, False)
+    empty = right.polars_filter(u=0)
+    job = PipelineJob(name="rewired_semijoin", database=InMemoryArrowDatabase())
+    with job:
+        _ = SemiJoin()(left, empty, label="step")
+    node = job.nodes["step"]
+    assert isinstance(node, OperatorJobNode)
+    node.upstreams = (other, empty)
+
+    actual = await _execute_node_rows(node, other, empty, run_async=True)
+    expected = list(node.execute(other, empty).iter_data())
+    assert len(expected) == 3
+    assert_equivalent(expected, actual)
+    assert_same_provenance(expected, actual)
+
+
+async def _execute_node_rows(
+    node: OperatorJobNode,
+    left: StreamProtocol,
+    right: StreamProtocol,
+    *,
+    run_async: bool,
+) -> list[Row]:
+    """Execute a job node on its current inputs and return the rows it produces."""
+    if not run_async:
+        return list(node.execute(left, right).iter_data())
+    channels = [Channel[Row](16), Channel[Row](16)]
+    output: Channel[Row] = Channel(16)
+    for stream, channel in zip((left, right), channels):
+        for row in stream.iter_data():
+            await channel.writer.send(row)
+        await channel.writer.close()
+    await node.async_execute([channel.reader for channel in channels], output.writer)
+    return await output.reader.collect()
+
+
+@pytest.mark.parametrize("run_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_rewired_semijoin_warns_once_for_the_same_names(run_async: bool) -> None:
+    """Filtering an input keeps the ignored names and does not repeat their warning."""
+    left, right = left_source(), right_same_tag_other_y()
+    job = PipelineJob(name="rewired_warning", database=InMemoryArrowDatabase())
+    with pytest.warns(SemiJoinIgnoredColumnWarning) as record, job:
+        _ = SemiJoin()(left, right, label="step")
+    assert_warned_once(list(record), [("y", "data", "data")])
+    node = job.nodes["step"]
+    assert isinstance(node, OperatorJobNode)
+    filtered = left.polars_filter(x=10)
+    assert filtered.pipeline_hash() != left.pipeline_hash()
+    node.upstreams = (filtered, right)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        rows = await _execute_node_rows(node, filtered, right, run_async=run_async)
+    assert [tag["id"] for tag, _ in rows] == [1]
+
+
+@pytest.mark.parametrize("run_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_rewired_semijoin_new_warning_is_retried(run_async: bool) -> None:
+    """A new ignored name warns, including after each failed attempt to warn."""
+    left, right = left_source(), right_same_tag_other_y()
+    job = PipelineJob(name="rewired_new_warning", database=InMemoryArrowDatabase())
+    with job:
+        _ = SemiJoin()(left, right_tags_only(), label="step")
+    node = job.nodes["step"]
+    assert isinstance(node, OperatorJobNode)
+    filtered = left.polars_filter(x=10)
+    node.upstreams = (filtered, right)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        for _ in range(2):
+            with pytest.raises(SemiJoinIgnoredColumnWarning, match="'y'"):
+                _ = await _execute_node_rows(node, filtered, right, run_async=run_async)
+    with pytest.warns(SemiJoinIgnoredColumnWarning, match="'y'") as record:
+        rows = await _execute_node_rows(node, filtered, right, run_async=run_async)
+    assert len(record) == 1
+    assert [tag["id"] for tag, _ in rows] == [1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        repeated = await _execute_node_rows(node, filtered, right, run_async=run_async)
+    assert [tag["id"] for tag, _ in repeated] == [1]
+
+
+@pytest.mark.parametrize("shared_tags", [True, False], ids=["keyed", "unkeyed"])
+@pytest.mark.asyncio
+async def test_empty_right_in_loaded_job(tmp_path: Path, shared_tags: bool) -> None:
+    """A reconstructed SemiJoin has the right keys before any row arrives."""
+    right_path = tmp_path / "right.csv"
+    _ = right_path.write_text("a,b,u,v\n1,10,4,7\n2,20,5,8\n3,30,6,9\n")
+    left_path = tmp_path / "left.csv"
+    left_tags = ("a", "b") if shared_tags else ("c", "d")
+    _ = left_path.write_text(
+        f"{','.join(left_tags)},x,y\n1,10,4,7\n2,20,5,8\n3,30,6,9\n"
+    )
+    left = CSVSource(str(left_path), tag_columns=left_tags, tag_only_columns=True)
+    right = CSVSource(str(right_path), tag_columns=("a", "b"), tag_only_columns=True)
+    db_path = tmp_path / "db"
+    job = PipelineJob(name="loaded_semijoin", database=DeltaTableDatabase(db_path))
+    with job:
+        empty = right.filter(u=0, label="empty")
+        _ = SemiJoin()(left, empty, label="step")
+    job_path = tmp_path / "job.json"
+    job.save(job_path)
+
+    sync_job = PipelineJob.load(job_path, database=DeltaTableDatabase(db_path))
+    async_job = PipelineJob.load(job_path, database=DeltaTableDatabase(db_path))
+    _ = sync_job.run(load_only=True)
+    _ = await async_job.run_async(load_only=True)
+    expected = list(sync_job.nodes["step"].iter_data())
+    actual = list(async_job.nodes["step"].iter_data())
+    assert len(expected) == (0 if shared_tags else 3)
+    assert_equivalent(expected, actual)
+    assert_same_provenance(expected, actual)

@@ -677,6 +677,22 @@ class DataProtocol(DatagramProtocol, Protocol):
         """
         ...
 
+    def source_info_table(self) -> "pa.Table":
+        """
+        Return the source-info tokens as a one-row table.
+
+        One ``_source_<column>`` column per data column, in the order of the data
+        columns, typed as a row's own source-info columns are. These are the
+        columns ``as_table(columns={"source": True})`` appends to the data
+        columns. The placeholder of a result that is gone (``EmptyData``) has no
+        data columns to read; it returns the tokens it carries, and a table with
+        no column when it carries none.
+
+        Returns:
+            The one-row table of source-info columns.
+        """
+        ...
+
     def with_source_info(
         self,
         **source_info: SourceInfoValue,

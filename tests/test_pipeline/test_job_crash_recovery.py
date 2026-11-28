@@ -205,8 +205,9 @@ def stored_rows(store: Path, kind: str) -> list[int]:
 def stable(store: Path) -> dict[str, list[tuple[object, ...]]]:
     """The stored columns that an interrupted and an uninterrupted run must share.
 
-    Result ids (uuids), timestamps and the ``computed`` flag legitimately differ;
-    record ids, entry ids, the recomputation index, hashes, tags and values do not.
+    Result ids (uuids), the record ids made from them, timestamps and the
+    ``computed`` flag legitimately differ; instance ids, hashes, tags and values do
+    not.
     """
     result = read(tables(store)["result"])
     pipeline = read(tables(store)["pipeline"])
@@ -220,9 +221,7 @@ def stable(store: Path) -> dict[str, list[tuple[object, ...]]]:
                 *(
                     pipeline[c].to_pylist()
                     for c in (
-                        "__record_id",
-                        "__pipeline_base_entry_id",
-                        "__pipeline_recomputation_index",
+                        "__pipeline_instance_id",
                         "__input_data_hash",
                         "__output_data_hash",
                         "k",

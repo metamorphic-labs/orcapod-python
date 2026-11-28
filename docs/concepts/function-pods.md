@@ -23,7 +23,12 @@ def compute_bmi(weight: float, height: float) -> float:
 Key points:
 
 - **`output_keys`** names the output data column(s). A single string means one output
-  column; a list of strings means the function returns multiple values. A function with
+  column. With two or more keys, Orcapod assigns returned values in key order. The
+  returned container must be an instance of the annotated container, so
+  `-> tuple[int, str]` accepts a tuple or a named tuple. Each position needs a
+  declared type, so `list[int]` cannot declare several outputs. If you supply
+  `output_schema` without a return annotation, return a tuple. A container mismatch
+  raises `OutputContainerTypeError` before any outputs are stored. A function with
   no outputs (it only reads its inputs) is annotated `-> None`, or not annotated, and
   takes no `output_keys`; its pod has no output columns. `-> None` together with
   `output_keys` raises `ValueError` when the pod is created, and a value other than
@@ -158,14 +163,14 @@ Each call that drops columns logs one message at `INFO` level (logger
 value: a misspelt column (`Height` for a parameter `height=1.0`) is dropped like any other
 unused column and the default is used, and that message is the only trace.
 
-### Exact calls: `strict=True` and `.process()`
+### Exact calls: `strict_columns=True` and `.process()`
 
-To have an extra column rejected instead of dropped, pass `strict=True`, or call
+To have an extra column rejected instead of dropped, pass `strict_columns=True`, or call
 `.process()`, which is the exact primitive and never drops a column:
 
 ```python
 try:
-    compute_bmi.pod(wide, strict=True)
+    compute_bmi.pod(wide, strict_columns=True)
 except ValueError as err:
     print(type(err).__name__)
 # ValueError
@@ -182,9 +187,9 @@ The error message names both schemas and the first column that does not fit, for
 compatible with expected input schema Schema({'weight': float, 'height': float}): column
 'age' is not a parameter of the function`.
 
-`strict` decides only whether an extra column is an error. It is not part of any hash: when
-there is nothing to drop, `pod(stream)`, `pod(stream, strict=True)` and `pod.process(stream)`
-build the same pipeline.
+`strict_columns` controls whether an extra column is an error. When there is nothing to
+drop, `pod(stream)`, `pod(stream, strict_columns=True)` and `pod.process(stream)` build
+the same pipeline and produce identical hashes.
 
 ### What is an error in every form
 
@@ -596,6 +601,52 @@ print(job.nodes["bmi"].as_table().num_rows)
 # 3
 ```
 
+### Limiting in-flight calls
+
+An async function pod's default limit is the usable CPU count, up to 16 in-flight
+calls and with a minimum of one. Different pods can run concurrently. Choose a smaller
+limit when each call holds substantial memory or talks to a service with a concurrency
+limit.
+
+Orcapod counts CPUs the same way as CPython's default thread pool. It uses
+`os.process_cpu_count()` when available (Python 3.13 and later) and `os.cpu_count()`
+otherwise. If that function returns no count, the limit is one. `PipelineConfig()`
+computes the default when constructed. Async jobs create that default config when the
+pod runs.
+
+```python
+from orcapod.core.function_pod import FunctionPod
+from orcapod.types import PodConfig
+
+limited_bmi = FunctionPod.from_fn(
+    compute_bmi, output_keys="bmi", pod_config=PodConfig(max_concurrency=4)
+)
+```
+
+Apply `limited_bmi(source, label="bmi")` when recording a job. Set
+`PodConfig(max_concurrency=None)` to allow unlimited dispatch or use `1` to process
+one row at a time. If calls to a pod wait for each other, choose a limit that lets
+all calls in the group start.
+
+When calling `FunctionPod.async_execute` directly, you can also supply a `PipelineConfig`.
+The two settings resolve as follows.
+
+| `PodConfig.max_concurrency` | `PipelineConfig.default_max_concurrency` | Effective limit |
+| --- | --- | --- |
+| Omitted or `"inherit"` | Omitted | Usable CPU count, clamped to 1–16 |
+| Omitted or `"inherit"` | Positive integer | Pipeline limit |
+| Omitted or `"inherit"` | `None` | Unlimited |
+| Positive integer | Any | Pod limit |
+| `None` | Any | Unlimited |
+
+Local coroutine functions run on the event loop. Local synchronous functions in an
+async job use the event loop's thread pool. CPython's default pool has up to
+`min(32, (cpu_count or 1) + 4)` workers. For Python 3.11 and 3.12 this uses
+`os.cpu_count()`, and for Python 3.13 and later it uses `os.process_cpu_count()`.
+For example, a reported count of 18 yields 22 default workers and a per-pod limit of 16.
+If fewer workers are available than the pod's limit, the pool runs fewer calls and queues
+the rest. The pool is shared across pods on the loop.
+
 ### Reading the run summary
 
 `job.run()` (and `await job.run_async()`) returns a `RunSummary`: for each function node, how
@@ -825,7 +876,9 @@ Inside `job.run()`, each function node commits its results and pipeline records 
 store in batches: every `commit_every_rows` rows (default 100), when the node finishes,
 before a failed run raises, and when the job ends. Committing in batches keeps a run's time
 linear in its rows; on a `DeltaTableDatabase` each commit is one Delta version per table, so
-a 1,000-row node writes 10 versions per table instead of 1,000.
+a 1,000-row node writes 10 pipeline table versions instead of 1,000.
+In an async run, the result store can group writes differently depending on which calls
+have finished when a pipeline batch is ready to commit.
 
 ```python
 job.run(commit_every_rows=500)  # fewer, larger commits
@@ -1079,7 +1132,7 @@ from that database, and no rows under that key is an empty result, not an error.
   over the same sources, not only the saved run's inputs. Rows come in the order the database
   returns them; sort them if order matters. The node itself (`as_table()`, `iter_data()`,
   `head()`) is empty: it has not run in this process.
-- Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v1`.
+- Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v2`.
   The saved file does not record an operator's cache mode (follow-up ITL-977), so attach a
   loaded operator node in `CacheMode.REPLAY` to read the rows its run stored:
   `loaded.nodes["joined"].attach_databases(pipeline_database=store.at("<job name>"),
@@ -1123,13 +1176,16 @@ from that database, and no rows under that key is an empty result, not an error.
   is refused the same way: wrap its table as a source,
   `ArrowTableSource(stream.as_table(), tag_columns=[...])`.
 - The results are read from the database recorded in the file. Pass
-  `PipelineJob.load(path, database=...)` if the database has moved.
+  `PipelineJob.load(path, database=...)` if the database has moved. A connector database
+  (SQLite, PostgreSQL, SpiralDB) must always be passed: without it the load raises
+  `ValueError` naming the argument to pass.
 - A job given a separate result database
   ([Sharing function results between jobs](pipeline-job.md#sharing-function-results-between-jobs))
   records it in the file too, and loading rebuilds it the same way; pass
   `PipelineJob.load(path, result_database=...)` if it has moved or cannot be rebuilt from
   the file. An `InMemoryArrowDatabase` holds nothing after its process ends, so it is never
-  rebuilt (a new one would be empty), as a connector database is not. When the file names a
+  rebuilt (a new one would be empty). A connector result database must be passed at load,
+  as a connector `database` must. When the file names another
   result database that is not available and none is given, the loaded job's function nodes
   get no database (a warning says what to pass): they are never pointed at the job's own
   `_result` location, which holds none of their results. `job.bind(result_database=...)`

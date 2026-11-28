@@ -556,6 +556,13 @@ class StaticOutputOperatorPod(TraceableBase):
         built from the same values. A ``large_string`` column is every row's type
         already and is left as it is.
 
+        Stopgap, not the proper solution (developer, November 27, 2026): this
+        step infers a token column's declared type again from its values. A
+        token column's type is fixed by the pipeline and is not meant to be
+        taken from values. The inference can narrow a declared type (example:
+        ``[None]`` in a token column a ``Batch`` declares with two list levels
+        infers one). ITL-1491 removes it.
+
         Args:
             table: A table of user tags, system tags, data and source info, after the
                 per-slice steps (``streams.base.row_built_columns``).

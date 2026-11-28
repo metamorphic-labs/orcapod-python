@@ -76,9 +76,10 @@ class PostRunPayload:
     """Payload passed to every post-run hook after a pod invocation.
 
     Attributes:
-        record_id_hash: String form of ``output.datagram_uuid`` — the same UUID
-            used as the primary key when the result is stored in a backing database.
-            ``None`` when ``output`` is ``None`` (filtered row or error).
+        result_id: The id of the result, the string form of
+            ``output.datagram_uuid`` — the same UUID used as the primary key when
+            the result is stored in a backing database. It is a random id, not a
+            hash. ``None`` when ``output`` is ``None`` (filtered row or error).
         tag: The input tag for this invocation. Treat as read-only.
         input: The input data for this invocation. Treat as read-only.
         output: The output data; ``None`` if the function filtered the row out or raised.
@@ -92,7 +93,7 @@ class PostRunPayload:
             tests); always populated when built by the pod itself.
     """
 
-    record_id_hash: str | None
+    result_id: str | None
     tag: TagProtocol
     input: DataProtocol
     output: DataProtocol | None

@@ -81,6 +81,9 @@ print(job.nodes["fahrenheit"].as_table().sort_by("experiment").to_pylist())
 # [{'experiment': 'exp_001', 'temp_fahrenheit': 68.9}, {'experiment': 'exp_002', 'temp_fahrenheit': 72.14}]
 ```
 
+A function pod drops unused data columns by default. Pass `strict_columns=True` to reject
+them.
+
 Add a row and run a new job over the same database. The two stored results are found again
 by their input values, and only the new row is computed:
 
@@ -121,7 +124,7 @@ Orcapod is before version 1.0. In the development version (0.4.0 is next):
   stored results again, so a hash value released in 0.4.0 will not change in a later release
   of the same data context; CI checks this. Until 0.4.0 a v1 hash may still change, only by
   an approved and explained change (0.3.0, which first shipped v1, was withdrawn). This
-  does not cover a provisional operator (such as `PolarsFilter` and `Filter`): its identity, and every hash
+  does not cover a provisional operator (such as `Filter` and `GroupBy`): its identity, and every hash
   downstream of it, may still change in a later release of v1. See
   [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md)
   and
@@ -147,32 +150,11 @@ SpikeInterface support lives in a separate package,
 [`orcapod-extension-spikeinterface`](https://github.com/nauticalab/orcapod-extension-spikeinterface).
 It is not published on PyPI; install it from its repository.
 
-## Development
+## Contributing
 
-The project uses [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv sync --all-extras --dev
-```
-
-Every pull request must pass these checks:
-
-```bash
-uv run --with ruff ruff check .
-uv run --with ruff ruff format --check .
-uv run --with basedpyright basedpyright
-uv run pytest tests/
-```
-
-CI runs the tests in parallel (pytest-xdist). Locally they run serially; `uv run pytest -n 4 tests/`
-runs them on four workers, each holding its own copy of the suite's memory, so use it only on a
-machine with cores and memory to spare.
-
-The PostgreSQL integration tests are skipped unless asked for
-(`uv run pytest -m postgres --postgres`) and need a running PostgreSQL server, reached
-through the standard `PG*` environment variables; see
-[the workflow that runs them](https://github.com/metamorphic-labs/orcapod-python/blob/main/.github/workflows/run-postgres-tests.yml).
-Releases are cut by the GitHub Actions Release workflow; see
+[CONTRIBUTING.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/CONTRIBUTING.md)
+has the development setup, the checks every pull request must pass, and the project's
+conventions. Releases are cut by the GitHub Actions Release workflow; see
 [RELEASING.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/RELEASING.md).
 
 ## License

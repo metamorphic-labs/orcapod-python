@@ -13,6 +13,11 @@ import pyarrow as pa
 from orcapod.core.operators import Batch, Join, MapTags, PolarsFilter, SelectDataColumns
 from orcapod.core.sources import ArrowTableSource
 from orcapod.system_constants import constants
+import pytest
+
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +188,7 @@ class TestNameExtending:
 class TestReducing:
     """Per design: a many->one op list-wraps user columns but NOT system tags.
 
-    System tag columns must stay scalar, because ``_build_record_id_preimage``
+    System tag columns must stay scalar, because ``entry_id_preimage``
     hashes them directly to derive record identity. They fold to a
     deterministic digest and their column name gains ``::{pipeline_hash}``.
     """

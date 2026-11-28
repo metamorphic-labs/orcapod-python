@@ -33,6 +33,10 @@ from tests.test_core.operators.test_async_sync_equivalence import (
     sync_rows,
 )
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 NAMES = sorted(ARRAYS)
 GROUP = {name: f"g{i % 3}" for i, name in enumerate(NAMES)}
 
