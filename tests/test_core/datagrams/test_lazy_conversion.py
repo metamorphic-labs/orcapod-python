@@ -310,7 +310,7 @@ class TestDatagramCopy:
 
 
 class TestTagLazySystemTagsTable:
-    """_system_tags_table is built only when system_tags are explicitly requested."""
+    """Dictionary tags build their table lazily and Arrow tags keep their fields."""
 
     def test_dict_backed_starts_with_no_system_tags_table(self):
         t = Tag({"a": 1, f"{SYS}run": "run1"})
@@ -326,8 +326,9 @@ class TestTagLazySystemTagsTable:
         assert sys_col not in t._data_table.column_names
         # Captured in the system_tags dict
         assert t._system_tags[sys_col] == "run1"
-        # Table not yet built
-        assert t._system_tags_table is None
+        # Arrow-backed tags retain their declared fields at construction.
+        assert t._system_tags_table is not None
+        assert t._system_tags_table.equals(tbl.select([sys_col]), check_metadata=True)
 
     def test_system_tags_table_not_built_without_system_tags_flag(self):
         t = Tag({"a": 1, f"{SYS}run": "run1"})

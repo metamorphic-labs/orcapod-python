@@ -17,6 +17,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import parse_source_id
+from orcapod.core.sources.stream_builder import validate_source_table
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -259,10 +260,18 @@ class SourceProxy(RootSource):
         See ``typed_zero_row_table``. An unbound proxy knows only its stored Python
         schema (a known limitation, ITL-912).
         """
-        return typed_zero_row_table(self._delegate)
+        table = typed_zero_row_table(self._delegate)
+        return None if table is None else validate_source_table(table)
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        return self._require_delegate().iter_data()
+        delegate = self._require_delegate()
+
+        def checked_rows() -> Iterator[tuple[TagProtocol, DataProtocol]]:
+            for tag, data in delegate.iter_data():
+                validate_source_table(tag.as_table(columns={"system_tags": True}))
+                yield tag, data
+
+        return checked_rows()
 
     def as_table(
         self,
@@ -270,7 +279,9 @@ class SourceProxy(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> pa.Table:
-        return self._require_delegate().as_table(columns=columns, all_info=all_info)
+        return validate_source_table(
+            self._require_delegate().as_table(columns=columns, all_info=all_info)
+        )
 
     def head(
         self,
@@ -281,9 +292,9 @@ class SourceProxy(RootSource):
     ) -> StreamView:
         """Return the bound source's head, or no rows when no live source is bound."""
         if self._delegate is not None:
-            return head_of(
-                self._delegate.head(n, columns=columns, all_info=all_info), self
-            )
+            view = self._delegate.head(n, columns=columns, all_info=all_info)
+            validate_source_table(view.table)
+            return head_of(view, self)
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._head_without_rows(

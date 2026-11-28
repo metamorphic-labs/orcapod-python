@@ -1018,12 +1018,11 @@ def _token_mismatch(entry: Row, input_row: Row) -> tuple[str, Any] | None:
         column the two share is equal.
     """
     for name, stored in entry.items():
-        if (
-            name.startswith(constants.SOURCE_PREFIX)
-            and name in input_row
-            and input_row[name] != stored
-        ):
-            return name, stored
+        if name.startswith(constants.INPUT_SOURCE_PREFIX):
+            column = name.removeprefix(constants.INPUT_SOURCE_PREFIX)
+            stream_name = constants.SOURCE_PREFIX + column
+            if stream_name in input_row and input_row[stream_name] != stored:
+                return stream_name, stored
     return None
 
 
@@ -1760,7 +1759,7 @@ class _Tracer:
                 # every input token it stores must name that record.
                 own = _pairs(entry, _system_tags(entry))
                 for name in sorted(
-                    c for c in entry if c.startswith(constants.SOURCE_PREFIX)
+                    c for c in entry if c.startswith(constants.INPUT_SOURCE_PREFIX)
                 ):
                     token = entry[name]
                     if isinstance(token, str):
@@ -1779,7 +1778,8 @@ class _Tracer:
                                 None,
                                 held=False,
                                 member=None,
-                                token_column=name,
+                                token_column=constants.SOURCE_PREFIX
+                                + name.removeprefix(constants.INPUT_SOURCE_PREFIX),
                                 input_hash=_hash_text(
                                     entry[constants.INPUT_DATA_HASH_COL]
                                 ),

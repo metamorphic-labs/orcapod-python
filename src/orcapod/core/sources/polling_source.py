@@ -29,6 +29,7 @@ from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
     require_supported_nullable_types,
+    validate_source_table,
 )
 from orcapod.core.streams.view import (
     ViewStatus,
@@ -561,8 +562,9 @@ class PollingSource(RootSource, Generic[T]):
             table = typed_zero_row_table(batch)
             if table is None:
                 return None
-            require_supported_nullable_types(table.schema)
-            zero_rows = ArrowTableStream(table=table, tag_columns=self._tag_columns)
+            zero_rows = ArrowTableStream(
+                table=validate_source_table(table), tag_columns=self._tag_columns
+            )
             result = zero_rows if result is None else self._combine(result, zero_rows)
         return typed_zero_row_table(result)
 
@@ -1084,8 +1086,9 @@ class PollingSource(RootSource, Generic[T]):
             ],
             promote_options="default",
         )
-        require_supported_nullable_types(combined.schema)
-        return ArrowTableStream(table=combined, tag_columns=self._tag_columns)
+        return ArrowTableStream(
+            table=validate_source_table(combined), tag_columns=self._tag_columns
+        )
 
     def _mark_new_rows(self, committed: ArrowTableStream | None) -> bool:
         """Move the modified time to now if the batch just committed holds rows.

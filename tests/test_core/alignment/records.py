@@ -1,10 +1,10 @@
 """Check the function node's stored records row by row (ITL-1034).
 
-A record of ``scaled`` holds the input row's tags and system tags, the input's source-info
-token, the output, and bookkeeping. Each per-row column is recomputed from the record and
-its origin row:
+A joined record of ``scaled`` holds the input row's tags and system tags, the output,
+and bookkeeping. The input's source-info token is checked in the pipeline table.
+Each per-row column is recomputed from the record and its origin row:
 
-* the record id is the origin row's, the input token ``_source_x`` names that row;
+* the record id is the origin row's, the stored input token names that row;
 * ``y`` is ``gated_scale`` of the origin's ``x``;
 * ``__output_data_hash`` is the Arrow hash of the record's own ``y``;
 * ``__input_data_hash`` (and its ``_right`` copy) is the Arrow hash of the origin's ``x``,
@@ -31,6 +31,7 @@ import pyarrow as pa
 
 from orcapod import PipelineJob
 from orcapod.core.nodes.function_node import (
+    FunctionJobNode,
     PIPELINE_RECORDED_AT_COL,
     PIPELINE_RUN_ID_COL,
 )
@@ -77,9 +78,12 @@ def assert_records_aligned(
             this checker passes a tampered copy).
     """
     node = job.nodes["scaled"]
+    assert isinstance(node, FunctionJobNode)
     if records is None:
         records = node.get_all_records(all_info=True)
     assert records is not None and records.num_rows > 0, "no records stored"
+    pipeline, _ = node._stored_provenance(results=False)  # pyright: ignore[reportPrivateUsage]  # raw pipeline entries
+    assert pipeline is not None
     outputs = node_outputs(job)
     context = node.data_context
     hasher = context.arrow_hasher
@@ -99,7 +103,6 @@ def assert_records_aligned(
         *tag_keys,
         source_id_column,
         record_id_column,
-        "_source_x",
         "y",
         "_source_y",
         "__data_id",
@@ -139,6 +142,11 @@ def assert_records_aligned(
         f"{sum((wanted - stored).values())} missing, "
         f"{sum((stored - wanted).values())} extra or repeated"
     )
+    assert Counter(pipeline.column(record_id_column).to_pylist()) == wanted
+    input_token = constants.INPUT_SOURCE_PREFIX + "x"
+    input_tokens = {
+        row[record_id_column]: row[input_token] for row in pipeline.to_pylist()
+    }
 
     failures: list[str] = []
     for index, row in enumerate(records.to_pylist()):
@@ -154,10 +162,9 @@ def assert_records_aligned(
         for tag in tag_keys:
             if row[tag] != origin.values[tag]:
                 fail(tag, f"{row[tag]!r}, its row has {origin.values[tag]!r}")
-        if row["_source_x"] != f"{origin.source_id}::{origin.token}::x":
-            fail(
-                "_source_x", f"{row['_source_x']!r} does not name row {origin.token!r}"
-            )
+        token = input_tokens[row[record_id_column]]
+        if token != f"{origin.source_id}::{origin.token}::x":
+            fail(input_token, f"{token!r} does not name row {origin.token!r}")
         if row["y"] != oracle.expected_value("y", origin):
             fail("y", f"{row['y']!r} is not the output for row {origin.token!r}")
         _, datagram, column = split_token(row["_source_y"])

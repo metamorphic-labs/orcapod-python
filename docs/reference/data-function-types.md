@@ -35,7 +35,7 @@ columns): a new result table, and no hash moves.
 The function's pipeline table carries no revision:
 
 ```text
-<job>/<function>/<output schema hash>/v<function major>/python.function.v1/schema:<pipeline hash>/pdb_v2
+<job>/<function>/<output schema hash>/v<function major>/python.function.v1/schema:<pipeline hash>/pdb_v3
 ```
 
 A saved job names the type and its major only (`"data_function_type_id":
@@ -69,7 +69,7 @@ print(describe_pair.pod.uri[-1])
 for path in sorted(types_store.list_sources()):
     print(path[-4:])
 # ('v0', 'python.function.v1', 'rev1', 'rdb_v1')
-# ('v0', 'python.function.v1', 'schema:...', 'pdb_v2')
+# ('v0', 'python.function.v1', 'schema:...', 'pdb_v3')
 ```
 
 ## The Python function type, `python.function.v1`
@@ -148,7 +148,7 @@ print([name for name in stored.column_names if name.startswith("__pf_var_")])
 # ['__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash']
 ```
 
-## The pipeline columns, `pdb_v2`
+## The pipeline columns, `pdb_v3`
 
 A function node's pipeline table stores the input tags and source-info tokens,
 the input and output hashes, the referenced result record ID, and bookkeeping
@@ -156,6 +156,7 @@ for the entry, including:
 
 | Column | Arrow type | Nullable | Meaning |
 |---|---|---|---|
+| `_input_source_<column>` | the input token's Arrow type | yes | The token of an input data column. The instance id hashes these fields under their stored names. |
 | `__pipeline_instance_id` | `large_binary` | yes | The row's instance id: the hash of its entry id (tags, system tags, input data hash) and the input's source-info tokens. The node looks a row up by it. |
 | `__pipeline_record_id` | `large_binary` | yes | The row's record id: the hash of the node's content hash (`__node_content_hash`), its instance id and the id of its result. It is the table's key. |
 | `__pipeline_run_id` | `large_string` | yes | The ID of the job run that recorded the entry. A node run outside a job stores null. |
@@ -203,7 +204,7 @@ ids: `__pipeline_instance_id` and `__pipeline_record_id` are columns of the
 pipeline table itself, read from the database by the table's path:
 
 ```python
-pipeline_path = next(p for p in types_store.list_sources() if p[-1] == "pdb_v2")
+pipeline_path = next(p for p in types_store.list_sources() if p[-1] == "pdb_v3")
 pipeline_rows = types_store.get_all_records(pipeline_path)
 print([name for name in pipeline_rows.column_names if name.startswith("__pipeline_")])
 # ['__pipeline_instance_id', '__pipeline_record_id', '__pipeline_run_id']
@@ -212,8 +213,10 @@ print([name for name in joined.column_names if name.startswith("__pipeline_")])
 # ['__pipeline_run_id']
 ```
 
-Pipeline tables written by a release candidate before the three ids are at the
-layout `pdb_v1`: they are reported as tables of another layout and are not read.
+Orcapod reports and preserves earlier pipeline tables at `pdb_v1` or `pdb_v2`.
+Run the job to write its `pdb_v3` entries. Ordinary functions can reuse their
+`rdb_v1` results. A function that takes the invocation context refuses earlier
+pipeline tables rather than risk repeating an external action.
 
 ## Where it is declared, and how a released declaration is kept
 

@@ -777,7 +777,7 @@ class TestStore:
         assert cached.cache_path == (
             "source",
             f"node:{derived.content_hash().to_hex()}",
-            "sdb_v1",
+            "sdb_v2",
         )
         assert db.get_all_records(cached.cache_path) is None
         table = cached.as_table()

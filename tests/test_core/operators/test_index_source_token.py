@@ -11,11 +11,14 @@ import asyncio
 from typing import Any
 
 import pyarrow as pa
+import pytest
 
 from orcapod.channels import Channel
 from orcapod.core.operators import Batch, GroupBy, Index
 from orcapod.core.sources import ArrowTableSource
-from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.core.streams import ArrowTableStream
+from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
+from tests.token_shapes import data_for, data_type_for
 
 SRC = "src"
 
@@ -157,3 +160,62 @@ def test_zero_row_result_has_every_token_type_of_a_non_empty_one() -> None:
         empty_schema = empty.as_table(columns={"source": True}).schema
         full_schema = non_empty.as_table(columns={"source": True}).schema
         assert empty_schema == full_schema
+
+
+@pytest.mark.parametrize("route", ["sync", "async"])
+@pytest.mark.parametrize("out", [None, "first"])
+@pytest.mark.parametrize("tags", [("k", "g"), ("g", "k")])
+def test_index_keeps_a_projected_token_type_its_value_cannot_show(
+    route: str, out: str | None, tags: tuple[str, str]
+) -> None:
+    """An element of a four-level token may show only two of its three levels."""
+    token = [[], [[]]]
+    element_type = pa.large_list(pa.large_list(pa.large_list(pa.large_string())))
+    input_type = pa.large_list(element_type)
+    data_type = data_type_for(input_type)
+    values = pa.array(
+        [data_for([token], value, data_type) for value in (10, 20)], type=data_type
+    )
+    table = pa.table(
+        {
+            "k": [1, 2],
+            "g": ["a", "b"],
+            "x": values,
+            "y": [3, 4],
+            "_source_x": pa.array([[token], [token]], type=input_type),
+            "_source_y": pa.array(["kept", "kept"], type=pa.large_string()),
+        }
+    )
+    upstream = ArrowTableStream(
+        table.set_column(2, pa.field("x", data_type, nullable=False), values),
+        tag_columns=list(tags),
+    )
+    op = Index("x", 0, out=out)
+
+    async def run() -> list[tuple[TagProtocol, DataProtocol]]:
+        op.validate_inputs(upstream)
+        source: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=2)
+        result: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=2)
+        for row in upstream.iter_data():
+            await source.writer.send(row)
+        await source.writer.close()
+        await op.async_execute(
+            [source.reader],
+            result.writer,
+            input_pipeline_hashes=[upstream.pipeline_hash()],
+        )
+        return await result.reader.collect()
+
+    rows = list(op(upstream).iter_data()) if route == "sync" else asyncio.run(run())
+    assert len(rows) == 2
+    for _, data in rows:
+        table = data.as_table(columns={"source": True})
+        name = f"_source_{out or 'x'}"
+        assert table.column(name).to_pylist() == [token]
+        assert table.schema.field(name).type.equals(element_type, check_metadata=True)
+        assert table.column("_source_y").to_pylist() == ["kept"]
+        if out is not None:
+            assert table.column("_source_x").to_pylist() == [[token]]
+            assert table.schema.field("_source_x").type.equals(
+                input_type, check_metadata=True
+            )

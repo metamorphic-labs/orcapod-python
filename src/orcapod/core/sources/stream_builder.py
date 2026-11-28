@@ -36,24 +36,12 @@ if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
 
 
-def _contains_null_type(arrow_type: pa.DataType) -> bool:
-    """Return whether an Arrow type contains the Null type at any depth."""
-    if isinstance(arrow_type, pa.BaseExtensionType):
-        return _contains_null_type(arrow_type.storage_type)
-    if pa.types.is_dictionary(arrow_type):
-        return _contains_null_type(arrow_type.value_type)
-    return pa.types.is_null(arrow_type) or any(
-        _contains_null_type(arrow_type.field(i).type)
-        for i in range(arrow_type.num_fields)
-    )
-
-
 def require_supported_nullable_types(schema: pa.Schema) -> None:
     """Refuse source columns containing the Arrow Null type, even with zero rows."""
     columns = sorted(
         (field.name, str(field.type))
         for field in schema
-        if _contains_null_type(field.type)
+        if arrow_utils.contains_null_type(field.type)
     )
     if columns:
         names = ", ".join(f"{name!r} ({arrow_type})" for name, arrow_type in columns)
@@ -63,22 +51,67 @@ def require_supported_nullable_types(schema: pa.Schema) -> None:
         )
 
 
+def require_system_tag_without_field_metadata(
+    field: pa.Field[Any], *, stored_cache: bool = False
+) -> None:
+    """Refuse field metadata on a system tag before it can reach source rows."""
+    # Stopgap (ITL-1561): re-evaluate what metadata a system-tag field may carry.
+    # Extension metadata reaches the row hash now that rows use stream fields.
+    if not field.metadata:
+        return
+    if stored_cache:
+        raise InputValidationError(
+            f"System-tag column {field.name!r}: the source cache was written with "
+            "Arrow field metadata on a system tag. Rebuild the cache."
+        )
+    raise InputValidationError(
+        f"Custom system-tag column {field.name!r} has Arrow field metadata. "
+        "Remove the field metadata before building the source."
+    )
+
+
+def validate_source_table(table: pa.Table, *, stored_cache: bool = False) -> pa.Table:
+    """Validate an enriched table presented by a source without the source builder.
+
+    Args:
+        table: Source fields and values, with system tags already named as such.
+        stored_cache: Report the rebuild remedy for a persisted source cache.
+
+    Returns:
+        The same table, with fields and values unchanged.
+    """
+    require_supported_nullable_types(table.schema)
+    require_custom_system_tags(
+        table,
+        [
+            name
+            for name in table.column_names
+            if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        ],
+        stored_cache=stored_cache,
+    )
+    return table
+
+
 def require_custom_system_tags(
     table: pa.Table,
     names: Collection[str],
     *,
     schema: pa.Schema | None = None,
+    stored_cache: bool = False,
 ) -> None:
-    """Validate custom system-tag names, types, field flags and values.
+    """Validate custom system-tag declarations and values.
 
     Args:
         table: The source's Arrow columns.
         names: The columns nominated as system tags.
         schema: The declared fields if the reader has yet to apply them.
+        stored_cache: Report the rebuild remedy for a persisted source cache.
 
     Raises:
         ValueError: If a nominated column is missing from the source table.
-        InputValidationError: If a nominated column is not non-nullable text.
+        InputValidationError: If a nominated column has field metadata, can
+            hold nulls or is not text.
     """
     if not names:
         return
@@ -91,6 +124,11 @@ def require_custom_system_tags(
         )
     for name in names:
         field = fields.field(name)
+        require_system_tag_without_field_metadata(field, stored_cache=stored_cache)
+        if schema is not None:
+            require_system_tag_without_field_metadata(
+                table.schema.field(name), stored_cache=stored_cache
+            )
         has_nulls = table.column(name).null_count > 0
         if (
             field.nullable

@@ -1,7 +1,7 @@
 """Tests proving NODE_CONTENT_HASH_COL is redundant in the record_id preimage.
 
 Design note (post-ITL-533):
-  ``__node_content_hash`` IS stored in pdb_v2 rows for per-node isolation —
+  ``__node_content_hash`` IS stored in pdb_v3 rows for per-node isolation —
   ``_fetch_joined_records()`` filters rows by this column when
   ``table_scope='pipeline_hash'`` to prevent cross-node contamination.
   However, it is NOT included in the ``record_id`` preimage (the hash

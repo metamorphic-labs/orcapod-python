@@ -1,8 +1,8 @@
 """The three row ids as a job stores them (ITL-1471, stage 1 of ITL-1466).
 
-A function node's pipeline table (``pdb_v2``) holds, for every row, its instance id
+A function node's pipeline table (``pdb_v3``) holds, for every row, its instance id
 (``__pipeline_instance_id``) and, as its key, its record id. A side-effect log
-(``tdb_v2``) is keyed by the entry id. The operator cache (``odb_v2``) stores the entry
+(``tdb_v2``) is keyed by the entry id. The operator cache (``odb_v3``) stores the entry
 id and an insertion time beside its row key.
 
 The job is ``rows -> f -> g -> tell``: ``f`` has two outputs, so ``g``'s input has two
@@ -172,7 +172,7 @@ def _instance_id_of_stored_row(row: pa.Table) -> ContentHash:
             )
         }
     )
-    for name in sorted(n for n in row.column_names if n.startswith("_source_")):
+    for name in sorted(n for n in row.column_names if n.startswith("_input_source_")):
         preimage = preimage.append_column(row.schema.field(name), row.column(name))
     return HASHER.hash_table(preimage)
 
@@ -208,17 +208,18 @@ def test_every_pipeline_row_gives_its_instance_and_record_id_again(
     """Recomputed from the columns a row stores, each id is the stored one."""
     database = InMemoryArrowDatabase()
     _run(_job(database, InMemoryArrowDatabase(), arrangement), orchestrator)
-    stored = _table(database, function, "pdb_v2")
+    stored = _table(database, function, "pdb_v3")
     assert stored.num_rows == 3
     assert "__pipeline_entry_id" not in stored.column_names
     assert "__pipeline_recomputation_index" not in stored.column_names
     assert "__pipeline_base_entry_id" not in stored.column_names
-    tokens = sorted(n for n in stored.column_names if n.startswith("_source_"))
+    tokens = sorted(n for n in stored.column_names if n.startswith("_input_source_"))
     assert (
         tokens
-        == {"inc": ["_source_w", "_source_x"], "add": ["_source_v", "_source_y"]}[
-            function
-        ]
+        == {
+            "inc": ["_input_source_w", "_input_source_x"],
+            "add": ["_input_source_v", "_input_source_y"],
+        }[function]
     )
     for row in _rows(stored):
         (instance,) = _values(row, "__pipeline_instance_id")
@@ -259,7 +260,7 @@ def test_the_stored_instance_ids_are_those_of_the_rows_the_node_was_given(
         row_ids.instance_id(HASHER, tag, data).to_prefixed_digest()
         for tag, data in job.nodes["f"].iter_data()
     }
-    stored = _table(database, "add", "pdb_v2")
+    stored = _table(database, "add", "pdb_v3")
     assert set(_values(stored, "__pipeline_instance_id")) == given
     assert len(given) == 3
 
@@ -272,7 +273,7 @@ def test_the_two_arrangements_store_the_same_instance_ids(orchestrator: str) -> 
         database = InMemoryArrowDatabase()
         _run(_job(database, InMemoryArrowDatabase(), arrangement), orchestrator)
         seen.append(
-            sorted(_values(_table(database, "inc", "pdb_v2"), "__pipeline_instance_id"))
+            sorted(_values(_table(database, "inc", "pdb_v3"), "__pipeline_instance_id"))
         )
     assert seen[0] == seen[1]
 
@@ -362,8 +363,8 @@ def test_a_token_only_change_records_new_instances_and_computes_and_delivers_not
     database = InMemoryArrowDatabase()
     _run(_job(database, InMemoryArrowDatabase(), arrangement), orchestrator)
     assert (calls["f"], calls["g"], len(delivered)) == (3, 3, 3)
-    g_before = _table(database, "add", "pdb_v2")
-    f_before = _table(database, "inc", "pdb_v2")
+    g_before = _table(database, "add", "pdb_v3")
+    f_before = _table(database, "inc", "pdb_v3")
     log_before = _table(database, "tdb_v2")
 
     # A later session: the ephemeral results of ``f`` are gone, so ``f`` computes
@@ -374,7 +375,7 @@ def test_a_token_only_change_records_new_instances_and_computes_and_delivers_not
     assert calls["g"] == 3, "g was called again for an input it has a result for"
     assert len(delivered) == 3, "a side effect was delivered again"
 
-    g_after = _table(database, "add", "pdb_v2")
+    g_after = _table(database, "add", "pdb_v3")
     assert g_after.num_rows == 6
     assert len(set(_values(g_after, "__pipeline_instance_id"))) == 6
     assert len(set(_values(g_after, KEY))) == 6
@@ -403,7 +404,7 @@ def test_a_token_only_change_records_new_instances_and_computes_and_delivers_not
     )
 
     # ``f`` recomputed: a new row per instance, under the same instance id.
-    f_after = _table(database, "inc", "pdb_v2")
+    f_after = _table(database, "inc", "pdb_v3")
     assert f_after.num_rows == 6
     assert set(_values(f_after, "__pipeline_instance_id")) == set(
         _values(f_before, "__pipeline_instance_id")
@@ -422,12 +423,12 @@ def test_an_identical_repeat_writes_no_row(orchestrator: str) -> None:
     database, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     _run(_job(database, ephemeral), orchestrator)
     before = {
-        name: _table(database, name, "pdb_v2").sort_by(KEY) for name in ("inc", "add")
+        name: _table(database, name, "pdb_v3").sort_by(KEY) for name in ("inc", "add")
     }
     _run(_job(database, ephemeral), orchestrator)
     assert (calls["f"], calls["g"], len(delivered)) == (3, 3, 3)
     for name, table in before.items():
-        assert _table(database, name, "pdb_v2").sort_by(KEY).equals(table), name
+        assert _table(database, name, "pdb_v3").sort_by(KEY).equals(table), name
 
 
 def test_recording_one_instance_and_result_again_is_skipped() -> None:
@@ -436,7 +437,7 @@ def test_recording_one_instance_and_result_again_is_skipped() -> None:
     job = _job(database, InMemoryArrowDatabase())
     _run(job, "sync")
     node: Any = job.nodes["g"]
-    before = _table(database, "add", "pdb_v2").sort_by(KEY)
+    before = _table(database, "add", "pdb_v3").sort_by(KEY)
     result_ids = {
         instance: uuid.UUID(bytes=result_id)
         for instance, result_id in zip(
@@ -452,7 +453,7 @@ def test_recording_one_instance_and_result_again_is_skipped() -> None:
             computed=False,
         )
     database.flush()
-    assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(before)
+    assert _table(database, "add", "pdb_v3").sort_by(KEY).equals(before)
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +482,7 @@ def test_the_operator_cache_stores_the_entry_id_of_every_row(
     database = InMemoryArrowDatabase()
     job = _operator_job(database, arrangement)
     _run(job, orchestrator)
-    stored = _table(database, "odb_v2")
+    stored = _table(database, "odb_v3")
     assert stored.num_rows == 3
     assert stored.schema.field("__pipeline_entry_id").type == pa.large_binary()
     assert not stored.schema.field("__pipeline_entry_id").nullable
@@ -506,7 +507,7 @@ def test_neither_stored_column_is_part_of_the_row_key(orchestrator: str) -> None
     """The row key is the hash of the row without the entry id and the time."""
     database = InMemoryArrowDatabase()
     _run(_operator_job(database, "as_declared"), orchestrator)
-    stored = _table(database, "odb_v2")
+    stored = _table(database, "odb_v3")
     hashed = stored.drop(
         [KEY, "__pipeline_entry_id", "__recorded_at", constants.DATA_CONTEXT_COL]
     )
@@ -523,12 +524,12 @@ def test_a_row_passed_again_keeps_its_first_insertion_time(orchestrator: str) ->
     database = InMemoryArrowDatabase()
     job = _operator_job(database, "as_declared")
     _run(job, orchestrator)
-    first = _table(database, "odb_v2").sort_by(KEY)
+    first = _table(database, "odb_v3").sort_by(KEY)
     # The same job runs again over the same rows (cleared, or nothing would run).
     for label in ("f", "sel"):
         job.nodes[label].clear_cache()  # pyright: ignore[reportAttributeAccessIssue]  # job.nodes is typed by the node protocol; every job node has clear_cache
     _run(job, orchestrator)
-    assert _table(database, "odb_v2").sort_by(KEY).equals(first)
+    assert _table(database, "odb_v3").sort_by(KEY).equals(first)
     assert calls["f"] == 3
 
 
@@ -628,7 +629,7 @@ def test_a_node_given_a_placeholder_finds_its_result_by_the_input_hash(
         (tag.as_dict()["subject"], tag.as_dict()["session"]): data.as_dict()["z"]
         for tag, data in first.nodes["g"].iter_data()
     }
-    stored_before = _table(database, "add", "pdb_v2").sort_by(KEY)
+    stored_before = _table(database, "add", "pdb_v3").sort_by(KEY)
     stored_instances = set(_values(stored_before, "__pipeline_instance_id"))
     calls.clear()
 
@@ -652,7 +653,7 @@ def test_a_node_given_a_placeholder_finds_its_result_by_the_input_hash(
     assert calls == Counter(), "a function was called for a placeholder input"
     database.flush()
     # No pipeline row is written for a placeholder input (ITL-1475 reconsiders it).
-    assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(stored_before)
+    assert _table(database, "add", "pdb_v3").sort_by(KEY).equals(stored_before)
 
 
 def _through_channels(
@@ -692,7 +693,7 @@ def test_placeholders_fed_through_the_async_route_find_their_results(
         (tag.as_dict()["subject"], tag.as_dict()["session"]): data.as_dict()["z"]
         for tag, data in first.nodes["g"].iter_data()
     }
-    stored_before = _table(database, "add", "pdb_v2").sort_by(KEY)
+    stored_before = _table(database, "add", "pdb_v3").sort_by(KEY)
     calls.clear()
 
     later = _job(database, InMemoryArrowDatabase(), arrangement)
@@ -708,7 +709,7 @@ def test_placeholders_fed_through_the_async_route_find_their_results(
     assert len(sent) == 3
     assert calls == Counter(), "a function was called for a placeholder input"
     database.flush()
-    assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(stored_before)
+    assert _table(database, "add", "pdb_v3").sort_by(KEY).equals(stored_before)
 
 
 @pytest.mark.parametrize("path", ["sync", "async"])
@@ -721,7 +722,7 @@ def test_a_placeholder_whose_result_is_not_stored_is_refused(path: str) -> None:
     """
     database = InMemoryArrowDatabase()
     _run(_job(database, InMemoryArrowDatabase()), "sync")
-    stored_before = _table(database, "add", "pdb_v2").sort_by(KEY)
+    stored_before = _table(database, "add", "pdb_v3").sort_by(KEY)
     calls.clear()
 
     later = _job(database, InMemoryArrowDatabase())
@@ -743,7 +744,7 @@ def test_a_placeholder_whose_result_is_not_stored_is_refused(path: str) -> None:
             assert error.subgroup(EphemeralResultMissingError) is not None
     assert calls == Counter()
     database.flush()
-    assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(stored_before)
+    assert _table(database, "add", "pdb_v3").sort_by(KEY).equals(stored_before)
 
 
 # ---------------------------------------------------------------------------
@@ -774,7 +775,7 @@ def test_each_jobs_trace_finds_its_own_record_after_a_token_only_rerun(
     assert len(before) == 3
     second = _job(database, InMemoryArrowDatabase(), arrangement)
     _run(second, orchestrator)
-    stored = _table(database, "add", "pdb_v2")
+    stored = _table(database, "add", "pdb_v3")
     assert stored.num_rows == 6
 
     records: dict[str, set[str]] = {}
@@ -828,7 +829,7 @@ TOKEN_COLUMNS: dict[str, tuple["pa.Array[Any]", "pa.Array[Any]"]] = {
         pa.array(["s::row_0::b", None, "s::row_2::b"], pa.large_string()),
     ),
     "nested": (
-        pa.array([[None, [[]]], [None, [[]]], [[["s::row_2::a"]]]], _NESTED_TOKEN),
+        pa.array([[[], [[]]], [[], [[]]], [[["s::row_2::a"]]]], _NESTED_TOKEN),
         pa.array(
             [["s::row_0::b"], [], ["s::row_2::b", None]],
             pa.large_list(pa.large_string()),
@@ -838,10 +839,37 @@ TOKEN_COLUMNS: dict[str, tuple["pa.Array[Any]", "pa.Array[Any]"]] = {
 
 
 @function_pod(output_keys=["total", "scaled"])
-def combine(a: int, b: float) -> tuple[float, float]:
-    """Return ``a + b`` and ``a * b``, counting the call."""
+def combine_list_and_number(a: list[int], b: float) -> tuple[float, float]:
+    """Return ``len(a) + b`` and ``len(a) * b``, counting the call."""
     calls["combine"] += 1
-    return a + b, a * b
+    return len(a) + b, len(a) * b
+
+
+@function_pod(output_keys=["total", "scaled"])
+def combine_nested_lists(
+    a: list[list[list[int]]], b: list[float]
+) -> tuple[float, float]:
+    """Return ``len(a) + len(b)`` and ``len(a) * len(b)``, counting the call."""
+    calls["combine"] += 1
+    return float(len(a) + len(b)), float(len(a) * len(b))
+
+
+# Per kind of token columns: the function over data of the tokens' shapes (the
+# token-shape rule, ITL-1491: a list token needs list data), and its totals.
+COMBINE: dict[str, tuple[Any, list[float]]] = {
+    "lists_and_a_null_string": (combine_list_and_number, [1.5, 2.5, 3.5]),
+    "nested": (combine_nested_lists, [2.0, 3.0, 3.0]),
+}
+
+
+def _data_like(tokens: "pa.Array[Any]", leaves: list[Any], leaf: pa.DataType) -> Any:
+    """A data column with the list layers of ``tokens``, ``leaves[i]`` in row ``i``."""
+    from tests.token_shapes import data_for, data_type_for
+
+    kind = data_type_for(tokens.type, leaf)
+    return pa.array(
+        [data_for(t, v, kind) for t, v in zip(tokens.to_pylist(), leaves)], kind
+    )
 
 
 def _typed_token_stream(tokens: str, arrangement: str) -> ArrowTableStream:
@@ -850,8 +878,9 @@ def _typed_token_stream(tokens: str, arrangement: str) -> ArrowTableStream:
     token_a, token_b = TOKEN_COLUMNS[tokens]
     columns: dict[str, tuple["pa.Array[Any]", bool]] = {
         **{name: (COLUMNS[name], False) for name in tags},
-        "a": (pa.array([10, 20, 30], pa.int64()), False),
-        "b": (pa.array([0.5, 1.5, 2.5], pa.float64()), False),
+        # Each data column has its token's list layers, one value per token.
+        "a": (_data_like(token_a, [10, 20, 30], pa.int64()), False),
+        "b": (_data_like(token_b, [0.5, 1.5, 2.5], pa.float64()), False),
         "_source_a": (token_a, True),
         "_source_b": (token_b, True),
     }
@@ -886,7 +915,8 @@ def test_a_stored_row_keeps_the_token_columns_its_instance_id_was_made_from(
     """
     stream = _typed_token_stream(tokens, arrangement)
     database = InMemoryArrowDatabase()
-    pod = combine.pod
+    function, totals = COMBINE[tokens]
+    pod = function.pod
     assert isinstance(pod, FunctionPod)
     node = FunctionJobNode(pod, stream, pipeline_database=database)
     rows = list(stream.iter_data())
@@ -894,22 +924,23 @@ def test_a_stored_row_keeps_the_token_columns_its_instance_id_was_made_from(
         out = list(node.execute(stream).iter_data())
     else:
         out = _through_channels(node, rows)
-    assert sorted(
-        cast("list[float]", [data.as_dict()["total"] for _, data in out])
-    ) == [10.5, 21.5, 32.5]
+    assert (
+        sorted(cast("list[float]", [data.as_dict()["total"] for _, data in out]))
+        == totals
+    )
     assert calls["combine"] == 3
     database.flush()
 
-    stored = _table(database, "combine", "pdb_v2")
+    stored = _table(database, function.__name__, "pdb_v3")
     assert stored.num_rows == 3
     # The stored token columns have the stream's types, in every row.
     token_a, token_b = TOKEN_COLUMNS[tokens]
-    assert stored.schema.field("_source_a").type == token_a.type
-    assert stored.schema.field("_source_b").type == token_b.type
-    assert sorted(map(repr, _values(stored, "_source_a"))) == sorted(
+    assert stored.schema.field("_input_source_a").type == token_a.type
+    assert stored.schema.field("_input_source_b").type == token_b.type
+    assert sorted(map(repr, _values(stored, "_input_source_a"))) == sorted(
         map(repr, token_a.to_pylist())
     )
-    assert sorted(map(repr, _values(stored, "_source_b"))) == sorted(
+    assert sorted(map(repr, _values(stored, "_input_source_b"))) == sorted(
         map(repr, token_b.to_pylist())
     )
     given = {node.compute_instance_id(tag, data) for tag, data in rows}
@@ -932,12 +963,13 @@ def test_a_stored_row_keeps_the_token_columns_its_instance_id_was_made_from(
         reread = list(again.execute(stream).iter_data())
     else:
         reread = _through_channels(again, rows)
-    assert sorted(
-        cast("list[float]", [data.as_dict()["total"] for _, data in reread])
-    ) == [10.5, 21.5, 32.5]
+    assert (
+        sorted(cast("list[float]", [data.as_dict()["total"] for _, data in reread]))
+        == totals
+    )
     assert calls == Counter()
     database.flush()
-    assert _table(database, "combine", "pdb_v2").num_rows == 3
+    assert _table(database, function.__name__, "pdb_v3").num_rows == 3
 
 
 def _ordinary_streams() -> dict[str, Any]:
@@ -991,7 +1023,11 @@ def test_an_ordinary_rows_stored_token_columns_are_what_they_were(kind: str) -> 
     for tag, data in rows:
         as_stored_before = data.as_table(columns={"source": True})
         as_stored_before = as_stored_before.select(
-            [n for n in as_stored_before.column_names if n.startswith("_source_")]
+            [
+                n
+                for n in as_stored_before.column_names
+                if n.startswith(constants.SOURCE_PREFIX)
+            ]
         )
         now = data.source_info_table()
         assert now.num_columns >= 2
@@ -1007,8 +1043,12 @@ def test_an_ordinary_rows_stored_token_columns_are_what_they_were(kind: str) -> 
             }
         )
         for name in sorted(as_stored_before.column_names):
+            stored_name = constants.INPUT_SOURCE_PREFIX + name.removeprefix(
+                constants.SOURCE_PREFIX
+            )
             by_hand = by_hand.append_column(
-                as_stored_before.schema.field(name), as_stored_before.column(name)
+                as_stored_before.schema.field(name).with_name(stored_name),
+                as_stored_before.column(name),
             )
         assert row_ids.instance_id(HASHER, tag, data) == HASHER.hash_table(by_hand)
 
@@ -1021,17 +1061,17 @@ def test_rows_with_no_token_store_null_tokens_and_recompute_their_ids(
 
     A data column with no token has a null token, as the same row read from an
     Arrow table has (review of PR #583): the stored row has one ``large_string``
-    null ``_source_*`` column per data column, and its ids are recomputed from them.
+    null ``_input_source_*`` column per data column, and its ids are recomputed from them.
     """
     from orcapod.core.datagrams import Data, Tag
 
     rows = [
-        (Tag({"subject": s, "session": n}), Data({"a": a, "b": b}))
+        (Tag({"subject": s, "session": n}), Data({"a": [[[a]]], "b": [b]}))
         for s, n, a, b in [("m1", 1, 10, 0.5), ("m1", 2, 20, 1.5), ("m2", 1, 30, 2.5)]
     ]
     stream = _typed_token_stream("nested", "as_declared")
     database = InMemoryArrowDatabase()
-    pod = combine.pod
+    pod = combine_nested_lists.pod
     assert isinstance(pod, FunctionPod)
     node = FunctionJobNode(pod, stream, pipeline_database=database)
     if path == "sync":
@@ -1040,10 +1080,10 @@ def test_rows_with_no_token_store_null_tokens_and_recompute_their_ids(
         out = _through_channels(node, rows)
     assert len(out) == 3 and calls["combine"] == 3
     database.flush()
-    stored = _table(database, "combine", "pdb_v2")
+    stored = _table(database, "combine_nested_lists", "pdb_v3")
     assert stored.num_rows == 3
-    tokens = [n for n in stored.column_names if n.startswith("_source_")]
-    assert tokens == ["_source_a", "_source_b"]
+    tokens = [n for n in stored.column_names if n.startswith("_input_source_")]
+    assert tokens == ["_input_source_a", "_input_source_b"]
     for name in tokens:
         assert stored.schema.field(name).type == pa.large_string()
         assert stored.column(name).null_count == 3
@@ -1053,8 +1093,11 @@ def test_rows_with_no_token_store_null_tokens_and_recompute_their_ids(
     for tag, data in rows:
         table = data.as_table()
         for name in tokens:
+            stream_name = constants.SOURCE_PREFIX + name.removeprefix(
+                constants.INPUT_SOURCE_PREFIX
+            )
             table = table.append_column(
-                pa.field(name, pa.large_string()), pa.nulls(1, pa.large_string())
+                pa.field(stream_name, pa.large_string()), pa.nulls(1, pa.large_string())
             )
         read_from_tables.add(
             row_ids.instance_id(HASHER, tag, Data(table)).to_prefixed_digest()

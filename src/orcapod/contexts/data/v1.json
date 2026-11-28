@@ -236,33 +236,33 @@
         "folder": "v1",
         "history": [
             {
-                "date": "2026-11-23",
+                "date": "2026-11-27",
                 "release": null,
                 "added": {
                     "arrow-01.json": "fa69c71eca676cb308cb1f5eb1a8db23b6d3e31ed76f0f6b36b88d76915581d6",
                     "datagram-01.json": "8bc6f549f46254c0dd33c03215ff2bfba50d63b81d9b4c52afdc07153d2a04c6",
                     "pipeline-01.json": "f80f3f764c3770b720bb85a77d9d4f68a4efb5eacd45fb43bb46fee8a301a2c9",
-                    "schema-01.json": "81205905754b7ee6cc0f2dca50abcded70fc3c98272cfd3a9a11de088d248dc2",
+                    "schema-01.json": "bc31869f9f8e6bbe8b41cbf0802c53eb2199cc807ccdaee68f566803c39601ea",
                     "semantic-01.json": "3784a1353e9c818f57debc0c26f65fc1622e14e22f9004187a312b1c37033254",
                     "torch-01.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
                 },
                 "previous": null,
-                "digest": "373ad66e7e9cc3a411708a4470a30d2176aedf9c9ba1ecdbe1111359ceb25867"
+                "digest": "bee03a9ad12cd2b8fb44edcf3bd90bb8e3ba69dd506361a4506afbee72d4619d"
             },
             {
-                "date": "2026-11-26",
+                "date": "2026-11-27",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "fcc0de37838f5d59003c953c5e3650b45495ea2cad13800e68247ebb265a6958"
+                    "pipeline-02.json": "294d3e0914e77c88435faad4ae3aa70ec3296311bc32b6aa02710c9faa8ef21e"
                 },
-                "previous": "373ad66e7e9cc3a411708a4470a30d2176aedf9c9ba1ecdbe1111359ceb25867",
-                "digest": "5799c75e5b382a8699151a44822fdb9b608b77763f8cae47b96e79d72caedb44"
+                "previous": "bee03a9ad12cd2b8fb44edcf3bd90bb8e3ba69dd506361a4506afbee72d4619d",
+                "digest": "7166568e256c18613f943af93679912853bd32e68347537b86bd3c56130ea0d8"
             }
         ],
         "provisional": {
             "arrow.json": "a44e0f9b4312a2ac5edeedf9f3e35bda43a3ee012bd7c5a1e66f7269eaacd05e",
             "datagram.json": "7b5331ac948712ed3cebf79d3e6d33aafbe594f832386e1cdcc1b7e24e8ccc58",
-            "pipeline.json": "0d4d32606de1a40e9795b6b3a581835f003ac2fb6ebfe7d5cf1827b6ff6f5ab5",
+            "pipeline.json": "3331624d65870f8f21f83d651142a4eb61e856dca31b7a8a78296f438c1700d3",
             "schema.json": "4177b86267f0384ce5b383b40372a0e7008ff3668e55d215adc137888672d1d6",
             "semantic.json": "03c079117e3c05f9e2532445defdc9d110d846e6c6e54a35cdc03b6ea2fa68c4",
             "torch.json": "f345e94fe42fd7493a77296b8fd894bf69e3d228d6a86f7bde4d9bc72ed4b803"

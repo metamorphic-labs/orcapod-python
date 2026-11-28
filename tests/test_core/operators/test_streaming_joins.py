@@ -15,9 +15,8 @@ feed each kernel those inputs' transport tables cut into batches of random sizes
 and one-row batches included), in random interleavings of the inputs and of their ends,
 and compare.
 
-Field flags are compared as the stream built from the batches settles them: the
-system-tag and source-info fields by their values over the complete table (the last step
-of F, ``_flag_by_values``), on both sides, rows or none.
+Source-info flags are compared directly. The system tags can be opened to nullable
+for transport, so their observed nulls are compared over the complete table.
 """
 
 from __future__ import annotations
@@ -208,15 +207,16 @@ def _rows(table: pa.Table) -> Counter[tuple[Any, ...]]:
 
 
 def assert_same_fields(got: pa.Table, want: pa.Table) -> None:
-    """Same columns, types, field metadata and flags, after settling both (F's last step)."""
+    """Same columns, types, field metadata and flags for regular and token fields."""
     assert sorted(got.column_names) == sorted(want.column_names)
-    got = StaticOutputOperatorPod._flag_by_values(got.select(want.column_names))  # pyright: ignore[reportPrivateUsage]  # F's last step
-    want = StaticOutputOperatorPod._flag_by_values(want)  # pyright: ignore[reportPrivateUsage]  # F's last step
     for field in want.schema:
         other = got.schema.field(field.name)
         assert other.type == field.type, field.name
         assert other.metadata == field.metadata, field.name
-        assert other.nullable == field.nullable, field.name
+        if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
+            assert got[field.name].null_count == want[field.name].null_count, field.name
+        else:
+            assert other.nullable == field.nullable, field.name
 
 
 def assert_same_rows(
@@ -228,8 +228,7 @@ def assert_same_rows(
     """
     for batch in batches:
         assert batch.schema.names == list(kernel.output_columns)
-        # One schema for every batch of the run. The complete table settles the
-        # source-info flags. Join has already settled its sorted system tags.
+        # One schema for every batch of the run, with nullable tokens.
         assert batch.schema.equals(batches[0].schema, check_metadata=True)
         for field in batch.schema:
             if field.name.startswith(constants.SOURCE_PREFIX):
@@ -952,13 +951,19 @@ def test_join_keeps_nullable_tied_raw_system_tag_fields() -> None:
 
 
 def _data_tag_stream(data: str, tokens: list[list[str]]) -> ArrowTableStream:
-    """A stream with data-tag ``k`` whose source info is a token list per row."""
+    """A stream with data-tag ``k`` whose source info is a token list per row.
+
+    ``k`` and the data column are lists: a list token needs list data (the
+    token-shape rule, ITL-1491). The rule reads types only, so a token list may
+    still be longer than its data list, which is what these tests are about.
+    """
     token_list = pa.large_list(pa.large_string())
+    values = pa.large_list(pa.int64())
     return ArrowTableStream(
         pa.table(
             {
-                "k": pa.array([1, 2], pa.int64()),
-                data: pa.array([1, 2], pa.int64()),
+                "k": pa.array([[1], [2]], values),
+                data: pa.array([[1], [2]], values),
                 "_source_k": pa.array(tokens, token_list),
                 f"_source_{data}": pa.array([["s"], ["t"]], token_list),
             }
@@ -1164,13 +1169,18 @@ def test_a_source_refuses_a_null_typed_column(
 def _tokens_stream(
     data: str, keys: list[int], tokens: list[list[str]]
 ) -> ArrowTableStream:
-    """A stream with data-tag ``k`` (keys in this order) and token lists per row."""
+    """A stream with data-tag ``k`` (keys in this order) and token lists per row.
+
+    ``k`` and the data column are lists, as their list tokens need (the token-shape
+    rule, ITL-1491).
+    """
     token_list = pa.large_list(pa.large_string())
+    values = pa.large_list(pa.int64())
     return ArrowTableStream(
         pa.table(
             {
-                "k": pa.array(keys, pa.int64()),
-                data: pa.array(list(range(len(keys))), pa.int64()),
+                "k": pa.array([[key] for key in keys], values),
+                data: pa.array([[i] for i in range(len(keys))], values),
                 "_source_k": pa.array(tokens, token_list),
                 f"_source_{data}": pa.array([["s"]] * len(keys), token_list),
             }
@@ -1319,12 +1329,21 @@ def test_merge_join_over_inputs_with_a_meta_column(
 
 
 def _token_stream(tokens: list[Any], token_type: pa.DataType) -> ArrowTableStream:
-    """Tag ``k``, data ``x``, and ``x``'s source info as the given tokens."""
+    """Tag ``k``, data ``x``, and ``x``'s source info as the given tokens.
+
+    ``x`` has the tokens' list layers (the token-shape rule, ITL-1491).
+    """
+    from tests.token_shapes import data_for, data_type_for
+
+    data_type = data_type_for(token_type)
     return ArrowTableStream(
         pa.table(
             {
                 "k": pa.array([1, 2], pa.int64()),
-                "x": pa.array([10, 20], pa.int64()),
+                "x": pa.array(
+                    [data_for(t, v, data_type) for t, v in zip(tokens, (10, 20))],
+                    data_type,
+                ),
                 "_source_x": pa.array(tokens, token_type),
             }
         ),
@@ -1342,22 +1361,26 @@ SHALLOW = pa.large_list(pa.large_string())
         ([None, None], pa.large_string()),
         ([[], []], SHALLOW),
         ([[None], []], SHALLOW),
+        (["s::r0::x", "s::r1::x"], pa.large_string()),
     ],
-    ids=["all_null", "empty_lists", "null_item_and_empty"],
+    ids=["all_null", "empty_lists", "null_item_and_empty", "strings"],
 )
 @pytest.mark.parametrize(
     "make_kernel",
     [_join_kernel, _merge_kernel, _semi_kernel],
     ids=["join", "merge_join", "semi_join"],
 )
-def test_shallower_source_info_tokens_are_taken_with_every_value(
+def test_a_batch_that_declares_another_token_type_than_its_stream_is_refused(
     tokens: list[Any],
     token_type: pa.DataType,
     make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
 ) -> None:
-    """CodeRabbit on PR 510: a batch's source-info token type follows its own tokens,
-    so nulls and empty lists can give fewer list levels than the input's layout. Such
-    a batch is taken, every token kept; a token the layout cannot hold is refused."""
+    """CodeRabbit on PR 510, restated for ITL-1491: a source-info column's type is
+    the one its stream declares, and a batch never brings its own. A batch whose
+    tokens are carried in another type (fewer list levels, as a row once typed
+    nulls and empty lists from their values; or plain strings) is refused, naming
+    the column and both types, and changes nothing. It used to be converted to the
+    stream's type when every value allowed it."""
     left = _token_stream([[["a"]], [["b"]]], DEEP)
     right = ArrowTableStream(
         pa.table(
@@ -1366,30 +1389,97 @@ def test_shallower_source_info_tokens_are_taken_with_every_value(
         tag_columns=["k"],
     )
     kernel = make_kernel((left, right))
-    # The left input's rows as sent, with the tokens in their own, shallower type.
     sent = _sent(left).combine_chunks()
     index = sent.schema.get_field_index("_source_x")
     batch = sent.set_column(
         index, pa.field("_source_x", token_type), pa.array(tokens, token_type)
     ).to_batches()[0]
     assert batch.schema.field("_source_x").type != DEEP
-    out = kernel.push(0, batch)
+    with pytest.raises(ValueError, match="_source_x") as refused:
+        _ = kernel.push(0, batch)
+    assert str(token_type) in str(refused.value) and str(DEEP) in str(refused.value)
+    # The refused batch changed nothing: the stream's own batch is taken after it.
+    out = kernel.push(0, sent.to_batches()[0])
     out += kernel.push(1, _sent(right).combine_chunks().to_batches()[0])
     out += kernel.close(0) + kernel.close(1)
-    from orcapod.core.operators.static_output_pod import concatenate_batches
+    assert sum(batch.num_rows for batch in out) == 2
 
-    # Emitted batches type their source info by their own tokens; the complete
-    # table settles them (``concatenate_batches``).
-    got = concatenate_batches(out)
-    assert got is not None
-    assert got.num_rows == 2
-    by_key = dict(zip(got.column("k").to_pylist(), got.column("_source_x").to_pylist()))
-    assert by_key == {1: tokens[0], 2: tokens[1]}
-    # A token the layout's type cannot hold is still refused.
-    refused = sent.set_column(
-        index,
-        pa.field("_source_x", pa.large_string()),
-        pa.array(["s::r0::x", "s::r1::x"], pa.large_string()),
+
+@pytest.mark.parametrize("mismatch", ["item_name", "item_metadata"])
+@pytest.mark.parametrize(
+    "make_kernel",
+    [_join_kernel, _merge_kernel, _semi_kernel],
+    ids=["join", "merge_join", "semi_join"],
+)
+def test_a_first_batch_with_different_token_item_fields_is_refused(
+    mismatch: str,
+    make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
+) -> None:
+    """The first batch must match the stream's nested item name and metadata."""
+    values = [["a"], ["b"]]
+    string = pa.large_string()
+    declared = pa.large_list(pa.field("member", string, metadata={"m": "original"}))
+    wrong = (
+        pa.large_list(pa.field("other", string, metadata={"m": "original"}))
+        if mismatch == "item_name"
+        else pa.large_list(pa.field("member", string, metadata={"m": "changed"}))
+    )
+    left = _token_stream(values, declared)
+    right = ArrowTableStream(pa.table({"k": [1, 2], "y": [5, 6]}), tag_columns=["k"])
+    kernel = make_kernel((left, right))
+    sent = _sent(left).combine_chunks()
+    index = sent.schema.get_field_index("_source_x")
+    field = sent.schema.field(index)
+    assert field.type.equals(declared, check_metadata=True)
+    assert not field.type.equals(wrong, check_metadata=True)
+    batch = sent.set_column(
+        index, field.with_type(wrong), pa.array(values, type=wrong)
     ).to_batches()[0]
     with pytest.raises(ValueError, match="_source_x"):
-        make_kernel((left, right)).push(0, refused)
+        _ = kernel.push(0, batch)
+
+    out = kernel.push(0, sent.to_batches()[0])
+    out += kernel.push(1, _sent(right).combine_chunks().to_batches()[0])
+    out += kernel.close(0) + kernel.close(1)
+    assert sum(batch.num_rows for batch in out) == 2
+    assert all(
+        batch.schema.field("_source_x").type.equals(declared, check_metadata=True)
+        for batch in out
+        if batch.num_rows
+    )
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [[[], []], [[[None]], [[]]], [[[None]], [["b"]]]],
+    ids=["empty_lists", "null_and_empty_inner_lists", "null_token_inside"],
+)
+@pytest.mark.parametrize(
+    "make_kernel",
+    [_join_kernel, _merge_kernel, _semi_kernel],
+    ids=["join", "merge_join", "semi_join"],
+)
+def test_tokens_that_show_fewer_levels_keep_their_streams_type(
+    tokens: list[Any],
+    make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
+) -> None:
+    """Empty lists and nulls inside a token show fewer list levels than the column
+    has; carried in the stream's declared type they are taken, every token kept."""
+    from orcapod.core.operators.static_output_pod import concatenate_batches
+
+    left = _token_stream(tokens, DEEP)
+    right = ArrowTableStream(
+        pa.table(
+            {"k": pa.array([1, 2], pa.int64()), "y": pa.array([5, 6], pa.int64())}
+        ),
+        tag_columns=["k"],
+    )
+    kernel = make_kernel((left, right))
+    out = kernel.push(0, _sent(left).combine_chunks().to_batches()[0])
+    out += kernel.push(1, _sent(right).combine_chunks().to_batches()[0])
+    out += kernel.close(0) + kernel.close(1)
+    got = concatenate_batches(out)
+    assert got is not None and got.num_rows == 2
+    assert got.schema.field("_source_x").type == DEEP
+    by_key = dict(zip(got.column("k").to_pylist(), got.column("_source_x").to_pylist()))
+    assert by_key == {1: tokens[0], 2: tokens[1]}

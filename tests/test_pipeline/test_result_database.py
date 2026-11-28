@@ -700,7 +700,7 @@ class TestACachedSourceIsNotTheJobs:
             _ = job.run()
         cache_tables = table_paths(cache)
         assert len(cache_tables) == 1 and cache_tables[0].startswith("c/")
-        assert not any(p.endswith("sdb_v1") for p in table_paths(db))
+        assert not any(p.endswith("sdb_v2") for p in table_paths(db))
 
 
 # B2 and B3 were fixed on main for every case by ITL-1412: these check that the order
@@ -721,7 +721,7 @@ def _dangling_record_ids(pipeline_root: pathlib.Path, result_root: pathlib.Path)
             result_ids.update(stored.column("__rid").to_pylist())
     record_ids: set[Any] = set()
     for path in pipeline.list_table_paths(()):
-        if path[-1] == "pdb_v2":
+        if path[-1] == "pdb_v3":
             stored = pipeline.get_all_records(path)
             assert stored is not None
             record_ids.update(stored.column(constants.DATA_RECORD_ID).to_pylist())
@@ -791,7 +791,7 @@ class TestCommitOrderAcrossTwoDatabases:
             with pytest.raises(OrcapodDatabaseWriteError) as info:
                 _ = job.run(orchestrator=orchestrator)
         published = DeltaTableDatabase(pipeline_root)
-        assert [p for p in published.list_table_paths(()) if p[-1] == "pdb_v2"] == []
+        assert [p for p in published.list_table_paths(()) if p[-1] == "pdb_v3"] == []
         assert "result" in str(info.value) and "rdb_v1" in "/".join(
             info.value.record_path
         )
@@ -820,7 +820,7 @@ class TestForeignPipelineRowsFromAnotherHandle:
         _ = job.run(orchestrator=orchestrator)
         delivered.clear()
 
-        (path,) = [p for p in pipeline.list_table_paths(()) if p[-1] == "pdb_v2"]
+        (path,) = [p for p in pipeline.list_table_paths(()) if p[-1] == "pdb_v3"]
         stored = pipeline.get_all_records(path, record_id_column="__rid")
         assert stored is not None
         context = stored.schema.get_field_index("__data_context")

@@ -3284,14 +3284,14 @@ def test_why_missing_reads_no_result_table(monkeypatch: pytest.MonkeyPatch) -> N
 
     Probe: the database's own ``refresh_table`` and ``get_all_records`` calls, by
     path (a result table's path ends in ``rdb_v1``, a pipeline table's in
-    ``pdb_v2``).
+    ``pdb_v3``).
     """
     job = _trials_job(InMemoryArrowDatabase())
     job.run()
     calls = _store_calls(monkeypatch, InMemoryArrowDatabase)
     answer = job.nodes["scores"].why_missing("trials", "row_0")
     assert not answer.missing and answer.entry_recorded is True
-    assert any(c[2][-1] == "pdb_v2" for c in calls)
+    assert any(c[2][-1] == "pdb_v3" for c in calls)
     assert not [c for c in calls if c[2][-1] == "rdb_v1"]
     calls.clear()
     job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
@@ -3453,7 +3453,8 @@ def test_a_direct_source_entry_token_must_name_its_own_record(
         return [
             {
                 name: value.replace("::row_0::", "::row_9::")
-                if name.startswith(constants.SOURCE_PREFIX) and isinstance(value, str)
+                if name.startswith(constants.INPUT_SOURCE_PREFIX)
+                and isinstance(value, str)
                 else value
                 for name, value in entry.items()
             }
@@ -3577,7 +3578,8 @@ def test_a_stored_token_naming_an_absent_column_is_refused(
         return [
             {
                 name: value.replace("::x", "::ghost")
-                if name.startswith(constants.SOURCE_PREFIX) and isinstance(value, str)
+                if name.startswith(constants.INPUT_SOURCE_PREFIX)
+                and isinstance(value, str)
                 else value
                 for name, value in entry.items()
             }
@@ -3600,7 +3602,7 @@ def test_a_stored_token_must_be_the_source_rows_own_token_for_its_column(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A function over a source with two inputs, x=10 and z=20 in one record: a
-    stored _source_x token changed to name z in that same record (record, input
+    stored _input_source_x token changed to name z in that same record (record, input
     hash and column all exist) is refused, never traced as x's input; a record whose
     x is null still traces both inputs, x to its null cell."""
     from orcapod.pipeline import provenance
@@ -3625,7 +3627,7 @@ def test_a_stored_token_must_be_the_source_rows_own_token_for_its_column(
     real = provenance._entries_for
 
     def swapped(*args: Any, **kwargs: Any) -> Any:
-        x_token = constants.SOURCE_PREFIX + "x"
+        x_token = constants.INPUT_SOURCE_PREFIX + "x"
         return [
             {
                 **entry,

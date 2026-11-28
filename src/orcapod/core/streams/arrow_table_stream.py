@@ -79,6 +79,9 @@ class ArrowTableStream(StreamBase):
             InputValidationError: If a column's type is, or contains, a
                 dictionary: dictionary-encoded columns are not currently supported
                 (ITL-1264, ITL-1277).
+                Also if a source-info token column does not have the shape of its
+                data column, or a token with a list layer is null
+                (``schema_utils.token_layers_fit``, ITL-1491).
         """
         super().__init__(**kwargs)
 
@@ -184,6 +187,14 @@ class ArrowTableStream(StreamBase):
         self._table = table
         self._source_info_table = prefix_tables[constants.SOURCE_PREFIX]
         self._data_context_table = data_context_table
+        # A token's list layers are its data's outer list layers, and a token with
+        # a layer is never null (developer, November 27, 2026, ITL-1491). Every
+        # source, operator result and table built from rows becomes a stream here,
+        # so this is the one check: types and validity only, no value read.
+        if found := schema_utils.token_shape_violations(
+            self._table, self._source_info_table, self._data_columns
+        ):
+            raise schema_utils.token_shape_error(found)
 
         if len(self._data_columns) == 0:
             raise ValueError(

@@ -14,6 +14,11 @@ from orcapod.types import ContentHash, Schema, SchemaLike
 
 logger = logging.getLogger(__name__)
 
+TokenShapeViolation = tuple[str, str, pa.DataType, pa.DataType, int | None]
+"""A token column that breaks the token-shape rule: the token column, its data
+column, both types as the rule reads them, and the list level of a null list
+(0 is the token itself), or ``None`` when the token's type does not fit the data's."""
+
 
 def verify_data_schema(data: dict, schema: SchemaLike) -> bool:
     """Verify that the dictionary's types match the expected types in the schema."""
@@ -834,6 +839,180 @@ def dictionary_columns(
     return found
 
 
+def _list_layer(arrow_type: "pa.DataType") -> "tuple[str, int] | None":
+    """Return the list layer ``arrow_type`` has on the outside, or ``None``.
+
+    A plain and a large list are one kind (the large variant: every stream is in
+    its large variants); a fixed-size list is another kind for each size.
+
+    Args:
+        arrow_type: An Arrow type.
+
+    Returns:
+        ``("large_list", 0)``, ``("fixed_size_list", <size>)``, or ``None`` when
+        the type is not a list.
+    """
+    if pa.types.is_large_list(arrow_type) or pa.types.is_list(arrow_type):
+        return ("large_list", 0)
+    if pa.types.is_fixed_size_list(arrow_type):
+        return ("fixed_size_list", arrow_type.list_size)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a fixed-size list type has a size
+    return None
+
+
+def token_layers_fit(token_type: "pa.DataType", data_type: "pa.DataType") -> bool:
+    """Whether a source-info token type's layers are its data type's outer layers.
+
+    The token-shape rule (developer, November 27, 2026, ITL-1491). A token
+    column's type is some list layers on top of a plain token. Those layers must
+    match exactly the outer list layers of the data column's type: a large list
+    needs a large list, a fixed-size list a fixed-size list of the same size
+    (a plain ``list`` counts as a large list). The data may be deeper than its
+    token, and a token with no layer fits any data. A data type that is a
+    logical type is read as its storage, so the logical list built for a list of
+    a logical element counts as one large-list layer per list level.
+
+    Only lists are layers today, and under its layers a token is a string: a
+    token type with a layer of another kind (a struct, a map, a union, a list
+    view) or with another leaf (an integer, a binary) is refused whatever the
+    data. A layer's item field (its name, nullability and metadata) is not
+    compared.
+
+    Args:
+        token_type: The Arrow type of the ``_source_<name>`` column.
+        data_type: The Arrow type of the data column ``<name>``.
+
+    Returns:
+        Whether the token type fits the data type.
+    """
+    token, data = token_type, data_type
+    while True:
+        layer = _list_layer(token)
+        if layer is None:
+            # The leaf: a string. A stream's token columns are large-normalized;
+            # the other spellings are the same token.
+            return (
+                pa.types.is_large_string(token)
+                or pa.types.is_string(token)
+                or pa.types.is_string_view(token)
+            )
+        while isinstance(data, pa.ExtensionType):
+            data = data.storage_type
+        if _list_layer(data) != layer:
+            return False
+        token, data = token.value_type, data.value_type  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a list type has a value type
+
+
+TOKEN_SHAPE_RULE = (
+    "A source-info token column must have the shape of its data column: its type is "
+    "list layers over a string (large_string), each list layer needs the same list "
+    "layer in the data's type (a large list, or a fixed-size list of the same size), "
+    "and a token's list is never null at any level: a null is allowed only at the "
+    "innermost level, where the element is a string"
+)
+"""The token-shape rule, as the refusal of a stream that breaks it begins."""
+
+
+def null_list_level(column: "pa.ChunkedArray[Any] | pa.Array[Any]") -> int | None:
+    """Return the outermost list level at which a token column holds a null list.
+
+    A token's list is never null at any level (developer, November 27, 2026,
+    ITL-1491): a null is allowed only at the innermost level, where the element is
+    a string. Level 0 is the token itself, level 1 the lists inside it, and so on.
+    Only validity is read, level by level (the null count of each level's arrays);
+    no value is read. A column with no rows, and a plain string column, have none.
+
+    Args:
+        column: A ``_source_<name>`` column.
+
+    Returns:
+        The level, or ``None`` when no list of the column is null.
+    """
+    arrays: "list[pa.Array[Any]]" = (
+        list(column.chunks) if isinstance(column, pa.ChunkedArray) else [column]
+    )
+    level = 0
+    while arrays and _list_layer(arrays[0].type) is not None:
+        if any(array.null_count for array in arrays):
+            return level
+        arrays = [array.flatten() for array in arrays]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a list array
+        level += 1
+    return None
+
+
+def token_shape_violations(
+    data: "pa.Table", tokens: "pa.Table", data_columns: Collection[str]
+) -> "list[TokenShapeViolation]":
+    """Return the source-info columns of a table that break the token-shape rule.
+
+    The shape is read from the columns' types and the nulls from the validity of
+    every list level of a list-typed token column (``null_list_level``); no value
+    is read. A plain string token column is never looked at further,
+    and a data column with no token column is skipped.
+
+    Args:
+        data: The table of tag and data columns.
+        tokens: The table of ``_source_<name>`` columns (it may be ``data``).
+        data_columns: The data columns (data-tags included).
+
+    Returns:
+        One entry per violating column, in the order of ``data_columns``
+        (``TokenShapeViolation``).
+    """
+    from orcapod.system_constants import constants
+
+    found: "list[TokenShapeViolation]" = []
+    token_names = set(tokens.column_names)
+    for name in data_columns:
+        token_name = f"{constants.SOURCE_PREFIX}{name}"
+        if token_name not in token_names:
+            continue
+        token_type = tokens.schema.field(token_name).type
+        if pa.types.is_large_string(token_type):
+            continue
+        data_type = data.schema.field(name).type
+        if not token_layers_fit(token_type, data_type):
+            found.append((token_name, name, token_type, data_type, None))
+        elif (level := null_list_level(tokens.column(token_name))) is not None:
+            found.append((token_name, name, token_type, data_type, level))
+    return found
+
+
+def token_shape_error(
+    found: "Sequence[TokenShapeViolation]",
+) -> InputValidationError:
+    """Return the error refusing the source-info columns ``found``.
+
+    Args:
+        found: The columns, as ``token_shape_violations`` returns them.
+
+    Returns:
+        An ``InputValidationError`` naming each token column, its data column and
+        both types, and what is wrong with it, in the order of the token columns'
+        names (a set of names is held sorted).
+    """
+    lines = [
+        f"  - token column {token_name!r} has type {token_type} and its data column "
+        f"{name!r} has type {data_type}: "
+        + (
+            "the token's type is not list layers over a string that are the "
+            "data's outer list layers"
+            if level is None
+            else "it holds a null token"
+            if level == 0
+            else f"it holds a null list of tokens at list level {level} (level 0 "
+            "is the token itself)"
+        )
+        for token_name, name, token_type, data_type, level in sorted(
+            found, key=lambda entry: entry[0]
+        )
+    ]
+    return InputValidationError(
+        f"{TOKEN_SHAPE_RULE}:\n"
+        + "\n".join(lines)
+        + "\nA plain string token (large_string) fits any data and may be null."
+    )
+
+
 def dictionary_columns_error(
     found: "Sequence[tuple[str, pa.DataType, pa.DataType]]",
     tag_columns: Collection[str],
@@ -901,6 +1080,8 @@ def _column_role(
         return "tag"
     if name in system_tag_columns or name.startswith(constants.SYSTEM_TAG_PREFIX):
         return "system-tag"
+    if name.startswith(constants.INPUT_SOURCE_PREFIX):
+        return "input source-info"
     if name.startswith(constants.SOURCE_PREFIX):
         return "source-info"
     if name == constants.CONTEXT_KEY:
@@ -1043,22 +1224,23 @@ def require_names_not_system(names: Collection[str]) -> None:
     (``_tag_``) as a system tag, one that starts with the source-info prefix
     (``_source_``) as source info, and the context key column (``_context_key``)
     as the data context, so a tag or data column renamed to such a name stops
-    being one (ITL-1160). The meta prefix has its own check,
+    being one (ITL-1160). Function pipeline tables also reserve a prefix for
+    input source info. The meta prefix has its own check,
     ``require_names_not_meta``.
 
     Args:
         names: Tag or data column names.
 
     Raises:
-        InputValidationError: If a name starts with the system-tag or the
-            source-info prefix, or is the context key column. The message names
-            the column.
+        InputValidationError: If a name starts with a reserved prefix or is the
+            context key column. The message names the column.
     """
     from orcapod.system_constants import constants
 
     reserved_prefixes = {
         constants.SYSTEM_TAG_PREFIX: "system tags",
         constants.SOURCE_PREFIX: "source info",
+        constants.INPUT_SOURCE_PREFIX: "input source info",
     }
     for name in sorted(names):
         for prefix, kind in reserved_prefixes.items():

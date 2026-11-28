@@ -356,6 +356,7 @@ class Datagram(ContentIdentifiableBase):
         """
         if table.num_rows == 0:
             return
+        original_table = table
         table = arrow_utils.normalize_table_to_large_types(table)
         row_contexts: list[Any | None] | None = None
         if constants.CONTEXT_KEY in table.column_names and data_context is None:
@@ -365,7 +366,9 @@ class Datagram(ContentIdentifiableBase):
         if apart_prefix is not None:
             apart = [c for c in data_table.column_names if c.startswith(apart_prefix)]
             if apart:
-                apart_table = data_table.select(apart)
+                apart_table = arrow_utils.normalize_table_to_large_types(
+                    original_table.select(apart), keep_null=True
+                )
                 data_table = data_table.drop_columns(apart)
         # The optional tables that are there, and where each is in a row's tuple.
         optional = [meta_table, apart_table, beside]

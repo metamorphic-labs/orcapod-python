@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 
 from orcapod.system_constants import constants
+from orcapod.utils.arrow_utils import contains_null_type
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -89,7 +90,41 @@ def entry_id(
     Returns:
         The entry id.
     """
-    return hasher.hash_table(entry_id_preimage(tag, data))
+    preimage = entry_id_preimage(tag, data)
+    try:
+        return hasher.hash_table(preimage)
+    except ValueError as exc:
+        raw_null_tags = [
+            repr(field.name)
+            for field in preimage.schema
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+            and contains_null_type(field.type)
+        ]
+        if raw_null_tags:
+            names = ", ".join(raw_null_tags)
+            raise ValueError(
+                f"{exc}. Declare a supported nullable type for the raw Arrow Null "
+                f"system-tag column(s) {names}."
+            ) from exc
+        raise
+
+
+def input_source_info_table(data: "DataProtocol") -> "pa.Table":
+    """Return the typed token columns shared by the pipeline row and instance id.
+
+    Args:
+        data: The function node's input row, possibly an ``EmptyData`` placeholder.
+
+    Returns:
+        The input's source-info columns, prefixed for the function pipeline table.
+    """
+    tokens = data.source_info_table()
+    return tokens.rename_columns(
+        [
+            constants.INPUT_SOURCE_PREFIX + name.removeprefix(constants.SOURCE_PREFIX)
+            for name in tokens.column_names
+        ]
+    )
 
 
 def instance_id_preimage(entry: "ContentHash", data: "DataProtocol") -> "pa.Table":
@@ -101,15 +136,15 @@ def instance_id_preimage(entry: "ContentHash", data: "DataProtocol") -> "pa.Tabl
 
     Returns:
         A one-row table: ``__pipeline_entry_id`` (``large_binary``, the labelled
-        digest of the entry id), then the source-info columns of the data in name
-        order. A placeholder that carries no token gives the entry id alone.
+        digest of the entry id), then the pipeline row's input-token columns in
+        name order. A placeholder that carries no token gives the entry id alone.
     """
     preimage = pa.table(
         {ENTRY_ID_COL: pa.array([entry.to_prefixed_digest()], type=pa.large_binary())}
     )
     # A placeholder (``EmptyData``) gives the tokens it carries here, and no column
     # when it carries none.
-    tokens = data.source_info_table()
+    tokens = input_source_info_table(data)
     for name in sorted(tokens.column_names):
         preimage = preimage.append_column(
             tokens.schema.field(name), tokens.column(name)

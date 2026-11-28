@@ -180,7 +180,7 @@ def test_a_failed_batch_preparation_is_raised_again_without_a_second_read() -> N
     assert reads == [1]
 
 
-# ── streams/base.py:550 (2): system tags the rows retype take the row path ────
+# ── streams/base.py:550 (2): raw stream system-tag fields on channels ─────────
 
 
 def _with_system_tag(column: pa.Array[Any]) -> ArrowTableStream:
@@ -197,12 +197,10 @@ def _with_system_tag(column: pa.Array[Any]) -> ArrowTableStream:
     ],
     ids=["int16", "int32", "string"],
 )
-def test_a_channel_on_a_stream_gives_the_rows_system_tag_types(
+def test_a_channel_on_a_raw_stream_keeps_the_declared_system_tag_field(
     column: pa.Array[Any],
 ) -> None:
-    """A channel opened on an exact ``ArrowTableStream`` whose system tag rows would
-    retype delivers what the rows build (``main``'s row path), e.g. ``int16`` as
-    ``int64``."""
+    """Both the channel and the row-built table carry the stream's declared field."""
     from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
     from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
 
@@ -212,16 +210,18 @@ def test_a_channel_on_a_stream_gives_the_rows_system_tag_types(
         list(stream.iter_data()), stream
     ).as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     (name,) = [n for n in delivered.column_names if n.startswith("_tag")]
-    assert delivered.schema.field(name).type == built.schema.field(name).type
+    expected = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS).schema.field(name)
+    assert delivered.schema.field(name).equals(expected, check_metadata=True)
+    assert built.schema.field(name).equals(expected, check_metadata=True)
     assert delivered[name].to_pylist() == built[name].to_pylist()
 
 
-def test_a_channel_on_a_stream_whose_rows_cannot_make_one_table_raises() -> None:
-    """A string system tag holding a null and a value: the rows cannot make one
-    table; the channel raises what ``main``'s row build raises."""
+def test_a_channel_keeps_null_values_in_a_nullable_raw_system_tag() -> None:
+    """A single nullable field can hold the rows with and without a value."""
     stream = _with_system_tag(pa.array(["a", None], pa.large_string()))
-    with pytest.raises(pa.ArrowInvalid):
-        asyncio.run(stream.open_channel().collect())
+    table = pa.Table.from_batches(asyncio.run(stream.open_channel().collect()))
+    assert table.schema.field("_tag_e").equals(pa.field("_tag_e", pa.large_string()))
+    assert table.column("_tag_e").to_pylist() == ["a", None]
 
 
 def _arrow_table_source() -> ArrowTableSource:

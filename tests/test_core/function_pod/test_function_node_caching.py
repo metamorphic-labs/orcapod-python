@@ -397,9 +397,9 @@ class TestPipelineRecordSourceColumns:
         source_cols = [
             c
             for c in pipeline_records.column_names
-            if c.startswith(constants.SOURCE_PREFIX)
+            if c.startswith(constants.INPUT_SOURCE_PREFIX)
         ]
-        assert len(source_cols) > 0
+        assert source_cols == [constants.INPUT_SOURCE_PREFIX + "x"]
 
     def test_pipeline_record_excludes_data_columns_of_input(self):
         """Pipeline records should NOT include data columns of the input data."""

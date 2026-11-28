@@ -138,7 +138,7 @@ _PIPELINE_RECORDING_FIELDS = (
 
 
 def _pipeline_meta_schema() -> pa.Schema:
-    """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
+    """The bookkeeping columns of a function node's pipeline record (``pdb_v3``).
 
     The record holds the tags, system tags and input source-info columns, then
     these. The instance id is the plain column a run looks a row up by, and the
@@ -434,9 +434,12 @@ class FunctionNodeBase(StreamBase):
                     f"{expected_data_schema}: {reason}"
                 )
 
+            output_keys = function_pod.data_function.output_data_schema.keys()
+            schema_utils.require_names_not_system(
+                {*incoming_tag_types, *incoming_data_types, *output_keys}
+            )
             schema_utils.require_output_keys_not_tags(
-                incoming_tag_types.keys(),
-                function_pod.data_function.output_data_schema.keys(),
+                incoming_tag_types.keys(), output_keys
             )
 
         self._input_stream = input_stream
@@ -1315,10 +1318,10 @@ def _joined_from_stored(
 ) -> "pa.Table":
     """Build the joined records from the stored tables, by the rows Polars matched.
 
-    The layout is the one Polars' join and diagonal concatenation gave: every
-    pipeline-table column, then each result column other than the record id (a name
-    the pipeline table also has takes the suffix ``_right``), in order of first
-    appearance across ``parts``; a column a part lacks is null in that part's rows.
+    Pipeline columns come first, followed by result columns in order of first
+    appearance across ``parts``. The result's copy of the record id is skipped.
+    Overlaps take the suffix ``_right``. Input and output tokens already have
+    distinct names. A column a part lacks is null in that part's rows.
 
     Args:
         matched: The matched rows, in output order: a ``_TAGINFO_ROW`` column and,
@@ -1340,7 +1343,7 @@ def _joined_from_stored(
         for name in results.column_names:
             if name == constants.DATA_RECORD_ID:
                 continue
-            out = f"{name}_right" if name in taginfo.column_names else name
+            out = f"{name}_right" if name in names else name
             result_names.setdefault(out, name)
     part_rows = []
     for row_column, _ in parts:
@@ -1578,7 +1581,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         since the last run are found before anything is delivered (ITL-1408). Other
         nodes read their current tables the first time only.
 
-        A pipeline table at another layout than this version's (``pdb_v2``) was written
+        A pipeline table at another layout than this version's (``pdb_v3``) was written
         by another version of Orcapod: its rows are not read as results and are left
         unchanged, and their number is reported (ITL-944). Such tables are looked for
         at this node's own path and, because the hashes in a path can differ between
@@ -3271,7 +3274,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # (``row_ids.instance_id_preimage`` takes the same table): a stored row
         # gives its instance id again from its own columns, whatever their types
         # (ITL-1471). Never typed again from the token values.
-        input_source_table = input_data.source_info_table()
+        input_source_table = row_ids.input_source_info_table(input_data)
 
         # Build the meta columns table.
         meta_table = pa.Table.from_pydict(
@@ -3330,11 +3333,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     def _require_one_type_per_token_column(self, tokens: "pa.Table") -> None:
         """Refuse a row whose token column has another type than the rows recorded.
 
-        A pipeline table has one Arrow type per column. A token's type is a
-        function of its value (``Data.source_info_table``: a null is a
-        ``large_string`` null, a list a list), so rows whose tokens of one column
-        differ in kind (a list token and a string or null token) cannot share a
-        table. The types are those of the stored table (read once, by
+        A pipeline table has one Arrow type per column. A token column's type is
+        determined by the pipeline (ITL-1491), so in a pipeline built through
+        sources every row of one table gives a column the same type; this is the
+        safety net for a hand-built raw stream given straight to a node, and for
+        an implementation bug. A null token is recorded as a ``large_string`` null
+        whatever its column declares (``Data.source_info_table``), so a column
+        that mixes null and list tokens is refused here too. The types are those
+        of the stored table (read once, by
         ``_preflight_pipeline_write_schema``) and of the rows this node recorded
         since.
 
@@ -3380,7 +3386,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._token_column_types = {
             field.name: arrow_utils.normalize_to_large_types(field.type, keep_null=True)
             for field in existing or ()
-            if field.name.startswith(constants.SOURCE_PREFIX)
+            if field.name.startswith(constants.INPUT_SOURCE_PREFIX)
         }
         self._pipeline_preflight_checked = True
 
@@ -3895,6 +3901,21 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 else (taginfo_schema, results_schema)
             ),
         )
+        # Only a fall-through data-tag keeps an input token in the output.
+        # Expose it under the usual stream prefix and discard other input tokens.
+        fall_through_tokens = {
+            constants.INPUT_SOURCE_PREFIX + name: constants.SOURCE_PREFIX + name
+            for name in data_tags
+        }
+        presented_columns = [
+            name
+            for name in joined.column_names
+            if not name.startswith(constants.INPUT_SOURCE_PREFIX)
+            or name in fall_through_tokens
+        ]
+        joined = joined.select(presented_columns).rename_columns(
+            [fall_through_tokens.get(name, name) for name in presented_columns]
+        )
         # In memory, each row names its data context in the datagram context column.
         joined = joined.append_column(
             pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
@@ -3937,7 +3958,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         return {
             key: gone[key]
             if key in gone
-            else row.get(f"{constants.SOURCE_PREFIX}{key}")
+            else row.get(f"{constants.INPUT_SOURCE_PREFIX}{key}")
             for key in data_keys
         }
 
@@ -3992,7 +4013,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             c
             for c in fetched.taginfo_columns
             if not c.startswith(constants.META_PREFIX)
-            and not c.startswith(constants.SOURCE_PREFIX)
+            and not c.startswith(constants.INPUT_SOURCE_PREFIX)
             and not c.startswith(constants.SYSTEM_TAG_PREFIX)
             and c != RECORD_ID_COL
             and c != constants.NODE_CONTENT_HASH_COL

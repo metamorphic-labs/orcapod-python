@@ -2,6 +2,7 @@
 SYSTEM_COLUMN_PREFIX = "__"
 DATAGRAM_PREFIX = "_"
 SOURCE_INFO_PREFIX = "source_"
+INPUT_SOURCE_INFO_PREFIX = "input_source_"
 POD_ID_PREFIX = "pod_id_"
 PF_VARIATION_PREFIX = "pf_var_"
 PF_EXECUTION_PREFIX = "pf_exec_"
@@ -28,11 +29,13 @@ IS_EPHEMERAL_COL = "is_ephemeral"
 # 2026, ITL-1471). A function result table has one more
 # component before its layout: the revision of its data function type's own record
 # (``rev1``, declared by the type, ``core/data_function_types.py``).
-PIPELINE_DB_SCHEMA_VERSION = "pdb_v2"
+# The function pipeline moved to v3 when its input tokens got a dedicated prefix
+# in storage and in the instance-id preimage (ITL-1524).
+PIPELINE_DB_SCHEMA_VERSION = "pdb_v3"
 RESULT_DB_SCHEMA_VERSION = "rdb_v1"
 TRACKING_DB_SCHEMA_VERSION = "tdb_v2"
-OPERATOR_DB_SCHEMA_VERSION = "odb_v2"
-SOURCE_DB_SCHEMA_VERSION = "sdb_v1"
+OPERATOR_DB_SCHEMA_VERSION = "odb_v3"
+SOURCE_DB_SCHEMA_VERSION = "sdb_v2"
 STORED_DATA_CONTEXT = "data_context"
 # The data context of everything Orcapod wrote before v0.3. Its manifest is not shipped:
 # stored rows that carry this key, and tables without a data context column, belong to it.
@@ -63,6 +66,11 @@ class SystemConstant:
     @property
     def SOURCE_PREFIX(self) -> str:
         return f"{self._global_prefix}{DATAGRAM_PREFIX}{SOURCE_INFO_PREFIX}"
+
+    @property
+    def INPUT_SOURCE_PREFIX(self) -> str:
+        """Prefix of a function pipeline row's stored and hashed input tokens."""
+        return f"{self._global_prefix}{DATAGRAM_PREFIX}{INPUT_SOURCE_INFO_PREFIX}"
 
     @property
     def CONTEXT_KEY(self) -> str:
