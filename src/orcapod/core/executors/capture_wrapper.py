@@ -112,10 +112,12 @@ def make_capture_wrapper(name: str | None = None) -> Callable[..., Any]:
             sys.stderr = sys_stderr_buf
             try:
                 result = fn(**kwargs)
-                # If fn is async, run the returned coroutine to completion.
-                # asyncio.run() is safe here: Ray workers run in fresh
-                # processes with no existing event loop.
-                if inspect.iscoroutine(result):
+                # When checking a declared container, await only coroutine
+                # functions, as the local executor does. A coroutine returned
+                # by a synchronous function is itself the value to validate.
+                if inspect.iscoroutine(result) and (
+                    return_container is None or inspect.iscoroutinefunction(fn)
+                ):
                     raw_result = asyncio.run(result)
                 else:
                     raw_result = result

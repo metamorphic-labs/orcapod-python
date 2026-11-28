@@ -690,7 +690,20 @@ class _SerializesAsTuple:
         return tuple, (("wrong-first", "wrong-second"),)
 
 
-@pytest.mark.parametrize("returned", ["generator", "tuple-on-unpickle", "valid"])
+@pytest.mark.parametrize(
+    "returned",
+    [
+        "generator",
+        "tuple-on-unpickle",
+        pytest.param(
+            "coroutine",
+            marks=pytest.mark.filterwarnings(
+                "ignore:coroutine .* was never awaited:RuntimeWarning"
+            ),
+        ),
+        "valid",
+    ],
+)
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["call", "async-call"])
 def test_ray_checks_multi_output_container_before_serializing(
     returned: str, asynchronous: bool, monkeypatch: pytest.MonkeyPatch
@@ -702,11 +715,16 @@ def test_ray_checks_multi_output_container_before_serializing(
 
     from orcapod.core.executors.ray import RayExecutor
 
+    async def coroutine_outputs(x: str, y: str) -> tuple[str, str]:
+        return x, y
+
     def raw_outputs(x: str, y: str) -> object:
         if returned == "generator":
             return (value for value in (x, y))
         if returned == "tuple-on-unpickle":
             return _SerializesAsTuple()
+        if returned == "coroutine":
+            return coroutine_outputs(x, y)
         return x, y
 
     def worker_output(x: str, y: str) -> tuple[str, str]:
@@ -769,7 +787,7 @@ def test_ray_checks_multi_output_container_before_serializing(
             assert result.as_dict() == {"first": "a", "second": "b"}
         else:
             returned_type = (
-                "generator" if returned == "generator" else "_SerializesAsTuple"
+                "_SerializesAsTuple" if returned == "tuple-on-unpickle" else returned
             )
             with pytest.raises(OutputContainerTypeError) as caught:
                 _ = call()
