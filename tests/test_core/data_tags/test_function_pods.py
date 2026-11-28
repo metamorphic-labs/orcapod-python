@@ -138,7 +138,7 @@ def test_strict_call_is_process() -> None:
     def double(t: int, amp: float) -> float:
         return t * amp
 
-    strict = double.pod(_source(), strict=True)
+    strict = double.pod(_source(), strict_columns=True)
     assert stream_data_tags(strict) == ()
 
 

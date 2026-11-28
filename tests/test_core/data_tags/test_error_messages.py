@@ -138,7 +138,7 @@ def test_a_plain_mismatch_says_nothing_about_data_tags() -> None:
     assert "data-tag" not in str(excinfo.value)
 
 
-# ── pod.process and strict=True: the exact form (ITL-1022) ──────────────────
+# ── pod.process and strict_columns=True: the exact form (ITL-1022) ──────────────────
 
 
 @op.function_pod(output_keys=["half"])
@@ -148,8 +148,8 @@ def half(y: int) -> float:
 
 @pytest.mark.parametrize(
     "call",
-    [lambda s: half.pod.process(s), lambda s: half.pod(s, strict=True)],
-    ids=["process", "strict"],
+    [lambda s: half.pod.process(s), lambda s: half.pod(s, strict_columns=True)],
+    ids=["process", "strict_columns"],
 )
 def test_the_exact_form_names_unread_data_tags_and_the_ways_out(
     call: Callable[[op.sources.DictSource], object],
@@ -159,6 +159,7 @@ def test_the_exact_form_names_unread_data_tags_and_the_ways_out(
         _ = call(source)
     message = str(excinfo.value)
     assert "['x'] are data-tags of the input" in message
+    assert "pod(stream, strict_columns=True)" in message
     assert "pod(stream) to let them pass through as data-tags" in message
     assert "add ['x'] to the tag_only_columns of the source" in message
 

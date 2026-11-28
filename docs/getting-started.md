@@ -129,7 +129,7 @@ def analyze_conditions(temperature: float, pressure: float) -> tuple[float, bool
 - **Parameter names match data column names.** Each parameter takes the data column with
   exactly its name, here `temperature` and `pressure`.
 - **Data columns the function does not take are dropped** when you call the pod.
-  `pod(stream, strict=True)` and `pod.process(stream)` reject them instead (see
+  `pod(stream, strict_columns=True)` and `pod.process(stream)` reject them instead (see
   [Function Pods](concepts/function-pods.md#input-columns)).
 - **Type annotations define the schemas.** Orcapod uses them to build the output schema and
   to validate compatibility when the pod is applied. A parameter without an annotation needs
