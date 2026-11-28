@@ -535,7 +535,7 @@ def test_decorator_cached_pod_drops_unused_columns() -> None:
 
     assert [row["total"] for row in _rows(cached_add.pod(_wide()))] == [5, 9]
     with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
-        cached_add.pod(_wide(), strict_columns=True)
+        _ = cached_add.pod(_wide(), strict_columns=True)
 
 
 def test_wrapped_function_pod_drops_unused_columns() -> None:
