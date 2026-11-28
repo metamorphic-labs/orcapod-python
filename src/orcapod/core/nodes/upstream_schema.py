@@ -4,6 +4,7 @@ import pyarrow as pa
 
 from orcapod.core.streams.base import (
     StreamBase,
+    schema_requires_io,
     shared_zero_row_memo,
     typed_arrow_schemas,
     typed_zero_row_table,
@@ -12,8 +13,10 @@ from orcapod.logical_types.user_class_identity import equivalent_hints
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.system_constants import constants
-from orcapod.types import DataType, Schema
+from orcapod.types import ColumnConfig, DataType, Schema
 from orcapod.utils.schema_utils import declared_arrow_schema
+
+_SCHEMA_COLUMNS = ColumnConfig(system_tags=True)
 
 
 def _user_schemas(stream: StreamProtocol) -> tuple[Schema, Schema]:
@@ -27,23 +30,31 @@ def _user_schemas(stream: StreamProtocol) -> tuple[Schema, Schema]:
     return tag, data.drop(*meta) if meta else data
 
 
+def _schema_for_diagnostic(stream: StreamProtocol) -> tuple[Schema, Schema] | str:
+    """Describe an input schema without reading, computing or polling a row."""
+    if schema_requires_io(stream, _SCHEMA_COLUMNS):
+        return "<unavailable without reading rows>"
+    return stream.output_schema(columns=_SCHEMA_COLUMNS)
+
+
 @shared_zero_row_memo()
 def require_same_upstream_schemas(
     node: StreamBase, replacements: tuple[StreamProtocol, ...]
 ) -> None:
-    """Require each replacement to preserve the schema of its input position.
+    """Require replacements to preserve schemas that are known without reading rows.
 
     Args:
         node: The wired node.
         replacements: The proposed upstreams, in input order.
 
     Raises:
-        ValueError: If the upstream count or a tag, data, or system-tag schema changes.
+        ValueError: If the upstream count changes or two known schemas disagree in
+            tag, data, or system-tag fields.
     """
     upstreams = node.upstreams
     if len(upstreams) != len(replacements):
-        current = tuple(stream.output_schema() for stream in upstreams)
-        proposed = tuple(stream.output_schema() for stream in replacements)
+        current = tuple(_schema_for_diagnostic(stream) for stream in upstreams)
+        proposed = tuple(_schema_for_diagnostic(stream) for stream in replacements)
         raise ValueError(
             f"Cannot rewire node {node.label!r} with a different upstream count: "
             + f"current schemas {current!r}, replacement schemas {proposed!r}"
@@ -51,6 +62,10 @@ def require_same_upstream_schemas(
 
     for index, (upstream, replacement) in enumerate(zip(upstreams, replacements)):
         if upstream is replacement:
+            continue
+        if schema_requires_io(upstream, _SCHEMA_COLUMNS) or schema_requires_io(
+            replacement, _SCHEMA_COLUMNS
+        ):
             continue
         current = _user_schemas(upstream)
         proposed = _user_schemas(replacement)
@@ -80,15 +95,16 @@ def require_same_upstream_schemas(
                 + f"replacement (tag={proposed_arrow[0]}, data={proposed_arrow[1]})"
             )
 
-        columns = {"system_tags": True}
         current_system_tags = {
             name: hint
-            for name, hint in upstream.output_schema(columns=columns)[0].items()
+            for name, hint in upstream.output_schema(columns=_SCHEMA_COLUMNS)[0].items()
             if name not in current[0]
         }
         proposed_system_tags = {
             name: hint
-            for name, hint in replacement.output_schema(columns=columns)[0].items()
+            for name, hint in replacement.output_schema(columns=_SCHEMA_COLUMNS)[
+                0
+            ].items()
             if name not in proposed[0]
         }
         if current_system_tags != proposed_system_tags:

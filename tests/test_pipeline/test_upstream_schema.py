@@ -12,12 +12,12 @@ from orcapod.core.nodes import (
     OperatorNode,
 )
 from orcapod.core.operators import Join, MapData
-from orcapod.core.sources import DictSource
+from orcapod.core.sources import DictSource, PollingSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION
-from orcapod.types import CacheMode
+from orcapod.types import CacheMode, Cursor, Schema
 
 _SYSTEM_TAGS = {"system_tags": True}
 
@@ -48,6 +48,120 @@ def _raw(
         tag_columns=["group", "id"] if reverse else ["id", "group"],
         system_tag_columns=["custom_id"] if system_type is not None else [],
     )
+
+
+class _PollingFeed:
+    """A feed whose initial fetch may be empty and whose schema is optional."""
+
+    def __init__(self, value: int | str | None, schema: Schema | None = None) -> None:
+        self.value = value
+        self._schema = schema
+        self.polls = 0
+        self.fetches = 0
+
+    def identity(self) -> str:
+        return "rewire-feed"
+
+    def to_config(self) -> None:
+        return None
+
+    @classmethod
+    def from_config(cls, config: dict[str, object]) -> "_PollingFeed":
+        return cls(None)
+
+    def schema(self) -> Schema | None:
+        return self._schema
+
+    async def poll(self, cursor: Cursor[int] | None = None) -> bool:
+        self.polls += 1
+        return self.value is not None and (cursor is None or cursor.value == 0)
+
+    async def fetch(
+        self, cursor: Cursor[int] | None = None
+    ) -> tuple[Cursor[int], list[dict[str, int | str]]]:
+        self.fetches += 1
+        if self.value is None:
+            return Cursor(value=0), []
+        return Cursor(value=1), [{"id": 1, "group": "a", "x": self.value, "y": 5}]
+
+    async def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("initial_value", [None, 4, "four"])
+@pytest.mark.parametrize("kind", ["operator", "function"])
+def test_rewiring_to_unpolled_source_does_not_fetch(
+    kind: str, initial_value: int | str | None
+) -> None:
+    """A first batch cannot determine whether assignment is accepted."""
+    before = DictSource(
+        [{"id": 1, "group": "a", "x": 2, "y": 5}],
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+    )
+    feed = _PollingFeed(initial_value)
+    after = PollingSource(feed, ["id", "group"], record_id_columns="id")
+    if kind == "operator":
+        node = OperatorJobNode(MapData({"x": "xx"}), (before,), label="step")
+    else:
+        pod = _total.pod
+        assert isinstance(pod, FunctionPod)
+        node = FunctionNode(pod, before, label="step")
+
+    node.upstreams = (after,)
+
+    assert node.upstreams == (after,)
+    assert (feed.polls, feed.fetches) == (0, 0)
+    if isinstance(node, OperatorJobNode) and initial_value is None:
+        feed.value = 4
+        node.run()
+        assert node.as_table().column("xx").to_pylist() == [4]
+
+
+def test_rewiring_refuses_different_declared_polling_schema_without_fetch() -> None:
+    """An unpolled source can still have a schema known at assignment time."""
+    before = DictSource(
+        [{"id": 1, "group": "a", "x": 2, "y": 5}],
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+    )
+    feed = _PollingFeed("four", Schema({"id": int, "group": str, "x": str, "y": int}))
+    after = PollingSource(feed, ["id", "group"], record_id_columns="id")
+    node = OperatorNode(MapData({"x": "xx"}), (before,), label="step")
+
+    with pytest.raises(ValueError, match=r"'step'.*different schema"):
+        node.upstreams = (after,)
+
+    assert node.upstreams == (before,)
+    assert (feed.polls, feed.fetches) == (0, 0)
+
+
+@pytest.mark.parametrize("known_schema", [False, True])
+def test_function_rewiring_arity_error_includes_node_and_schemas(
+    known_schema: bool,
+) -> None:
+    """Report the current and proposed inputs without fetching an unknown schema."""
+    before = _raw(2, False)
+    feed = _PollingFeed(None)
+    after = (
+        ArrowTableStream(pa.table({"id": [1], "new_value": [5]}), tag_columns=["id"])
+        if known_schema
+        else PollingSource(feed, ["id", "group"], record_id_columns="id")
+    )
+    pod = _total.pod
+    assert isinstance(pod, FunctionPod)
+    node = FunctionNode(pod, before, label="named")
+
+    with pytest.raises(
+        ValueError,
+        match=r"'named'.*different upstream count.*current schemas.*'x'.*replacement schemas",
+    ) as error:
+        node.upstreams = (before, after)
+
+    replacement_schema = str(error.value).split("replacement schemas", 1)[1]
+    assert ("new_value" if known_schema else "unavailable") in replacement_schema
+    assert node.upstreams == (before,)
+    assert (feed.polls, feed.fetches) == (0, 0)
 
 
 @pytest.mark.parametrize("reverse", [False, True])

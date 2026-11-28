@@ -555,13 +555,11 @@ class FunctionNodeBase(StreamBase):
 
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
-        """Replace the node's input with one of the same schema.
+        """Replace the node's input, preserving its schema when both are known.
 
         Raises:
-            ValueError: If there is not exactly one input or its schema differs.
+            ValueError: If there is not exactly one input or the known schemas differ.
         """
-        if len(value) != 1:
-            raise ValueError("FunctionPod can only have one upstream")
         require_same_upstream_schemas(self, value)
         self._input_stream = value[0]
         self._forget_output_schema()

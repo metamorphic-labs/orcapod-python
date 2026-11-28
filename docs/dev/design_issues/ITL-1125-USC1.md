@@ -13,4 +13,5 @@ A stale pipeline hash still names the table for the old schema.
 schemas before changing the wiring or clearing the schema memo. The comparison checks
 input count, tag and data roles, equivalent Python types, and canonical Arrow field
 types and nullable flags, including for system tags. Data meta columns are ignored.
-Replacements with matching schemas remain supported.
+Only pairs of schemas available without reading rows are compared. Replacements with
+matching schemas remain supported.

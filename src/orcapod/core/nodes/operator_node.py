@@ -364,10 +364,10 @@ class OperatorNodeBase(StreamBase):
 
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
-        """Replace the node's inputs with inputs of the same schemas.
+        """Replace the node's inputs, preserving schemas known without reading rows.
 
         Raises:
-            ValueError: If the input count or a schema differs, or if the node
+            ValueError: If the input count or two known schemas differ, or if the node
                 caches (``LOG`` or ``REPLAY``) and a source feeding ``value`` is
                 restricted (ITL-1218).
         """
