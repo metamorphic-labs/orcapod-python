@@ -305,7 +305,7 @@ class _FunctionPodBase(TraceableBase):
             raise ValueError(
                 f"{error}. {unread} are data-tags of the input (each a tag "
                 "and a data column of one name) that the function does not read, and "
-                "the exact form, pod.process(stream) or pod(stream, strict=True), "
+                "the exact form, pod.process(stream) or pod(stream, strict_columns=True), "
                 f"hands every data column to the function: {way_out}"
             ) from error
         self._validate_output_keys(tag_schema.keys())
@@ -770,7 +770,7 @@ class _FunctionPodBase(TraceableBase):
         self,
         *streams: StreamProtocol,
         label: str | None = None,
-        strict: bool = False,
+        strict_columns: bool = False,
     ) -> StreamProtocol:
         """Apply the pod, dropping the data columns its function does not take.
 
@@ -786,7 +786,7 @@ class _FunctionPodBase(TraceableBase):
         Args:
             *streams: Input streams to process.
             label: Optional label for tracking.
-            strict: If ``True``, an extra data column is an error, as in
+            strict_columns: If ``True``, an extra data column is an error, as in
                 ``process``. It decides only that; it is part of no identity.
 
         Returns:
@@ -794,14 +794,14 @@ class _FunctionPodBase(TraceableBase):
 
         Raises:
             ValueError: If a parameter without a default has no column, a column's
-                type is incompatible with its parameter, or (``strict=True``) the
+                type is incompatible with its parameter, or (``strict_columns=True``) the
                 input carries a data column that is not a parameter.
         """
         logger.debug("Invoking pod %s on streams through __call__: %s", self, streams)
         # A function that accepts arbitrary keywords takes every column, so
         # nothing is unused and no select is added (developer, November 12, 2026,
         # ITL-807). No data function kind accepts them today.
-        if strict or self.data_function.accepts_arbitrary_keywords:
+        if strict_columns or self.data_function.accepts_arbitrary_keywords:
             return self.process(*streams, label=label)
 
         input_stream = self.handle_input_streams(*streams)
@@ -984,7 +984,7 @@ class FunctionPod(_FunctionPodBase):
         self,
         *streams: StreamProtocol,
         label: str | None = None,
-        strict: bool = False,
+        strict_columns: bool = False,
     ) -> FunctionPodStream:
         """Apply the pod, dropping the data columns its function does not take.
 
@@ -994,13 +994,14 @@ class FunctionPod(_FunctionPodBase):
         Args:
             *streams: Input streams to process.
             label: Optional label for tracking.
-            strict: If ``True``, an extra data column is an error, as in ``process``.
+            strict_columns: If ``True``, an extra data column is an error, as in ``process``.
 
         Returns:
             A ``FunctionPodStream`` wrapping the computation.
         """
         return cast(
-            FunctionPodStream, super().__call__(*streams, label=label, strict=strict)
+            FunctionPodStream,
+            super().__call__(*streams, label=label, strict_columns=strict_columns),
         )
 
     def to_config(self) -> dict[str, Any]:
