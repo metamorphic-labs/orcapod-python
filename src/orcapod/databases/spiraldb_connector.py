@@ -16,6 +16,7 @@ Example::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -24,11 +25,13 @@ import re
 import urllib.parse
 import urllib.request
 import warnings
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import Future
 from contextlib import contextmanager
 from copy import copy
-from threading import local
-from typing import TYPE_CHECKING, Any, cast
+from threading import Lock, Thread, local
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast
+from weakref import WeakValueDictionary
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -41,11 +44,12 @@ from orcapod.databases.spiraldb_nullability import (
 )
 from orcapod.databases.spiraldb_schema_table import (
     SCHEMA_TABLE,
+    SchemaRow,
     SchemaTable,
     compared_columns,
     describe_difference,
 )
-from orcapod.databases.spiraldb_sign_in import require_sign_in
+from orcapod.databases.spiraldb_sign_in import require_sign_in, saved_login_path
 from orcapod.errors import (
     NullInNonNullableColumnError,
     SpiralDBWriteNotSupportedError,
@@ -135,13 +139,20 @@ class SpiralDBTableNotFoundError(ValueError):
     """An exact table lookup found no matching table."""
 
 
+class _Health:
+    """Whether a call of one SDK client failed (``_SharedClient``)."""
+
+    failed = False
+
+
 @contextmanager
-def _service_call(doing: str) -> Iterator[None]:
+def _service_call(doing: str, health: _Health | None = None) -> Iterator[None]:
     """Note on a failing SDK call what Orcapod was doing: SpiralDB's errors often hold a
-    status only.
+    status only. A client with a failed call is handed to no new connector.
 
     Args:
         doing: What the call does, and to what.
+        health: The client's, if it is shared.
     """
     try:
         yield
@@ -149,11 +160,17 @@ def _service_call(doing: str) -> Iterator[None]:
         # The SDK's own error class is not named here: it may not be installed.
         if not isinstance(exc, (TableSchemaError, NullInNonNullableColumnError)):
             exc.add_note(f"SpiralDB: could not {doing}")
+            if health is not None:
+                health.failed = True
         raise
 
 
 def _open_keyed_table(
-    client: Any, project_id: str, dataset: str, name: str
+    client: Any,
+    project_id: str,
+    dataset: str,
+    name: str,
+    health: _Health | None = None,
 ) -> Any | None:
     """Return the latest snapshot of a keyed table, or ``None`` if there is none.
 
@@ -161,7 +178,7 @@ def _open_keyed_table(
     name means "no such table"; a missing project, a refused sign-in or a transport
     failure has another and is raised.
     """
-    with _service_call(f"open table {project_id}/{dataset}/{name}"):
+    with _service_call(f"open table {project_id}/{dataset}/{name}", health):
         try:
             return client.keyed_table(project_id, dataset, name)
         except sp.SpiralError as exc:
@@ -258,10 +275,11 @@ def _api_url(overrides: Mapping[str, str] | None) -> str | None:
     return api_url
 
 
-def _new_client(overrides: Mapping[str, str] | None) -> Any:
-    """Return a spiral-sdk client.
+def _client_options(overrides: Mapping[str, str] | None) -> tuple[str | None, Any]:
+    """Return the service address and the SDK's client class, a sign-in being present.
 
     Raises:
+        ValueError: As ``_api_url``.
         SpiralDBSignInError: If spiral-sdk would have to ask a person to sign in.
         ImportError: If spiral-sdk is not installed, or another package provides the
             ``spiral`` module (``pyspiral``, which must not be installed beside it).
@@ -276,7 +294,112 @@ def _new_client(overrides: Mapping[str, str] | None) -> Any:
             'install "orcapod[spiraldb]"'
         ) from exc
     require_sign_in()
-    return client_class(api_url=api_url)
+    return api_url, client_class
+
+
+class _SharedClient:
+    """One SDK client, used by every connector of one address and sign-in (ITL-1457).
+
+    Connectors hold it, and the registry of clients does not: it is released when the
+    last connector that uses it is closed.
+
+    Attributes:
+        sdk: spiral-sdk's client.
+        pid: The process that made it.
+        health: Whether a call of it failed.
+    """
+
+    def __init__(self, sdk: Any) -> None:
+        """Hold a client made in this process."""
+        self.sdk = sdk
+        self.pid = os.getpid()
+        self.health = _Health()
+        self._schemas: dict[tuple[str, str], SchemaTable] = {}
+        self._lock = Lock()
+
+    def schema_table(self, project_id: str, dataset: str) -> SchemaTable:
+        """Return the schema table of a dataset: one object, whose rows every connector
+        on this client uses."""
+        sdk, health = self.sdk, self.health
+        with self._lock:
+            return self._schemas.setdefault(
+                (project_id, dataset),
+                SchemaTable(
+                    project_id,
+                    dataset,
+                    lambda: _open_keyed_table(
+                        sdk, project_id, dataset, SCHEMA_TABLE, health
+                    ),
+                    lambda doing: _service_call(
+                        f"{doing} of {project_id}/{dataset}", health
+                    ),
+                ),
+            )
+
+
+_clients: WeakValueDictionary[Any, _SharedClient] = WeakValueDictionary()
+_clients_lock = Lock()  # held for the registry's own operations only
+
+
+def _forget_clients() -> None:
+    """In a forked child: leave the parent's clients, and a lock a thread of it held."""
+    global _clients, _clients_lock
+    _clients = WeakValueDictionary()
+    _clients_lock = Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_clients)
+
+
+def _sign_in_key() -> Any | None:
+    """Return what decides who a new client signs in as, without reading a credential.
+
+    It is a digest of the whole environment (the SDK documents ``SPIRAL_*``, and takes
+    more: proxies, a home folder, a CI's identity token) and the state of the saved
+    login's file. ``None`` when it cannot be told: the client is then not shared.
+    """
+    try:
+        environ = dict(os.environ)
+        path = saved_login_path(environ)
+        digest = hashlib.sha256(repr(sorted(environ.items())).encode()).hexdigest()
+    except (KeyError, RuntimeError, UnicodeError):
+        return None  # changed while it was read, or no home folder
+    try:
+        found = path.stat()
+        state = (found.st_dev, found.st_ino, found.st_size)
+        state = (*state, found.st_mtime_ns, found.st_ctime_ns)
+    except OSError:
+        state = None
+    return digest, str(path), state
+
+
+def _client_for(overrides: Mapping[str, str] | None) -> _SharedClient:
+    """Return this process's client of one address and sign-in, made on first use.
+
+    Connectors built at the same time may each make one; they all use the first that was
+    made. No lock is held while a client signs in.
+
+    Raises:
+        ValueError: As ``_client_options``, as are ``ImportError`` and
+            ``SpiralDBSignInError``.
+    """
+    api_url, client_class = _client_options(overrides)
+    sign_in = _sign_in_key()
+    key = (os.getpid(), client_class, api_url, sign_in)
+    with _clients_lock:
+        shared = None if sign_in is None else _clients.get(key)
+    if shared is not None and not shared.health.failed:
+        return shared
+    made = _SharedClient(client_class(api_url=api_url))
+    if sign_in is None or sign_in != _sign_in_key():
+        return made  # the sign-in changed meanwhile: whose it is is not known
+    with _clients_lock:
+        other = _clients.get(key)
+        if other is not None and not other.health.failed:
+            return other
+        _clients[key] = made
+        return made
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -343,6 +466,53 @@ def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> dict[str, 
             raise RuntimeError("SpiralDB's table listing does not advance")
         seen.add(following)
         token = following
+
+
+_T = TypeVar("_T")
+
+
+def _work(call: Callable[[], _T], future: Future[_T]) -> None:
+    """Give ``future`` the outcome of ``call``."""
+    try:
+        future.set_result(call())
+    except BaseException as exc:
+        future.set_exception(exc)
+    finally:
+        # A kept error holds this frame: without these it would hold itself.
+        del call, future
+
+
+def _start(call: Callable[[], _T]) -> Future[_T]:
+    """Make a service call in a thread of its own.
+
+    Only the call: what it finds is judged, and warned about, by the thread that waits for
+    it, so warning filters and the line a warning names do not depend on this.
+
+    Args:
+        call: The call.
+
+    Returns:
+        Its outcome.
+    """
+    future: Future[_T] = Future()
+    try:
+        Thread(target=_work, args=(call, future), name="spiraldb-call").start()
+    except RuntimeError:  # no thread can be started (the interpreter is ending)
+        _work(call, future)
+    return future
+
+
+class _Fetched(NamedTuple):
+    """What the service says about how a snapshot is read, fetched but not judged.
+
+    Attributes:
+        found: The snapshot's schema, as SpiralDB reports it.
+        rows: The rows of the dataset's schema table as stored now, seen after the
+            snapshot was opened.
+    """
+
+    found: Future[pa.Schema]
+    rows: Future[Mapping[str, SchemaRow] | None]
 
 
 def _literal(value: Any, arrow_type: pa.DataType) -> Any:
@@ -419,14 +589,28 @@ class SpiralDBTable:
         self._table = table
         self._table_name = table_name
         self._readings: dict[str, _Reading] = {}
+        self._fetched: _Fetched | None = None
 
     def _reading(self, table: Any) -> _Reading:
         """Return how a snapshot of this table is read, worked out once per version."""
         self._connector._require_open()  # pyright: ignore[reportPrivateUsage]  # owns the handle
         version = str(table.version_id)
         if version not in self._readings:
-            self._readings[version] = self._connector._reading(table, self._table_name)  # pyright: ignore[reportPrivateUsage]  # owns the handle
+            fetched, self._fetched = (
+                (self._fetched, None) if table is self._table else (None, self._fetched)
+            )
+            self._readings[version] = self._connector._reading(  # pyright: ignore[reportPrivateUsage]  # owns the handle
+                table, self._table_name, fetched
+            )
         return self._readings[version]
+
+    def fetch(self) -> None:
+        """Fetch what ``arrow_schema`` needs and judge nothing: no refusal and no warning.
+
+        The next ``arrow_schema`` judges it, in its own thread. For a check that fetches
+        several tables at the same time.
+        """
+        self._fetched = self._connector._fetch(self._table, self._table_name)  # pyright: ignore[reportPrivateUsage]  # owns the handle
 
     @property
     def table_id(self) -> str:
@@ -636,17 +820,13 @@ class SpiralDBConnector:
         self._dataset = dataset
         self._overrides = overrides
         self._closed = False
-        self._client = _new_client(overrides)
-        self._pid = os.getpid()
-        # Shared by every connector on this client (``share_client``).
+        self._shared = _client_for(overrides)
+        self._client = self._shared.sdk
+        self._health = self._shared.health  # kept: a read may end after close()
+        self._pid = self._shared.pid
+        # Shared by the connectors ``share_client`` gives.
         self._counts: dict[tuple[str, str], tuple[int, bool]] = {}
-        client = self._client
-        self._schemas = SchemaTable(
-            project_id,
-            dataset,
-            lambda: _open_keyed_table(client, project_id, dataset, SCHEMA_TABLE),
-            lambda doing: _service_call(f"{doing} of {project_id}/{dataset}"),
-        )
+        self._schemas = self._shared.schema_table(project_id, dataset)
 
     def _require_open(self) -> None:
         """Raise RuntimeError if this connector has been closed."""
@@ -665,7 +845,7 @@ class SpiralDBConnector:
 
     def _service_call(self, doing: str, table_name: str) -> Any:
         """Return a context that notes on a failing SDK call what it was doing."""
-        return _service_call(f"{doing} {self._qualified(table_name)}")
+        return _service_call(f"{doing} {self._qualified(table_name)}", self._health)
 
     def _require_user_table(self, table_name: str) -> None:
         """Refuse the reserved name of the dataset's schema table."""
@@ -727,14 +907,22 @@ class SpiralDBConnector:
         ):
             raise SpiralDBTableNotFoundError(missing)
         table = _open_keyed_table(
-            self._client, self._project_id, self._dataset, table_name
+            self._client,
+            self._project_id,
+            self._dataset,
+            table_name,
+            self._health,
         )
         if table is None:
             raise SpiralDBTableNotFoundError(missing)
         return SpiralDBTable(self, table, table_name)
 
     def _recorded_schema(
-        self, table: Any, table_name: str, found: pa.Schema
+        self,
+        table: Any,
+        table_name: str,
+        found: pa.Schema,
+        rows: Mapping[str, SchemaRow] | None,
     ) -> pa.Schema | None:
         """Return the schema recorded for an opened table; ``None``: as SpiralDB reports.
 
@@ -742,12 +930,12 @@ class SpiralDBConnector:
             table: The SDK's handle.
             table_name: Plain table name.
             found: The handle's schema, as SpiralDB reports it.
+            rows: The rows of the dataset's schema table; ``None`` when it has none.
 
         Raises:
-            TableSchemaError: If the dataset's schema table cannot be read or is not
-                complete, or the table's row disagrees with the table.
+            TableSchemaError: If the table's row disagrees with the table.
         """
-        row = self._schemas.row(str(table.resource_id))
+        row = None if rows is None else rows.get(str(table.resource_id))
         if row is None:
             _warn_unrecorded(self._qualified(table_name), str(table.resource_id))
             return None
@@ -769,18 +957,49 @@ class SpiralDBConnector:
             )
         return row.schema
 
-    def _reading(self, table: Any, table_name: str) -> _Reading:
+    def _fetch(self, table: Any, table_name: str) -> _Fetched:
+        """Fetch how an opened snapshot of ``table_name`` is read, judging nothing.
+
+        Both calls are made after the snapshot was opened, at the same time: no read uses
+        a schema whose schema table was not seen, complete, after its table was opened.
+        Both have ended when this returns.
+        """
+        self._require_open()
+        rows = _start(self._schemas.rows)
+        found: Future[pa.Schema] = Future()
+
+        def schema() -> pa.Schema:
+            with self._service_call("read the schema of", table_name):
+                return table.schema()
+
+        try:
+            _work(schema, found)
+        finally:
+            _ = rows.exception()  # waits
+        return _Fetched(found, rows)
+
+    def _reading(
+        self, table: Any, table_name: str, fetched: _Fetched | None = None
+    ) -> _Reading:
         """Return how an opened snapshot of ``table_name`` is read.
 
+        Args:
+            table: The SDK's handle.
+            table_name: Plain table name.
+            fetched: What was fetched for it; fetched now when not given.
+
         Raises:
-            TableSchemaError: If the table's row cannot be read or disagrees with it.
+            TableSchemaError: If the dataset's schema table cannot be read or is not
+                complete, or the table's row disagrees with the table.
         """
         self._require_open()
         qualified = self._qualified(table_name)
-        with self._service_call("read the schema of", table_name):
-            found = table.schema()
+        if fetched is None:
+            fetched = self._fetch(table, table_name)
+        found = fetched.found.result()
         with _about_table(qualified):
-            recorded = self._recorded_schema(table, table_name, found)
+            rows = fetched.rows.result()
+            recorded = self._recorded_schema(table, table_name, found, rows)
         return _Reading(found, recorded, qualified)
 
     def get_pk_columns(self, table_name: str) -> list[str]:
@@ -1052,7 +1271,9 @@ class SpiralDBConnector:
         """Close this connector and release its SDK client. Idempotent."""
         if not self._closed:
             self._closed = True
-            # spiral-sdk's client has no close method. Drop the owning references.
+            # spiral-sdk's client has no close method. Drop the owning references: the
+            # client goes with the last connector that uses it.
+            del self._shared
             del self._client
             del self._schemas
 

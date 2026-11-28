@@ -564,6 +564,16 @@ class RootSource(StreamBase):
         """
         return False
 
+    def _begin_check(self) -> "Callable[[], Callable[[], bool]] | None":
+        """Return the part of ``check_for_new_data`` a run may do at the same time as that
+        of the sources beside it; ``None``, the default, for none.
+
+        It changes nothing, warns of nothing and raises nothing a caller could see: it
+        returns the rest of the check, which does. The run calls that in its own thread,
+        in the sources' order, in place of ``check_for_new_data``.
+        """
+        return None
+
     # A source's rows are its own, not computed: a run() view says "all N rows".
     _RUN_ORIGIN: str = "held"
 
