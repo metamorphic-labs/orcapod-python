@@ -130,6 +130,8 @@ class ExtensionAwareDatabase:
         column_values: Collection[tuple[str, Any]] | Mapping[str, Any],
         record_id_column: str | None = None,
         flush: bool = False,
+        *,
+        columns: Collection[str] | None = None,
     ) -> pa.Table | None:
         return self._process(
             self._db.get_records_with_column_value(
@@ -137,6 +139,7 @@ class ExtensionAwareDatabase:
                 column_values,
                 record_id_column=record_id_column,
                 flush=flush,
+                **({"columns": columns} if columns is not None else {}),
             )
         )
 
@@ -248,6 +251,10 @@ class ExtensionAwareDatabase:
     def stores_records(self) -> bool:
         """Return whether the wrapped database retains records."""
         return self._db.stores_records
+
+    def preview_appended_rows(self, stored: pa.Table, incoming: pa.Table) -> pa.Table:
+        """Delegate to the wrapped database, whose append decides the rows read back."""
+        return self._db.preview_appended_rows(stored, incoming)
 
     @property
     def storage_location(self) -> str:

@@ -18,7 +18,11 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from orcapod.errors import OrcapodDatabaseError, OrcapodDatabaseWriteError
+from orcapod.errors import (
+    CachedSourceChangedRowError,
+    OrcapodDatabaseError,
+    OrcapodDatabaseWriteError,
+)
 from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
@@ -211,8 +215,8 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
 
     Called at the start of a run, before the state rule decides which nodes run: a
     source that found new data has moved its modified time, so the nodes below it are
-    stale. A check that raises does not stop the run (developer, November 14, 2026:
-    "For check that fails, issues a warning"): one ``SourceCheckFailedWarning`` names
+    stale. A changed cached row refuses the run (ITL-1396). Other check failures
+    issue one ``SourceCheckFailedWarning`` (developer, November 14, 2026) naming
     the source and the error, at the user's line that started the run and at every run,
     and the run proceeds with the data the source holds (a ``PollingSource`` that a run
     reads is polled again by that read, and a poll that fails then raises: ITL-1139).
@@ -232,6 +236,8 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     for source in run_sources(streams):
         try:
             source.check_for_new_data()
+        except CachedSourceChangedRowError:
+            raise
         except Exception as exc:
             name = source_name(source)
             unchecked.append(name)

@@ -27,7 +27,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import ProvenanceInconsistencyError
+from orcapod.errors import CachedSourceChangedRowError, ProvenanceInconsistencyError
 from orcapod.operators import (
     Batch,
     DropTagColumns,
@@ -41,6 +41,15 @@ from orcapod.operators import (
 )
 from orcapod.sources import ArrowTableSource, CachedSource, DictSource
 from orcapod.system_constants import constants
+from tests.test_core.sources.cache_versions import write_outside_the_rule
+
+# A cache holding two contents for one record id is refused when it is read (ITL-1396,
+# developer, November 28, 2026). The tests below that build one used to check how a
+# trace treats several held versions of one record; no run reaches that state now, so
+# each asserts the refusal for its own shape of cache and pipeline.
+TWO_VERSIONS_REFUSED = (
+    "the cache at .* holds 1 record id with more than one content: row_0"
+)
 
 pytestmark = pytest.mark.filterwarnings("ignore::Warning")
 
@@ -150,6 +159,7 @@ def test_merge_join_of_inputs_with_equal_pipeline_hashes() -> None:
 
 
 def test_two_cached_versions_of_one_record(tmp_path: Path) -> None:
+    """A Delta cache holding two data versions of one record refuses the run."""
     cache = DeltaTableDatabase(tmp_path / "cache")
     first = DictSource(
         [{"k": "a", "g": "1", "x": 1, "y": 0}],
@@ -164,18 +174,14 @@ def test_two_cached_versions_of_one_record(tmp_path: Path) -> None:
         tag_only_columns=True,
         source_id="v",
     )
+    write_outside_the_rule(second, cache, ("shared",))
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="v", database=InMemoryArrowDatabase())
     with job:
         SelectDataColumns(["x"])(cached)
-    job.run()
-    node = job.nodes["SelectDataColumns"]
-    held = sorted(r["x"] for r in node.as_table().to_pylist())
-    assert held == [1, 2]  # both versions are held, so both are tested
-    for x in held:
-        trace = node.trace({"k": "a", "g": "1", "x": x}, "x")
-        # The held version, never the other one.
-        assert [c.value for c in trace.source_cells()] == [x]
+    with pytest.raises(CachedSourceChangedRowError, match=TWO_VERSIONS_REFUSED):
+        job.run()
+    assert job.nodes["SelectDataColumns"].as_table().num_rows == 0
 
 
 def test_a_value_the_held_rows_do_not_hold_is_refused() -> None:
@@ -553,6 +559,7 @@ def test_no_user_code_runs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_two_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> None:
+    """Two versions of one record under a GroupBy: refused, so no group holds both."""
     cache = DeltaTableDatabase(tmp_path / "cache")
     first = DictSource(
         [{"k": "a", "g": "1", "x": 1, "y": 0}],
@@ -567,14 +574,14 @@ def test_two_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> Non
         tag_only_columns=True,
         source_id="v",
     )
+    write_outside_the_rule(second, cache, ("shared",))
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="vv", database=InMemoryArrowDatabase())
     with job:
         GroupBy(["g"])(SelectDataColumns(["x"])(cached))
-    job.run()
-    trace = job.nodes["GroupBy"].trace({"g": "1"}, "x")
-    assert sorted(trace.root.value) == [1, 2]
-    assert sorted(c.value for c in trace.source_cells()) == [1, 2]
+    with pytest.raises(CachedSourceChangedRowError, match=TWO_VERSIONS_REFUSED):
+        job.run()
+    assert job.nodes["GroupBy"].as_table().num_rows == 0
 
 
 def test_a_collapsed_edge_over_merged_paths_is_highlighted() -> None:
@@ -751,6 +758,7 @@ def test_two_inputs_carrying_one_id_are_told_apart_by_position(
 
 
 def test_date_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> None:
+    """Two versions of one record that differ in a date value: refused all the same."""
     from datetime import date
 
     cache = DeltaTableDatabase(tmp_path / "cache")
@@ -767,16 +775,14 @@ def test_date_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> No
         tag_only_columns=True,
         source_id="v",
     )
+    write_outside_the_rule(second, cache, ("shared",))
     cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="dates", database=InMemoryArrowDatabase())
     with job:
         GroupBy(["g"])(SelectDataColumns(["d"])(cached))
-    job.run()
-    trace = job.nodes["GroupBy"].trace({"g": "1"}, "d")
-    assert sorted(c.value for c in trace.source_cells()) == [
-        date(2025, 1, 1),
-        date(2025, 1, 2),
-    ]
+    with pytest.raises(CachedSourceChangedRowError, match=TWO_VERSIONS_REFUSED):
+        job.run()
+    assert job.nodes["GroupBy"].as_table().num_rows == 0
 
 
 def test_a_source_output_schema_is_not_called_through_a_schema_prediction() -> None:
@@ -1422,7 +1428,7 @@ def test_an_input_row_must_keep_the_tags_the_step_keeps(
     mode: str, tmp_path: Path
 ) -> None:
     """A cache holding two versions of one record that differ only in a tag (equal data
-    and tokens): the k='new' output row comes from the k='new' input row."""
+    and tokens) is refused: a tag is part of a row's content."""
     cache = InMemoryArrowDatabase()
 
     def data(key: str) -> DictSource:
@@ -1434,20 +1440,13 @@ def test_an_input_row_must_keep_the_tags_the_step_keeps(
         )
 
     CachedSource(data("old"), cache_database=cache, cache_path=("shared",)).as_table()
+    write_outside_the_rule(data("new"), cache, ("shared",))
     current = CachedSource(data("new"), cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name=f"tagged{mode}", database=InMemoryArrowDatabase())
     with job:
         SelectDataColumns(["x"])(SelectDataColumns(["x", "y"])(current))
-    run(job, mode)
-    target = next(
-        n
-        for n in job.nodes.values()
-        if n.label.startswith("SelectDataColumns")
-        and n.upstreams[0].label.startswith("SelectDataColumns")
-    )
-    trace = target.trace({"k": "new", "i": 0}, "x")
-    (step,) = trace.root.inputs
-    assert dict(step.tags)["k"] == "new"
+    with pytest.raises(CachedSourceChangedRowError, match=TWO_VERSIONS_REFUSED):
+        run(job, mode)
 
 
 # ---------------------------------------------------------------------------
@@ -2012,8 +2011,8 @@ def test_a_semi_join_right_record_is_explained_by_row_flow_alone(mode: str) -> N
 def test_every_held_version_of_a_record_gets_its_reason(
     mode: str, first: str, second: str
 ) -> None:
-    """A cache holds two versions of s's row_0; b matches only old, c only new. Both
-    versions' reasons are given, in one order whichever was cached first."""
+    """A cache holds two versions of s's row_0; b matches only old, c only new. The
+    run is refused whichever version was cached first, so no reason is asked for."""
     cache = InMemoryArrowDatabase()
 
     def data(key: str) -> DictSource:
@@ -2025,6 +2024,7 @@ def test_every_held_version_of_a_record_gets_its_reason(
         )
 
     CachedSource(data(first), cache_database=cache, cache_path=("shared",)).as_table()
+    write_outside_the_rule(data(second), cache, ("shared",))
     a = CachedSource(data(second), cache_database=cache, cache_path=("shared",))
     b = DictSource(
         [{"k": "old", "y": 2}], tag_columns=["k"], tag_only_columns=True, source_id="b"
@@ -2035,12 +2035,8 @@ def test_every_held_version_of_a_record_gets_its_reason(
     job = PipelineJob(name=f"versions{mode}{first}", database=InMemoryArrowDatabase())
     with job:
         Join()(SelectDataColumns(["x"])(a), b, c)
-    run(job, mode)
-    answer = job.nodes["Join"].why_missing("s", "row_0")
-    assert answer.missing
-    assert answer.because == (
-        "no row with k='new' in 'b' (reads b); no row with k='old' in 'c' (reads c)"
-    )
+    with pytest.raises(CachedSourceChangedRowError, match=TWO_VERSIONS_REFUSED):
+        run(job, mode)
 
 
 @function_pod(output_keys="length")
@@ -3200,36 +3196,32 @@ def test_a_trace_keeps_the_selector_it_answered() -> None:
 def test_batches_of_two_cached_versions_of_one_record(
     tmp_path: Path, mode: str
 ) -> None:
-    """Batch(batch_size=1) over a cache holding two versions of one record: both
-    batches fold to one system-tag key; each is told apart by its members' values."""
+    """Batch(batch_size=1) over a cache holding two versions of one record: refused,
+    so no two batches fold to one system-tag key."""
     from orcapod.operators import Batch
 
     cache = DeltaTableDatabase(tmp_path / "cache")
 
-    def version(x: int) -> CachedSource:
-        return CachedSource(
-            DictSource(
-                [{"k": "a", "g": "1", "x": x, "y": 0}],
-                tag_columns=["k", "g"],
-                tag_only_columns=True,
-                source_id="v",
-            ),
-            cache_database=cache,
-            cache_path=("shared",),
+    def data(x: int) -> DictSource:
+        return DictSource(
+            [{"k": "a", "g": "1", "x": x, "y": 0}],
+            tag_columns=["k", "g"],
+            tag_only_columns=True,
+            source_id="v",
         )
 
+    def version(x: int) -> CachedSource:
+        return CachedSource(data(x), cache_database=cache, cache_path=("shared",))
+
     version(1).as_table()  # the first version is cached
+    write_outside_the_rule(data(2), cache, ("shared",))
     cached = version(2)
     job = PipelineJob(name=f"vb{mode}", database=InMemoryArrowDatabase())
     with job:
         Batch(batch_size=1)(SelectDataColumns(["x"])(cached))
-    run(job, mode)
-    node = job.nodes["Batch"]
-    held = sorted(r["x"] for r in node.as_table().to_pylist())
-    assert held == [[1], [2]]
-    for x in held:
-        trace = node.trace({"x": x}, "x")
-        assert [c.value for c in trace.source_cells()] == x
+    with pytest.raises(CachedSourceChangedRowError, match=TWO_VERSIONS_REFUSED):
+        run(job, mode)
+    assert job.nodes["Batch"].as_table().num_rows == 0
 
 
 @pytest.mark.parametrize("keys", [("k", "g"), ("g", "k")])

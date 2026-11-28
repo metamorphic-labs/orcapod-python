@@ -984,9 +984,10 @@ generation of hashing; rows of the current data context are the current entries.
 - The layout version is the last component of a table path. Every layout marker started at v1
   for the first release, 0.4.0 (developer, November 18, 2026, ITL-1259; 0.3.0 was withdrawn).
   The pipeline, side-effect log and operator cache layouts moved to v2 before that release,
-  with the three row ids (developer, November 25, 2026, ITL-1471; below, "Row ids"). A change to the common bookkeeping columns of a table kind
-  moves its layout version, so the table gets a new path. Never add, rename or retype a stored
-  column without it.
+  with the three row ids (developer, November 25, 2026, ITL-1471; below, "Row ids"). A
+  change to the common bookkeeping columns of a released table layout moves its layout version,
+  so the table gets a new path. ITL-1396 adds __recorded_at to the unreleased sdb_v2 at the
+  same path. An earlier prerelease sdb_v2 table without the column must be rebuilt.
 - A function result table is at
   <function>/<output schema hash>/v<function major>/python.function.v1/rev1/rdb_v1, three
   components with three owners (docs/reference/data-function-types.md):
@@ -1485,6 +1486,36 @@ data. The rules:
   of the token values and of any list item fields. CachedSource writes these fields
   and their record hashes under `sdb_v2`. The operator cache stores and hashes the
   output stream's declared fields under `odb_v3` (ITL-1562).
+  A cached-source table (`sdb_v2`) also stores `__recorded_at`
+  (`cached_source.SOURCE_RECORDED_AT_COL`, `timestamp[us, tz=UTC]`, non-nullable; the
+  developer's "written-at" column, November 28, 2026, ITL-1396): when the cache wrote the
+  row, one time per write. It is appended after the record hashes, so it is in no hash,
+  record id or token; every read of the cache drops it (`CachedSource._STORED_ONLY_COLUMNS`);
+  a row delivered again is skipped and keeps its first time. Nothing selects by it: it
+  exists so that "present the latest" can be offered later without a new layout. A
+  `CachedSource` refuses, before anything is written, a delivery holding a row whose
+  record id the cache holds under another `_record_hash` (`CachedSourceChangedRowError`,
+  `_require_no_changed_rows`): one rule for every wrapped source, key columns or
+  position (a reorder or a middle insert of a positional source is refused; an append is
+  not). It is a decided rule, not a stopgap. A cache table that already holds two
+  contents for one record id (two writers that both passed the check and both wrote, or
+  a table written by hand) is refused, with the same error, whenever it is read
+  (developer, November 28, 2026: "(b) for now"; `_require_one_content_per_record_id`,
+  called by every read of the cache's rows, by the delivery check, by the freshness
+  check and by `head()` when it holds no rows): a cached source never presents two rows
+  for one record id. The same row stored twice (one record id, one `_record_hash`) is
+  not a conflict. A source object that holds rows it already read shows them without
+  reading the cache again, on a full read and on `head()` alike. The two-writer race
+  itself stays open (both can still write; the next read refuses). Resolving the case by
+  time or another tie-breaker instead of refusing is ITL-1592; never add it here. Tests
+  build the state with `tests/test_core/sources/cache_versions.write_outside_the_rule`.
+  A store says what a read gives after an append through
+  `ArrowDatabaseProtocol.preview_appended_rows`; never decide it from the store's class.
+  One job's cached sources are checked one by one: a cache that accepted its delivery may
+  have written it before another source's refusal fails the run (open, `ITL-1396-CS1`).
+  Nested caches also validate before writing through source proxies and keyed derivations.
+  A positional derivation instead uses its origin's database order, so its origin cache
+  may commit before an enclosing cache refuses a changed row (open, `ITL-1396-CS1`).
   A row built by `Data` still gives an untyped null the `large_string` type.
   PolarsFilter is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (arrow_utils.restore_column_types and
@@ -1697,7 +1728,8 @@ data. The rules:
   each source feeding them (node_run.check_sources) before the state rule judges any node;
   head() and the preview never do. A source that finds new data takes it in and moves its
   modified time to NOW (never to a time the data reports, such as a cursor's modified_at);
-  one that finds nothing moves nothing. A check that raises warns once
+  one that finds nothing moves nothing. A `CachedSourceChangedRowError` fails the run
+  (ITL-1396). Any other failing check warns once
   (SourceCheckFailedWarning), keeps the source's data and modified time, lists the source
   in RunSummary.unchecked_sources, and the run proceeds (a PollingSource a run reads
   is polled again by that read, and a failing poll raises: ITL-1139). A SourceJobNode's run() checks

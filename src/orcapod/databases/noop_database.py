@@ -30,6 +30,10 @@ class NoOpArrowDatabase:
 
     stores_records = False
 
+    def preview_appended_rows(self, stored: pa.Table, incoming: pa.Table) -> pa.Table:
+        """Return ``stored``: this store keeps no appended row."""
+        return stored
+
     def __init__(
         self,
         _path_prefix: tuple[str, ...] = (),
@@ -91,6 +95,8 @@ class NoOpArrowDatabase:
         column_values: Collection[tuple[str, Any]] | Mapping[str, Any],
         record_id_column: str | None = None,
         flush: bool = False,
+        *,
+        columns: Collection[str] | None = None,
     ) -> "pa.Table | None":
         return None
 

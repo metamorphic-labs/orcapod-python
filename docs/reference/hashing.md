@@ -2049,7 +2049,10 @@ The layout component is always the last component of a table's path, also when a
 `CachedSource` is given an explicit `cache_path`. The `sdb_v2` layout stores
 nullable token fields and hashes records with those flags. An `sdb_v1`
 table is reported as an older layout and left untouched. A bound source can
-populate a new `sdb_v2` table from its live data.
+populate a new `sdb_v2` table from its live data. Each row of an `sdb_v2` table also
+stores `__recorded_at` (`timestamp[us, tz=UTC]`, never null): when the cache wrote the
+row. It is appended after the row's `_record_hash` is computed, so it is in no hash, and
+no read of the cache presents it.
 
 Operator caches use the output stream's declared Arrow fields for records and their
 hashes under `odb_v3`. An `odb_v2` table is reported as an older layout and left

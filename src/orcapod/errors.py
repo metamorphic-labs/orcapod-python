@@ -832,6 +832,31 @@ class CachedSourceIdMismatchError(ValueError):
     """
 
 
+class CachedSourceChangedRowError(InputValidationError):
+    """A cached source would hold or present two contents for one record id (ITL-1396).
+
+    A ``CachedSource`` keeps every row its wrapped source ever delivered, and a record
+    id names one row. When the wrapped source delivers a row whose record id (its key
+    columns, or its position when it has none) is already in the cache with other
+    content (any tag, data, system-tag or source-info value), the read is refused
+    before anything is written: the cache is left as it was and no row is presented.
+    The same row delivered again is the normal case and writes nothing; a row under a
+    new record id is added. A source without key columns names a row by its position,
+    so a reorder or a row inserted before the last one is refused too; rows appended at
+    the end are added.
+
+    Changed data is another dataset: give the source a new ``source_id``, or keep a
+    new cache for it (another ``cache_path`` or cache database).
+
+    The same error is raised when the cache table itself already holds two different
+    contents for one record id (two writers that both passed the check before either
+    wrote, or a table written by hand): such a cache is refused whenever it is read,
+    by a run, a read of its rows or ``head()``, so a cached source never presents two
+    rows for one record id. The message then says what the cache holds; rebuild the
+    cache from the source in a new cache.
+    """
+
+
 class SourceSlotNameCollisionError(ValueError):
     """Two different sources would take one slot name in a job (ITL-1425).
 

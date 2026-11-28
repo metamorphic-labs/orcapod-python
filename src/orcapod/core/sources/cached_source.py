@@ -2,9 +2,11 @@ from __future__ import annotations
 
 
 import logging
-from datetime import datetime
-from collections.abc import Iterator
-from typing import Any, ClassVar, TYPE_CHECKING
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from collections.abc import Iterator, Sequence
+from typing import Any, ClassVar, TYPE_CHECKING, cast
 
 import pyarrow as pa
 from typing_extensions import override
@@ -19,6 +21,7 @@ from orcapod.core.sources.stream_builder import (
     validate_source_table,
 )
 from orcapod.errors import (
+    CachedSourceChangedRowError,
     CachedSourceIdMismatchError,
     InputValidationError,
     UnstorableColumnError,
@@ -49,12 +52,95 @@ from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagPr
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import schema_utils
+from orcapod.utils import arrow_utils, schema_utils
 
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
 
 logger = logging.getLogger(__name__)
+
+SOURCE_RECORDED_AT_COL = "__recorded_at"
+"""The cache table's column saying when the cache wrote a row (ITL-1396).
+
+Stored only: appended after the record hashes are computed, so it is in no hash, record
+id or source-info token, and dropped by every read of the cache, so no stream presents
+it. A row delivered again is not written again and keeps its first time. Nothing
+selects rows by it today.
+"""
+
+_CHANGED_ROWS_NAMED = 5
+"""How many record ids a ``CachedSourceChangedRowError`` names before the count."""
+
+
+@dataclass
+class _PreparedCacheRead:
+    """A checked delivery and the rows enclosing caches can read from it."""
+
+    cache: CachedSource
+    stream: ArrowTableStream
+    delivery: pa.Table | None
+    seen: datetime | None
+    reads_prepared_cache: bool
+
+
+@dataclass
+class _CacheReadPreparation:
+    """The cache reads for one delivery, collected before any of them publish."""
+
+    reads: list[_PreparedCacheRead] = field(default_factory=list)
+    publishing: bool = False
+
+
+_PREPARED_CACHE_READS: ContextVar[_CacheReadPreparation | None] = ContextVar(
+    "prepared_source_cache_reads", default=None
+)
+
+
+def has_unpublished_cache_reads() -> bool:
+    """Whether the current read has used rows from an unpublished cache delivery."""
+    preparation = _PREPARED_CACHE_READS.get()
+    return bool(preparation and preparation.reads and not preparation.publishing)
+
+
+def _recorded_at_field() -> "pa.Field[pa.DataType]":
+    """The ``__recorded_at`` field of a cached-source table: a UTC instant, never null."""
+    return pa.field(
+        SOURCE_RECORDED_AT_COL, pa.timestamp("us", tz="UTC"), nullable=False
+    )
+
+
+def _record_id_column(names: Sequence[str]) -> str | None:
+    """Return the source's generated record-id field, if it carries one.
+
+    The source builder appends the generated pair after the input columns,
+    including any custom system tags. Use the declaration's order.
+    A plain derived source carries no generated pair.
+    """
+    system_tags = [
+        name for name in names if name.startswith(constants.SYSTEM_TAG_PREFIX)
+    ]
+    if len(system_tags) < 2:
+        return None
+    source_id, record_id = system_tags[-2:]
+    prefix = f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+    if not record_id.startswith(prefix):
+        return None
+    expected_pair = arrow_utils.system_tag_column_names(record_id.removeprefix(prefix))
+    return record_id if (source_id, record_id) == expected_pair else None
+
+
+def _paired_record_id_columns(names: Sequence[str]) -> list[str]:
+    """Find every record-id column with a corresponding source-id column."""
+    available = set(names)
+    prefix = f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+    return [
+        name
+        for name in names
+        if name.startswith(prefix)
+        and available.issuperset(
+            arrow_utils.system_tag_column_names(name.removeprefix(prefix))
+        )
+    ]
 
 
 class CachedSource(RootSource):
@@ -68,8 +154,17 @@ class CachedSource(RootSource):
     Behavior:
         - Cache is **always on**.
         - On first access, live source data is stored in the cache table
-          (deduped by per-row content hash).
+          (deduped by per-row content hash), each row with the time the cache
+          wrote it (``__recorded_at``, stored only).
         - Returns the union of all cached data (cumulative across runs).
+        - A row delivered under a record id the cache holds with other content is
+          refused before anything is written (``CachedSourceChangedRowError``,
+          ITL-1396): a record id names one row, whether it is made from key columns
+          or from the row's position.
+        - A cache table that already holds two contents for one record id (written
+          by two writers at the same moment, or by hand) is refused with the same
+          error whenever it is read, so two rows are never presented for one
+          record id.
 
     Semantic guarantee:
         The cache is a correct cumulative record.  The union of cache + live
@@ -94,6 +189,13 @@ class CachedSource(RootSource):
     TABLE_IS_ROWS: ClassVar[bool] = True
 
     HASH_COLUMN_NAME = "_record_hash"
+
+    _STORED_ONLY_COLUMNS: ClassVar[list[str]] = [
+        HASH_COLUMN_NAME,
+        SOURCE_RECORDED_AT_COL,
+        constants.DATA_CONTEXT_COL,
+    ]
+    """The cache table's own columns, which no read of the cache presents."""
 
     REPORTS_WHAT_IT_READS: ClassVar[bool] = False
     """It reads its cache, which holds what earlier reads stored (``explain()``, ITL-1402)."""
@@ -138,7 +240,10 @@ class CachedSource(RootSource):
         # before anything is read (ITL-1162). The source's columns are checked
         # when they are written.
         try:
-            require_storable(cache_database, pa.schema([data_context_field()]))
+            require_storable(
+                cache_database,
+                pa.schema([_recorded_at_field(), data_context_field()]),
+            )
         except UnstorableColumnError as exc:
             exc.add_context(node_label=self.label)
             raise
@@ -352,6 +457,20 @@ class CachedSource(RootSource):
         """The source this cache reads and keeps the rows of."""
         return self._source
 
+    def _can_read_cache_preview(self) -> bool:
+        """Whether the wrapped source can use a preview of an inner cache's rows."""
+        from orcapod.core.sources.derived_source import DerivedSource
+        from orcapod.core.sources.source_proxy import SourceProxy
+
+        source: RootSource | SourceProtocol | None = self._source
+        while True:
+            if isinstance(source, SourceProxy):
+                source = source.delegate
+            elif isinstance(source, DerivedSource):
+                source = source.keyed_source_origin
+            else:
+                return isinstance(source, CachedSource)
+
     def _live_records(self) -> pa.Table:
         """Read the wrapped source's rows, each with its record hash in front.
 
@@ -363,9 +482,18 @@ class CachedSource(RootSource):
 
         refuse_restricted_cache_input(self._source)
         require_same_data_context(self._source.data_context_key, self.data_context_key)
-        live_table = self._source.as_table(
-            columns={"source": True, "system_tags": True, "meta": True}
+        # A derivation with positional record IDs depends on the database's
+        # read-back order. Leave that derivation on the ordinary read path.
+        token = (
+            None if self._can_read_cache_preview() else _PREPARED_CACHE_READS.set(None)
         )
+        try:
+            live_table = self._source.as_table(
+                columns={"source": True, "system_tags": True, "meta": True}
+            )
+        finally:
+            if token is not None:
+                _PREPARED_CACHE_READS.reset(token)
         validate_source_table(live_table)
         live_table = live_table.drop(
             [
@@ -395,29 +523,207 @@ class CachedSource(RootSource):
             pa.array(record_hashes, type=pa.large_binary()),
         )
 
-    def _ingest_live_data(self) -> None:
-        """Fetch live data from the source and store new rows in the cache.
-
-        Raises if the source cannot provide data (e.g. an unbound
-        ``SourceProxy``).
-        """
-        seen = self._source_modified_time()
+    def _prepare_ingestion(self) -> pa.Table:
+        """Read and check a delivery without writing any cache rows."""
         # Before the wrapped source's rows are read: a cache of another source id is
         # refused without reading or writing any row (ITL-1425).
         self._require_rows_of_this_source()
         live_with_hash = self._live_records()
-        # Store in DB with hash as record ID (skip_duplicates deduplicates).
-        # The data context column is appended after the record hashes are computed:
-        # it names the generation of hashing that produced them and is not hashed.
         self._account_for_stale_tables()
+        # Before anything is written: a row whose record id the cache holds with
+        # other content refuses the whole read (ITL-1396).
+        self._require_no_changed_rows(live_with_hash)
+        return live_with_hash
+
+    def _write_delivery(self, live_with_hash: pa.Table, seen: datetime | None) -> None:
+        """Write an accepted delivery, deduplicating on its stored row hash."""
+        # When the cache wrote these rows: one time for the whole write, appended
+        # after the record hashes like the data context, so in no hash. A row the
+        # cache already holds is skipped below and keeps its first time.
+        recorded_at = _recorded_at_field()
+        to_store = live_with_hash.append_column(
+            recorded_at,
+            pa.array(
+                [datetime.now(timezone.utc)] * live_with_hash.num_rows,
+                recorded_at.type,
+            ),
+        )
         self._cache_database.add_records(
             self.cache_path,
-            with_data_context(live_with_hash, self.data_context_key),
+            with_data_context(to_store, self.data_context_key),
             record_id_column=self.HASH_COLUMN_NAME,
             skip_duplicates=True,
         )
         self._cache_database.flush()
         self._source_seen = seen
+
+    def _require_no_changed_rows(self, live_with_hash: pa.Table) -> None:
+        """Refuse live rows that change a row the cache holds (ITL-1396).
+
+        A record id names one row. A live row whose record id is in the cache (rows of
+        the current data context) under another record hash has other content than the
+        cached row: a tag, data, system-tag or source-info value differs. The rule is
+        the same whether the record id is made from key columns or is the row's
+        position. A live row whose record hash the cache holds is the same row again,
+        and one under a new record id is a new row: both are accepted. Sources
+        without a generated record id still deduplicate by record hash.
+
+        Raises:
+            CachedSourceChangedRowError: Naming the source id, the first changed
+                record ids and how many rows changed. Nothing was written.
+        """
+        records = self._read_cache_table()
+        if records is None:
+            return
+        records = keep_rows_of_data_context(records, self.data_context_key)
+        id_column = self._record_id_column_among(live_with_hash.schema)
+        if id_column is None:
+            return
+        stored_id_column = (
+            id_column
+            if id_column in records.column_names
+            else self._record_id_column_among(records.schema)
+        )
+        if stored_id_column is None:
+            return
+        cached: dict[str, set[bytes | None]] = {}
+        for record_id, record_hash in zip(
+            cast("list[str]", records.column(stored_id_column).to_pylist()),
+            records.column(self.HASH_COLUMN_NAME).to_pylist(),
+            strict=True,
+        ):
+            cached.setdefault(record_id, set()).add(record_hash)
+        changed = sorted(
+            {
+                record_id
+                for record_id, record_hash in zip(
+                    cast("list[str]", live_with_hash.column(id_column).to_pylist()),
+                    live_with_hash.column(self.HASH_COLUMN_NAME).to_pylist(),
+                    strict=True,
+                )
+                if record_id in cached and record_hash not in cached[record_id]
+            }
+        )
+        if not changed:
+            return
+        named = ", ".join(changed[:_CHANGED_ROWS_NAMED])
+        more = len(changed) - _CHANGED_ROWS_NAMED
+        raise CachedSourceChangedRowError(
+            f"CachedSource over {self.source_id!r}: the source delivered "
+            f"{len(changed)} row{'s' if len(changed) != 1 else ''} whose record id "
+            f"the cache at {'/'.join(self.cache_path)!r} holds with other content: "
+            f"{named}{f' and {more} more' if more > 0 else ''}. Nothing was written "
+            "and the cache is unchanged. A record id names one row: give the changed "
+            "data a new source id, or keep a new cache for it (another cache_path "
+            "or cache database)."
+        )
+
+    def _record_id_column_among(self, schema: pa.Schema) -> str | None:
+        """Find the generated record id without relying on stored column order."""
+        declared = typed_zero_row_table(self._source)
+        if declared is not None:
+            record_id = _record_id_column(declared.column_names)
+            if record_id is None or record_id in schema.names:
+                return record_id
+        elif not schema_requires_io(self._source, ColumnConfig(system_tags=True)):
+            declared_names = self._source.keys(columns={"system_tags": True})[0]
+            record_id = _record_id_column(declared_names)
+            if record_id is not None and record_id in schema.names:
+                return record_id
+
+        from orcapod.core.sources.derived_source import DerivedSource
+        from orcapod.core.sources.source_proxy import SourceProxy
+
+        if isinstance(self._source, SourceProxy) and not self._source.is_bound:
+            config = self._source.to_config()
+            if (
+                config.get("source_type") == DerivedSource.SOURCE_KIND
+                and config.get("tags_as_data") is None
+            ):
+                return None
+
+        # A name used for custom provenance by this reader may have been
+        # generated by the writer. Keep every pair from the stored schema.
+        candidates = _paired_record_id_columns(schema.names)
+        if len(candidates) < 2:
+            return candidates[0] if candidates else None
+
+        # Recover the writer's schema identity using the stored fields. The
+        # current declaration supplies tag roles, but may add or omit payload
+        # columns. The cache bookkeeping and source-info columns are not hashed
+        # into the provenance names.
+        tag_keys, data_keys = self._source.keys()
+        if set(tag_keys).issubset(schema.names):
+            tag_schema = pa.schema(schema.field(name) for name in tag_keys)
+            tag_only = set(tag_keys).difference(data_keys)
+            data_fields = [
+                field
+                for field in schema
+                if field.name not in tag_only
+                and not field.name.startswith(constants.DATAGRAM_PREFIX)
+            ]
+            tag_prefix = constants.SYSTEM_TAG_PREFIX
+            id_prefix = (
+                f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+            )
+            matching = []
+            for column in candidates:
+                suffix = column.removeprefix(id_prefix)
+                pair = arrow_utils.system_tag_column_names(suffix)
+                # The builder hashes the custom fields under their original
+                # input names, before the stream adds the system-tag prefix.
+                custom_fields = [
+                    field.with_name(field.name.removeprefix(tag_prefix))
+                    for field in schema
+                    if field.name.startswith(tag_prefix) and field.name not in pair
+                ]
+                expected = schema_utils.compute_schema_hash(
+                    tag_schema,
+                    pa.schema([*data_fields, *custom_fields]),
+                    self.data_context,
+                    len(suffix),
+                )
+                if suffix == expected:
+                    matching.append(column)
+            if len(matching) == 1:
+                return matching[0]
+
+        raise InputValidationError(
+            f"CachedSource at {'/'.join(self.cache_path)!r} cannot identify the "
+            "generated record-id column from the saved source and cache schemas. "
+            "Bind the original source to validate the cache."
+        )
+
+    def _require_one_content_per_record_id(
+        self, records: pa.Table, id_column: str | None
+    ) -> None:
+        """Refuse cached rows holding more than one hash for a generated record id."""
+        if id_column is None or id_column not in records.column_names:
+            return
+        contents: dict[str, set[bytes | None]] = {}
+        for record_id, record_hash in zip(
+            cast("list[str]", records.column(id_column).to_pylist()),
+            records.column(self.HASH_COLUMN_NAME).to_pylist(),
+            strict=True,
+        ):
+            contents.setdefault(record_id, set()).add(record_hash)
+        conflicting = sorted(
+            record_id for record_id, hashes in contents.items() if len(hashes) > 1
+        )
+        if not conflicting:
+            return
+        named = ", ".join(conflicting[:_CHANGED_ROWS_NAMED])
+        more = len(conflicting) - _CHANGED_ROWS_NAMED
+        raise CachedSourceChangedRowError(
+            f"CachedSource over {self.source_id!r}: the cache at "
+            f"{'/'.join(self.cache_path)!r} holds {len(conflicting)} record "
+            f"id{'s' if len(conflicting) != 1 else ''} with more than one content: "
+            f"{named}{f' and {more} more' if more > 0 else ''}. No row was presented "
+            "and nothing was written. A record id names one row, and this cache was "
+            "written outside that rule (by two writers at the same moment, or by "
+            "hand): rebuild it from the source in a new cache (another cache_path "
+            "or cache database)."
+        )
 
     def _source_modified_time(self) -> datetime | None:
         """The wrapped source's modified time, or ``None`` if it has none."""
@@ -441,7 +747,8 @@ class CachedSource(RootSource):
     def check_for_new_data(self) -> bool:
         """Check the wrapped source; move only if the next read shows new rows (ITL-1102).
 
-        The wrapped source is checked first. When its modified time moved since the
+        The cache is checked for conflicts before the wrapped source is checked.
+        When the wrapped source's modified time moved since the
         cache last took in its rows (by this check, or by a check made through another
         source that wraps it), its rows are hashed and compared with the rows this
         source presents (recorded when it built its merged rows; before a build, the
@@ -469,19 +776,27 @@ class CachedSource(RootSource):
             ``True`` if this source will present new rows at the next read.
 
         Raises:
-            CachedSourceIdMismatchError: If the cache holds rows of another source
-                id; raised before the wrapped source is checked (ITL-1425).
+            CachedSourceIdMismatchError: If the cache holds rows of another source id.
+            CachedSourceChangedRowError: If the cache holds a conflicting record id.
         """
         if not isinstance(self._source, RootSource):
             return False
-        # The cache first: a cache of another source id is refused before the
-        # wrapped source is checked or read (ITL-1425).
-        self._require_rows_of_this_source()
-        _ = self._source.check_for_new_data()
-        seen = self._source_modified_time()
-        if seen == self._source_seen:
-            return False
-        live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
+        # Refuse a mismatched source id or conflicting records before checking
+        # the wrapped source, even if its modified time will stay the same.
+        self._require_rows_of_this_source(check_again=True)
+        # Checking a nested cache needs its would-be rows, but must leave the
+        # delivery for the next consuming read.
+        token = _PREPARED_CACHE_READS.set(
+            _CacheReadPreparation() if self._can_read_cache_preview() else None
+        )
+        try:
+            _ = self._source.check_for_new_data()
+            seen = self._source_modified_time()
+            if seen == self._source_seen:
+                return False
+            live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
+        finally:
+            _PREPARED_CACHE_READS.reset(token)
         # The next read presents the cache's rows and the live rows together (the
         # cache keeps every row any source sharing it wrote).
         cached = self._cached_record_hashes()
@@ -496,43 +811,89 @@ class CachedSource(RootSource):
         self._update_modified_time()
         return True
 
-    def _read_cache_table(self) -> pa.Table | None:
-        """Read and validate the physical cache before using any of its columns."""
-        records = self._cache_database.get_all_records(
-            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+    def _read_cache_table(self, *, conflicts_only: bool = False) -> pa.Table | None:
+        """Read the latest cache snapshot and check the current context for conflicts.
+
+        The full read returns physical rows so callers can also account for other
+        data contexts. A head uses metadata to find the record id and projects it
+        with the stored hash, filtering by data context inside the read.
+        """
+        self._cache_database.refresh_table(self.cache_path)
+        if conflicts_only:
+            schema = self._cache_database.get_table_schema(self.cache_path)
+            if schema is None:
+                return None
+            self._require_recorded_at(schema)
+            id_column = self._record_id_column_among(schema)
+            if id_column is None or id_column not in schema.names:
+                return None
+            records = self._cache_database.get_records_with_column_value(
+                self.cache_path,
+                {constants.DATA_CONTEXT_COL: self.data_context_key},
+                record_id_column=self.HASH_COLUMN_NAME,
+                columns=[id_column],
+            )
+        else:
+            records = self._cache_database.get_all_records(
+                self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+            )
+            if records is None:
+                return None
+            self._require_recorded_at(records.schema)
+            id_column = self._record_id_column_among(records.schema)
+
+        if records is None:
+            return None
+        validate_source_table(records, stored_cache=True)
+        current_records = (
+            records
+            if conflicts_only
+            else keep_rows_of_data_context(records, self.data_context_key)
         )
-        return (
-            None
-            if records is None
-            else validate_source_table(records, stored_cache=True)
-        )
+        self._require_one_content_per_record_id(current_records, id_column)
+        return records
+
+    def _require_recorded_at(self, schema: pa.Schema) -> None:
+        """Refuse a prerelease cache written without its recorded-at column."""
+        if SOURCE_RECORDED_AT_COL not in schema.names:
+            raise InputValidationError(
+                f"CachedSource at {'/'.join(self.cache_path)!r} is missing "
+                f"{SOURCE_RECORDED_AT_COL!r}. Rebuild the cache from the source "
+                "using a new cache path or database."
+            )
 
     def _read_cached_records(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context.
 
         Returns:
-            The cached rows without the record hash and ``__data_context`` columns,
-            or ``None`` when the cache table does not exist.
+            The cached rows without the stored-only columns (the record hash,
+            ``__recorded_at`` and ``__data_context``), or ``None`` when the cache table
+            does not exist.
         """
         records = self._read_cached_records_with_hashes()
         if records is None:
             return None
-        return records.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL])
+        return records.drop(self._STORED_ONLY_COLUMNS)
 
-    def _read_cached_records_with_hashes(self) -> "pa.Table | None":
+    def _read_cached_records_with_hashes(
+        self, *, declared_types: bool = True
+    ) -> "pa.Table | None":
         """Read the cached rows written under the current data context, as stored.
 
-        Every read of the cache's rows goes through here: ``get_all_records()`` and
-        the merged stream behind ``as_table()`` and every other read of this source.
-        (``_cached_record_hashes`` reads the record-hash column only, and returns no
-        row value.) Rows of another data context stay in the table untouched, and a
+        Used by ``get_all_records()`` and the merged stream behind ``as_table()``.
+        Rows of another data context stay in the table untouched, and a
         cache at the older layout is not read (ITL-944). Rows whose Arrow types are
         not the source's are refused here (``_require_declared_types``), so no read
         can present them.
 
+        Args:
+            declared_types: ``False`` only for the preview of a delivery not yet
+                written, whose append may evolve the stored table; the rows read back
+                after that write are checked.
+
         Returns:
-            The cached rows with their record hash and ``__data_context`` columns, or
-            ``None`` when the cache table does not exist.
+            The cached rows with their record hash, ``__recorded_at`` and
+            ``__data_context`` columns, or ``None`` when the cache table does not exist.
 
         Raises:
             InputValidationError: If a cached column reads back as another Arrow type.
@@ -550,10 +911,11 @@ class CachedSource(RootSource):
                 stored_rows - records.num_rows,
             )
         self._require_source_ids(records)
-        self._require_declared_types(records)
+        if declared_types:
+            self._require_declared_types(records)
         return records
 
-    def _require_rows_of_this_source(self) -> None:
+    def _require_rows_of_this_source(self, *, check_again: bool = False) -> None:
         """Refuse a cache table holding rows of another source id (ITL-1425).
 
         Called before the wrapped source is checked (``check_for_new_data``) or its rows
@@ -561,12 +923,13 @@ class CachedSource(RootSource):
         source is read or returned and nothing is written. Building the wrapped source
         (``from_config``) may read it before the first check. The cache table is read once per
         source object, until it is found to hold this source's rows; a table not yet
-        written holds no other id.
+        written holds no other id. Freshness also checks for record-id conflicts,
+        even when the source id has already been checked.
 
         Raises:
             CachedSourceIdMismatchError: If a stored row names another source id.
         """
-        if self._source_ids_checked:
+        if self._source_ids_checked and not check_again:
             return
         records = self._read_cache_table()
         if records is None:
@@ -608,22 +971,58 @@ class CachedSource(RootSource):
         if stored_ids:
             self._source_ids_checked = True
 
-    def _build_merged_stream(self) -> ArrowTableStream:
-        """Ingest live data (if available), then return all cached records.
-
-        If the inner source cannot provide data (e.g. an unbound
-        ``SourceProxy``), the method falls back to returning whatever is
-        already stored in the cache database.  If the cache is empty, an
-        empty stream is returned.
-        """
+    def _prepare_delivery(self, pending: list[_PreparedCacheRead]) -> pa.Table | None:
+        """Check the live delivery or, for an unavailable source, serve stored rows."""
+        checkpoint = len(pending)
         try:
-            self._ingest_live_data()
+            return self._prepare_ingestion()
         except NotImplementedError:
+            del pending[checkpoint:]
             logger.info(
                 "Inner source %r cannot provide data; serving from cache only.",
                 self._source.source_id,
             )
+            return None
 
+    def _preview_stream(self, delivery: pa.Table | None) -> ArrowTableStream:
+        """Present the cached and newly accepted rows while enclosing caches check them."""
+        # With a delivery, the stored rows are not held to the source's declared
+        # types here: the append may evolve the table (a new nullable column or struct
+        # child), and the rows read back after the write are checked then.
+        stored = self._read_cached_records_with_hashes(declared_types=delivery is None)
+        rows = stored.drop(self._STORED_ONLY_COLUMNS) if stored is not None else None
+        if delivery is not None and self._cache_database.stores_records:
+            physical = self._read_cache_table()
+            existing = (
+                set(physical.column(self.HASH_COLUMN_NAME).to_pylist())
+                if physical is not None
+                else set()
+            )
+            # A new hash is stored once, with its last occurrence in the delivery.
+            additions = {
+                record_hash: i
+                for i, record_hash in enumerate(
+                    delivery.column(self.HASH_COLUMN_NAME).to_pylist()
+                )
+                if record_hash not in existing
+            }
+            if additions:
+                new_rows = delivery.take(sorted(additions.values())).drop(
+                    [self.HASH_COLUMN_NAME]
+                )
+                rows = (
+                    new_rows
+                    if rows is None
+                    else self._cache_database.preview_appended_rows(rows, new_rows)
+                )
+        return self._stream_over(rows if rows is not None else self._empty_table())
+
+    def _publish_stream(
+        self, delivery: pa.Table | None, seen: datetime | None
+    ) -> ArrowTableStream:
+        """Write a checked delivery and hold the rows read back from the database."""
+        if delivery is not None:
+            self._write_delivery(delivery, seen)
         stored = self._read_cached_records_with_hashes()
         if stored is None:
             self._presented_hashes = set()
@@ -634,15 +1033,18 @@ class CachedSource(RootSource):
                 for h in stored.column(self.HASH_COLUMN_NAME).to_pylist()
                 if h is not None
             }
-            all_records = stored.drop(
-                [self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]
-            )
+            all_records = stored.drop(self._STORED_ONLY_COLUMNS)
 
-        tag_keys = self._source.keys()[0]
+        self._cached_stream = self._stream_over(all_records)
+        self._update_modified_time()
+        return self._cached_stream
+
+    def _stream_over(self, records: pa.Table) -> ArrowTableStream:
+        """Present cached-source rows with the source's tag columns and context."""
         # Cached rows are this source's: give them its data context, not the default.
         return ArrowTableStream(
-            all_records,
-            tag_columns=tag_keys,
+            records,
+            tag_columns=self._source.keys()[0],
             data_context=self.data_context,
             data_tags=stream_data_tags(self._source),
         )
@@ -705,22 +1107,58 @@ class CachedSource(RootSource):
         src_time = self._source.last_modified
         return src_time is None or src_time > own_time
 
-    def _ensure_stream(self) -> None:
-        """Build the merged stream on first access, or rebuild if source is stale."""
-        if self._cached_stream is not None and self.is_stale:
-            self._cached_stream = None
-        if self._cached_stream is None:
-            self._cached_stream = self._build_merged_stream()
-            self._update_modified_time()
+    def _ensure_stream(self) -> ArrowTableStream:
+        """Build the merged stream after every cache reached by the read accepts it."""
+        preparation = _PREPARED_CACHE_READS.get()
+        if preparation is not None:
+            for prepared in preparation.reads:
+                if prepared.cache is self:
+                    return prepared.stream
+        if self._cached_stream is not None and not self.is_stale:
+            return self._cached_stream
+        seen = self._source_modified_time()
+        if preparation is not None:
+            pending = preparation.reads
+            checkpoint = len(pending)
+            delivery = self._prepare_delivery(pending)
+            preview = self._preview_stream(delivery)
+            pending.append(
+                _PreparedCacheRead(
+                    self, preview, delivery, seen, len(pending) != checkpoint
+                )
+            )
+            return preview
+
+        preparation = _CacheReadPreparation()
+        pending = preparation.reads
+        token = _PREPARED_CACHE_READS.set(preparation)
+        try:
+            delivery = self._prepare_delivery(pending)
+            # Publish from the inside out. A successful read still uses each
+            # database's actual presentation order. The preview checked the
+            # same record ids and hashes without modifying any store.
+            preparation.publishing = True
+            for prepared in pending:
+                accepted = (
+                    prepared.cache._live_records()
+                    if prepared.reads_prepared_cache
+                    else prepared.delivery
+                )
+                prepared.stream = prepared.cache._publish_stream(
+                    accepted, prepared.seen
+                )
+            if pending:
+                delivery = self._live_records()
+            return self._publish_stream(delivery, seen)
+        finally:
+            _PREPARED_CACHE_READS.reset(token)
 
     def clear_cache(self) -> None:
         """Discard in-memory cached stream (forces rebuild on next access)."""
         self._cached_stream = None
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        self._ensure_stream()
-        assert self._cached_stream is not None
-        return self._cached_stream.iter_data()
+        return self._ensure_stream().iter_data()
 
     def as_table(
         self,
@@ -728,9 +1166,7 @@ class CachedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        self._ensure_stream()
-        assert self._cached_stream is not None
-        return self._cached_stream.as_table(columns=columns, all_info=all_info)
+        return self._ensure_stream().as_table(columns=columns, all_info=all_info)
 
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """The wrapped source's zero-row table: the cache stores that source's rows.
@@ -751,19 +1187,30 @@ class CachedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> StreamView:
-        """Return the first rows without reading or writing the cache.
+        """Return the first rows without presenting or writing a row of the cache.
 
         Once the source has been used, its merged stream is in memory and this is a slice
         of it. Before that its rows are not known: they are the cache's earlier rows
         merged with the wrapped source's, and reading them writes the cache. The head
         then has the wrapped source's columns, no rows and ``NOT_COMPUTED`` (or the
         wrapped source's own reason when it has none to give).
+
+        A head with no rows to show agrees with a full read about a cache no read may
+        present: it reads the cache table's record ids and record hashes (stored
+        values only; nothing is computed, and the wrapped source is not read) and
+        refuses a cache holding two contents for one record id.
+
+        Raises:
+            CachedSourceChangedRowError: If the cache holds two contents for one
+                record id (ITL-1396).
         """
         check_head_size(n)
         if self._cached_stream is not None and not self.is_stale:
             return head_of(
                 self._cached_stream.head(n, columns=columns, all_info=all_info), self
             )
+        # No row is read, but a cache that a full read refuses is refused here too.
+        _ = self._read_cache_table(conflicts_only=True)
         wrapped = head_of(
             self._source.head(0, columns=columns, all_info=all_info), self
         )

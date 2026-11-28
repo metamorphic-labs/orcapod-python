@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import Collection
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 from uuid import UUID
@@ -34,6 +35,7 @@ from orcapod.core.sources import (
     SpiralDBTableSource,
     SQLiteTableSource,
 )
+from orcapod.core.sources.cached_source import SOURCE_RECORDED_AT_COL
 from orcapod.core.sources.source_proxy import SourceProxy
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -447,6 +449,15 @@ def test_a_raw_arrow_table_stream_preserves_nested_null() -> None:
     )
 
 
+def _with_recorded_at(table: pa.Table) -> pa.Table:
+    """Add the current cache layout's write timestamp to a hand-built fixture."""
+    timestamp = pa.timestamp("us", tz="UTC")
+    return table.append_column(
+        pa.field(SOURCE_RECORDED_AT_COL, timestamp, nullable=False),
+        pa.array([datetime.now(timezone.utc)] * table.num_rows, timestamp),
+    )
+
+
 def test_cached_source_refuses_an_existing_stored_null_column() -> None:
     table = _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"])
     source = ArrowTableSource(
@@ -467,7 +478,7 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
     raw = raw.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
     database.add_records(
         cached.cache_path,
-        with_data_context(raw, source.data_context_key),
+        with_data_context(_with_recorded_at(raw), source.data_context_key),
         record_id_column=CachedSource.HASH_COLUMN_NAME,
         flush=True,
     )
@@ -503,7 +514,7 @@ def test_reopened_cache_refuses_legacy_system_tag_metadata(
     )
     DeltaTableDatabase(tmp_path).add_records(
         cache.cache_path,
-        with_data_context(records, source.data_context_key),
+        with_data_context(_with_recorded_at(records), source.data_context_key),
         record_id_column=CachedSource.HASH_COLUMN_NAME,
         flush=True,
     )
@@ -723,7 +734,7 @@ def test_cached_source_presents_stored_token_fields_as_nullable(
     table = table.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
     database.add_records(
         cache.cache_path,
-        with_data_context(table, source.data_context_key),
+        with_data_context(_with_recorded_at(table), source.data_context_key),
         record_id_column=CachedSource.HASH_COLUMN_NAME,
         flush=True,
     )

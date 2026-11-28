@@ -24,9 +24,11 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import CachedSourceChangedRowError
 from orcapod.operators import Batch, GroupBy
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.sources import CachedSource, DictSource
+from tests.test_core.sources.cache_versions import write_outside_the_rule
 
 
 @function_pod(output_keys=["y", "w"])
@@ -270,11 +272,9 @@ def test_async_held_rows_are_the_sync_rows_as_a_set(
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_tied_group_members_follow_the_held_order(mode: str) -> None:
     """Two cached versions of one record (identical system tags, so GroupBy's member
-    order ties) with only the newer result stored beforehand. Synchronous: GroupBy
-    over the held rows gives the members in the order the whole job's GroupBy
-    received them (the held order). Asynchronous (no order promised, ITL-1437): the
-    held rows and the group's members are the same set of rows as the synchronous
-    run's."""
+    order would tie) are refused when the cache is read (ITL-1396): no run holds two
+    rows with one record id, so no group has tied members from a cache. Nothing is
+    computed for the refused run."""
     orchestrator = ORCHESTRATORS[mode]
     store, cache = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     old = ROWS[0]
@@ -283,25 +283,20 @@ def test_tied_group_members_follow_the_held_order(mode: str) -> None:
     CachedSource(
         _source([old], tags), cache_database=cache, cache_path=("joint",)
     ).as_table()
+    write_outside_the_rule(_source([new], tags), cache, ("joint",))
     versions = CachedSource(
         _source([new], tags), cache_database=cache, cache_path=("joint",)
     )
     _job(store, [new], tags).run(orchestrator=orchestrator())
     job = _job(store, [new], tags)
     job.bind(sources={"input": versions})
-    job.run(orchestrator=orchestrator())
-    node = job.nodes["f"]
-    held = [(d.as_dict()["y"], d.as_dict()["w"]) for _, d in node.iter_data()]
-    versions_rows = [(10, -old["z"]), (90, -5)]  # the cache's order: old first
-    groups = job.nodes["GroupBy"].as_table().to_pylist()
-    members = [list(zip(g["y"], g["w"], strict=True)) for g in groups]
-    if mode == "sync":
-        assert held == versions_rows
-        assert members == [held]
-        assert GroupBy(["g"])(node).as_table().to_pylist() == groups
-    else:
-        assert sorted(held) == sorted(versions_rows)
-        assert len(members) == 1 and sorted(members[0]) == sorted(versions_rows)
+    with pytest.raises(
+        CachedSourceChangedRowError,
+        match="holds 1 record id with more than one content",
+    ):
+        job.run(orchestrator=orchestrator())
+    assert list(job.nodes["f"].iter_data()) == []
+    assert job.nodes["GroupBy"].as_table().num_rows == 0
 
 
 def test_async_held_order_is_the_order_the_output_took_the_rows() -> None:

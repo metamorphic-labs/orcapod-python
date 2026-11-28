@@ -49,6 +49,14 @@ class InMemoryArrowDatabase:
 
     RECORD_ID_COLUMN = "__record_id"
 
+    def preview_appended_rows(self, stored: pa.Table, incoming: pa.Table) -> pa.Table:
+        """Return ``stored`` followed by ``incoming``, as a read after the append gives them.
+
+        This store keeps a table's columns as they are: ``incoming`` holds every
+        stored column, taken by name.
+        """
+        return pa.concat_tables([stored, incoming.select(stored.column_names)])
+
     def __init__(
         self,
         max_hierarchy_depth: int = 10,
@@ -698,6 +706,8 @@ class InMemoryArrowDatabase:
         column_values: "Collection[tuple[str, Any]] | Mapping[str, Any]",
         record_id_column: str | None = None,
         flush: bool = False,
+        *,
+        columns: Collection[str] | None = None,
     ) -> "pa.Table | None":
         if flush:
             self.flush()
@@ -733,6 +743,8 @@ class InMemoryArrowDatabase:
         filtered = parts[0] if len(parts) == 1 else pa.concat_tables(parts)
         if filtered.num_rows == 0:
             return None
+        if columns is not None:
+            filtered = filtered.select([*columns, self.RECORD_ID_COLUMN])
         return self._handle_record_id_column(filtered, record_id_column)
 
     def _filter_committed(
