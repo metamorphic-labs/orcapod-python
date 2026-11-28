@@ -525,33 +525,105 @@ def test_reopened_cache_refuses_legacy_system_tag_metadata(
             reopened.get_all_records()
 
 
-@pytest.mark.parametrize("as_batch", [False, True])
+class _ArrowStreamExporter:
+    def __init__(self, table: pa.Table) -> None:
+        self.table = table
+        self.exports = 0
+
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+        self.exports += 1
+        return self.table.__arrow_c_stream__(requested_schema)
+
+
+class _ArrowArrayExporter:
+    def __init__(self, batch: pa.RecordBatch) -> None:
+        self.batch = batch
+        self.exports = 0
+
+    def __arrow_c_array__(self, requested_schema: Any = None) -> Any:
+        self.exports += 1
+        return self.batch.__arrow_c_array__(requested_schema)
+
+
+class _DualArrowExporter(_ArrowArrayExporter):
+    def __init__(self, batch: pa.RecordBatch, stream: pa.Table) -> None:
+        super().__init__(batch)
+        self.stream = stream
+        self.stream_exports = 0
+
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+        self.stream_exports += 1
+        return self.stream.__arrow_c_stream__(requested_schema)
+
+
+@pytest.mark.parametrize(
+    "representation", ["table", "batch", "reader", "stream", "array", "dual"]
+)
+@pytest.mark.parametrize("row_count", [0, 2])
 @pytest.mark.parametrize("declare_schema", [False, True])
-def test_dataframe_source_validates_nominated_arrow_fields_before_polars(
-    as_batch: bool,
+@pytest.mark.parametrize("field_metadata", [None, {b"owner": b"research"}])
+def test_dataframe_source_validates_arrow_inputs_before_polars(
+    representation: str,
+    row_count: int,
     declare_schema: bool,
+    field_metadata: dict[bytes | str, bytes | str] | None,
 ) -> None:
-    table = _table(
-        pa.field("extra", pa.string(), False, metadata={b"owner": b"research"}),
-        ["a", "b"],
-    )
-    data = table.to_batches()[0] if as_batch else table
-    schema = (
-        table.schema.set(
-            table.num_columns - 1, table.schema.field("extra").remove_metadata()
+    clean = _table(pa.field("extra", pa.string(), False), ["a", "b"][:row_count])
+    pos = clean.schema.get_field_index("extra")
+    table = (
+        clean
+        if field_metadata is None
+        else clean.set_column(
+            pos,
+            clean.schema.field(pos).with_metadata(field_metadata),
+            clean.column(pos),
         )
-        if declare_schema
-        else None
     )
-    with pytest.raises(
-        InputValidationError, match=r"'extra'.*[Rr]emove.*field metadata"
-    ):
-        DataFrameSource(
-            data,
-            schema=schema,
-            tag_columns=TAGS,
-            system_tag_columns=["rev", "extra"],
+    batch = pa.RecordBatch.from_arrays(
+        [c.combine_chunks() for c in table.columns], schema=table.schema
+    )
+    representations = {
+        "table": table,
+        "batch": batch,
+        "reader": table.to_reader(max_chunksize=1),
+        "stream": _ArrowStreamExporter(table),
+        "array": _ArrowArrayExporter(batch),
+        "dual": _DualArrowExporter(batch, clean),
+    }
+    data = representations[representation]
+    schema = clean.schema if declare_schema else None
+
+    if field_metadata is not None:
+        with pytest.raises(
+            InputValidationError, match=r"'extra'.*[Rr]emove.*field metadata"
+        ):
+            DataFrameSource(
+                data,
+                schema=schema,
+                tag_columns=TAGS,
+                system_tag_columns=["rev", "extra"],
+            )
+    else:
+        source = DataFrameSource(
+            data, schema=schema, tag_columns=TAGS, system_tag_columns=["rev", "extra"]
         )
+        expected = DataFrameSource(
+            clean, schema=schema, tag_columns=TAGS, system_tag_columns=["rev", "extra"]
+        )
+        columns = {"system_tags": True, "source": True}
+        actual_table = source.as_table(columns=columns)
+        assert actual_table.num_rows == row_count
+        assert actual_table.equals(
+            expected.as_table(columns=columns), check_metadata=True
+        )
+        assert source.source_id == expected.source_id
+        assert source.content_hash() == expected.content_hash()
+        assert source.pipeline_hash() == expected.pipeline_hash()
+
+    if isinstance(data, (_ArrowArrayExporter, _ArrowStreamExporter)):
+        assert data.exports == 1
+    if isinstance(data, _DualArrowExporter):
+        assert data.stream_exports == 0
 
 
 @pytest.mark.parametrize("route", ["table", "rows", "async_rows", "head"])
