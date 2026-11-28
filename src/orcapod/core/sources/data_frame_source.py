@@ -221,6 +221,48 @@ def _frame_from_checked_rows(
     return frame
 
 
+def _frame_from_columns(
+    columns: Sequence[Any], system_tag_columns: Collection[str]
+) -> pl.DataFrame:
+    """Check named columns and refuse named rows in a column-oriented sequence."""
+    names: set[str] = set()
+    named_series: dict[int, str] = {}
+    named_rows: dict[int, tuple[str, ...]] = {}
+    for index, column in enumerate(columns):
+        if isinstance(column, (pd.Series, pd.Index, pl.Series)):
+            if column.name is not None and (name := str(column.name)):
+                names.add(name)
+                named_series[index] = name
+        elif isinstance(column, np.ndarray) or column is None:
+            continue
+        elif (
+            isinstance(column, (Mapping, BaseModel))
+            or is_dataclass(column)
+            or (isinstance(column, tuple) and hasattr(type(column), "_fields"))
+        ):
+            row = _describe_frame_row(column)
+            if row is not None:
+                names.update(row.exposed_names)
+                named_rows[index] = row.names
+
+    require_source_column_names(names, system_tag_columns)
+    if named_rows:
+        index, fields = next(iter(named_rows.items()))
+        raise InputValidationError(
+            f"Source row {index} declares fields {fields!r} in a column-oriented "
+            "sequence. Pass named rows separately or use named columns."
+        )
+
+    frame = pl.DataFrame(columns)
+    for index, name in named_series.items():
+        if index >= frame.width or name != frame.columns[index]:
+            raise InputValidationError(
+                f"Input column {index} is named {name!r}, but Polars "
+                f"returned columns {frame.columns!r}. Use named columns."
+            )
+    return frame
+
+
 def source_dataframe(
     data: FrameInitTypes, system_tag_columns: Collection[str] = ()
 ) -> pl.DataFrame:
@@ -233,29 +275,20 @@ def source_dataframe(
     Returns:
         The validated input converted with Polars' normal inference.
     """
-    if isinstance(data, Mapping):
+    if isinstance(data, pd.DataFrame):
+        require_source_column_names(
+            [str(name) for name in data.columns], system_tag_columns
+        )
+    elif isinstance(data, (pa.Table, pa.RecordBatch)):
+        require_source_column_names(data.schema.names, system_tag_columns)
+    elif isinstance(data, np.ndarray):
+        require_source_column_names(data.dtype.names or (), system_tag_columns)
+    elif isinstance(data, Mapping):
         require_source_column_names(data.keys(), system_tag_columns)
-        return pl.DataFrame(data)
     elif isinstance(data, Sequence):
-        if all(isinstance(column, pl.Series) for column in data):
-            require_source_column_names(
-                {column.name for column in data}, system_tag_columns
-            )
-            return pl.DataFrame(data)
         first = next((value for value in data if value is not None), None)
-        if isinstance(first, (pd.Series, pd.Index, np.ndarray)):
-            # These sequences use Polars' column conversion. Check pandas names
-            # before conversion can fail or discard a column.
-            require_source_column_names(
-                {
-                    column.name
-                    for column in data
-                    if isinstance(column, (pd.Series, pd.Index))
-                    and isinstance(column.name, str)
-                },
-                system_tag_columns,
-            )
-            return pl.DataFrame(data)
+        if isinstance(first, (pd.Series, pd.Index, np.ndarray, pl.Series)):
+            return _frame_from_columns(data, system_tag_columns)
         rows = list(_describe_frame_rows(data))
         _require_materialized_row_names(rows, system_tag_columns)
         return _frame_from_checked_rows(
@@ -323,6 +356,8 @@ class DataFrameSource(RootSource):
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
 
+        if schema is not None:
+            require_source_column_names(schema.names, system_tag_columns)
         df = source_dataframe(data, system_tag_columns)
         require_source_column_names(df.columns, system_tag_columns)
 
@@ -350,7 +385,6 @@ class DataFrameSource(RootSource):
 
         arrow_table = df.to_arrow()
         if schema is not None:
-            require_source_column_names(schema.names, system_tag_columns)
             require_supported_nullable_types(schema)
             require_custom_system_tags(arrow_table, system_tag_columns, schema=schema)
             arrow_table = arrow_table.cast(schema)

@@ -1102,9 +1102,9 @@ def require_names_not_system(names: Collection[str]) -> None:
 
 
 def require_stored_stream_column_names(
-    names: Collection[str], bookkeeping: Collection[str], path: Sequence[str]
+    names: Collection[str], bookkeeping: Collection[str]
 ) -> None:
-    """Validate the user columns of a stored stream and name its table on error.
+    """Validate the user columns of a stored stream.
 
     Stored streams carry system tags and source info alongside the user columns.
     System tags have their own prefix. Source info names the column it describes.
@@ -1120,9 +1120,4 @@ def require_stored_stream_column_names(
             and name.removeprefix(constants.SOURCE_PREFIX) in names
         )
     }
-    try:
-        require_names_not_system(set(names) - set(bookkeeping) - system_columns)
-    except InputValidationError as exc:
-        raise InputValidationError(
-            f"{exc} Stored stream table: {'/'.join(path)}"
-        ) from exc
+    require_names_not_system(set(names) - set(bookkeeping) - system_columns)

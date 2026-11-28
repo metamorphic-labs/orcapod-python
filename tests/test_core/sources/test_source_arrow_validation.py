@@ -9,7 +9,7 @@ from re import escape
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import deltalake
 import polars as pl
@@ -50,6 +50,9 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import CacheMode, ColumnInfo, Cursor
 from tests.test_core.sources.test_db_table_source import MockDBConnector
 from tests.test_databases import fake_spiral_sdk
+
+if TYPE_CHECKING:
+    from polars._typing import FrameInitTypes
 
 TAGS = ("g", "k")
 SOURCE_KINDS = (
@@ -978,9 +981,7 @@ def test_no_declared_type_for_python_none_still_infers_a_string() -> None:
 class _Poll:
     """Minimal impl for testing schema validation before the first fetch."""
 
-    def __init__(
-        self, schema: pa.Schema | None, batch: pl.DataFrame | list[Any] | Iterator[Any]
-    ) -> None:
+    def __init__(self, schema: pa.Schema | None, batch: FrameInitTypes) -> None:
         self._schema = schema
         self._batch = batch
 
@@ -1002,7 +1003,7 @@ class _Poll:
 
     async def fetch(
         self, cursor: Cursor[int] | None = None
-    ) -> tuple[Cursor[int], pl.DataFrame | list[Any] | Iterator[Any]]:
+    ) -> tuple[Cursor[int], FrameInitTypes]:
         """Return the prepared batch on the initial fetch."""
         return Cursor(value=0), self._batch
 
@@ -1427,3 +1428,146 @@ def test_cached_source_refuses_reserved_stored_user_columns() -> None:
     )
     with pytest.raises(InputValidationError, match="'_foo'.*reserved.*sdb_v1"):
         cached.as_table()
+
+
+@pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
+@pytest.mark.parametrize(
+    ("kind", "field"),
+    [("namedtuple", "_1"), ("namedtuple", "label"), ("series", "_hidden")],
+)
+def test_numpy_first_batch_refuses_names_that_would_be_lost(
+    path: str, kind: str, field: str
+) -> None:
+    from collections import namedtuple
+
+    import numpy as np
+
+    column: Any
+    if kind == "series":
+        column = pl.Series(field, [3, 4])
+    elif field == "_1":
+        row = namedtuple("ReservedRecord", ["label", "_hidden"], rename=True)
+        column = row(3, 4)
+    else:
+        row = namedtuple("OrdinaryRecord", ["label", "value"])
+        column = row(3, 4)
+    batch = [np.array([1, 2]), column]
+
+    with pytest.raises(InputValidationError, match=escape(repr(field))):
+        if path == "frame":
+            DataFrameSource(batch)
+        else:
+            source = PollingSource(
+                _Poll(None, batch),
+                ["column_0"],
+                source_id="poll",
+                record_id_columns="column_0",
+            )
+            if path == "poll-sync":
+                source.as_table()
+            else:
+
+                async def read() -> None:
+                    async with contextlib.aclosing(source.async_iter_data()) as rows:
+                        await anext(rows)
+
+                asyncio.run(read())
+
+
+@pytest.mark.parametrize("system_field", ["_tag_fake", "_tag::fake"])
+def test_list_source_checks_callback_tag_before_projection(system_field: str) -> None:
+    from orcapod.core.datagrams import Tag
+
+    def tag(value: int, index: int) -> Tag:
+        return Tag({"label": index, system_field: value, "__meta": value})
+
+    with pytest.raises(InputValidationError) as exc:
+        ListSource("value", [1, 2], tag_function=tag, expected_tag_keys=["label"])
+    assert repr(system_field) in str(exc.value)
+    assert "'__meta'" in str(exc.value)
+    assert "drop them first" in str(exc.value)
+
+    valid = ListSource(
+        "value", [3], tag_function=lambda _, index: Tag({"label": index})
+    )
+    assert valid.as_table().to_pylist() == [{"label": 0, "value": 3}]
+
+
+def test_dataframe_source_checks_declared_names_before_reading_input() -> None:
+    def unreadable() -> Iterator[dict[str, int]]:
+        yield from ()
+        raise AssertionError("should reject the declared name before reading rows")
+
+    with pytest.raises(InputValidationError, match="'_schema'.*drop them first"):
+        DataFrameSource(unreadable(), schema=pa.schema([("_schema", pa.int64())]))
+
+
+@pytest.mark.parametrize("kind", ["pandas", "arrow"])
+@pytest.mark.parametrize("path", ["frame", "poll-sync"])
+def test_frame_checks_raw_names_before_duplicate_column_error(
+    kind: str, path: str
+) -> None:
+    import pandas as pd
+
+    names = ["x", "x", "_one", "_two"]
+    batch = (
+        pd.DataFrame([[1, 2, 3, 4]], columns=pd.Index(names))
+        if kind == "pandas"
+        else pa.Table.from_arrays([pa.array([i]) for i in range(4)], names=names)
+    )
+    with pytest.raises(InputValidationError, match="'_one'.*'_two'.*drop them first"):
+        if path == "frame":
+            DataFrameSource(batch)
+        else:
+            PollingSource(
+                _Poll(None, batch), ["x"], source_id="poll", record_id_columns="x"
+            ).as_table()
+
+
+def test_stored_column_validators_use_only_column_roles() -> None:
+    from orcapod.core.result_cache import _check_result_table
+    from orcapod.utils.schema_utils import require_stored_stream_column_names
+
+    with pytest.raises(InputValidationError, match="'_tag_fake'.*reserved"):
+        _check_result_table(pa.table({"_tag_fake": [1]}), None)
+    with pytest.raises(InputValidationError, match="'_foo'.*reserved"):
+        require_stored_stream_column_names(["_foo"], ())
+
+
+def test_stored_operator_checks_user_names_from_descriptor() -> None:
+    source = ArrowTableSource(
+        pa.table({"k": [1, 2], "x": [3, 4]}), tag_columns=["k"], tag_only_columns=True
+    )
+    store = InMemoryArrowDatabase()
+    job = PipelineJob(name="stored", database=store)
+    with job:
+        DropNulls(["x"])(source, label="origin")
+    node = job.nodes["origin"]
+    assert isinstance(node, OperatorJobNode)
+    node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
+    job.run()
+
+    legacy_name = "_tag_legacy"
+    path = (*node.node_identity_path, "odb_v2")
+    records = store.get_all_records(path, record_id_column=node.HASH_COLUMN_NAME)
+    assert records is not None
+    legacy_records = records.append_column(legacy_name, pa.array([4, 5]))
+    legacy_store = InMemoryArrowDatabase()
+    legacy_store.add_records(
+        path, legacy_records, record_id_column=node.HASH_COLUMN_NAME, flush=True
+    )
+    loaded = OperatorJobNode.from_descriptor(
+        {
+            "label": "origin",
+            "output_schema": {"data": {legacy_name: "int"}},
+            "table_scope": "pipeline_hash",
+            "cache_mode": "log",
+            "pipeline_path": node.node_identity_path,
+        },
+        operator=None,
+        input_streams=(),
+        databases={"pipeline": legacy_store},
+        job_content_hash=node.content_hash().to_string(),
+    )
+    with pytest.raises(InputValidationError, match="'_tag_legacy'.*reserved.*odb_v2"):
+        loaded.get_all_records(all_info=True)

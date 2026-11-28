@@ -104,6 +104,10 @@ class ListSource(RootSource):
         rows = []
         for idx, element in enumerate(self._elements):
             tag_fields = tag_function(element, idx)
+            if isinstance(tag_fields, TagProtocol):
+                require_source_column_names(
+                    tag_fields.keys(columns={"meta": True, "system_tags": True})
+                )
             if hasattr(tag_fields, "as_dict"):
                 tag_fields = tag_fields.as_dict()
             row = dict(tag_fields)

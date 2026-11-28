@@ -1573,16 +1573,29 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         )
         if records is None:
             return None
-        schema_utils.require_stored_stream_column_names(
-            records.column_names,
-            (
-                self.HASH_COLUMN_NAME,
-                constants.NODE_CONTENT_HASH_COL,
-                constants.DATA_CONTEXT_COL,
-                *_STORED_ONLY_COLUMNS,
-            ),
-            self._pipeline_database.base_path + self._stored_table_path,
-        )
+        try:
+            saved = self._descriptor.get("output_schema") if self._loaded else None
+            if saved is not None:
+                # A descriptor distinguishes a legacy user name from a system tag.
+                schema_utils.require_names_not_system(
+                    set(saved.get("tag", {})) | set(saved.get("data", {}))
+                )
+            schema_utils.require_stored_stream_column_names(
+                records.column_names,
+                (
+                    self.HASH_COLUMN_NAME,
+                    constants.NODE_CONTENT_HASH_COL,
+                    constants.DATA_CONTEXT_COL,
+                    *_STORED_ONLY_COLUMNS,
+                ),
+            )
+        except InputValidationError as exc:
+            location = "/".join(
+                self._pipeline_database.base_path + self._stored_table_path
+            )
+            raise InputValidationError(
+                f"{exc} Stored stream table: {location}"
+            ) from exc
         self._check_stored_data_tags(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)
