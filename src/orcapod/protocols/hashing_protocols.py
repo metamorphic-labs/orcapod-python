@@ -32,9 +32,14 @@ class IdentityWalkProtocol(Protocol):
     """One traversal with a common structural hasher and live slot bindings."""
 
     hasher: SemanticHasherProtocol
+    include_sources: bool
 
     def visit(self, element: IdentityChainProtocol) -> IdentityChains:
         """Compute the element's chains or reuse them from this walk."""
+        ...
+
+    def binding_hash(self, stream: ContentIdentifiableProtocol) -> ContentHash:
+        """Read a binding's live content identity without using legacy caches."""
         ...
 
 

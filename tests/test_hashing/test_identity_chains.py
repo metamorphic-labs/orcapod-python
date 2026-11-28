@@ -22,13 +22,14 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import UnboundSourceError
 from orcapod.hashing.semantic_hashing.semantic_hasher import SemanticAwarePythonHasher
 from orcapod.operators import Index, Join, MergeJoin, Rejoin
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.sources import DictSource, SourceProxy
 from orcapod.types import ContentHash
 
 if TYPE_CHECKING:
     from collections.abc import Collection
 
-    from orcapod.protocols.core_protocols import ArgumentGroup, StreamProtocol
+    from orcapod.protocols.core_protocols import ArgumentGroup
     from orcapod.protocols.hashing_protocols import (
         IdentityChainProtocol,
         IdentityChains,
@@ -420,6 +421,33 @@ def test_nested_symmetry_keeps_repeated_ordered_pairs() -> None:
         assert result_chain == hasher.hash_object((group_chain, group_chain))
 
 
+def test_mixed_nested_symmetry_uses_pipeline_order() -> None:
+    """Canonical pipeline order puts a hash leaf before an ordered subgroup."""
+
+    class MixedJoin(Join):
+        @override
+        def argument_symmetry(
+            self, streams: Collection[StreamProtocol]
+        ) -> ArgumentGroup:
+            a, b, c = streams
+            return frozenset((a, (b, c)))
+
+    a, b, c = (_data_tags(name) for name in "abc")
+    result, pair = MixedJoin()(a, b, c), MergeJoin()(b, c)
+    for label, leaf_chain, pair_chain, result_chain in (
+        (
+            SOURCE_CHAIN_HASH_LABEL,
+            a.source_chain(),
+            pair.source_chain(),
+            result.source_chain(),
+        ),
+        (NAME_CHAIN_HASH_LABEL, a.name_chain(), pair.name_chain(), result.name_chain()),
+    ):
+        hasher = SemanticAwarePythonHasher(hasher_id=label)
+        assert result_chain == hasher.hash_object((leaf_chain, pair_chain))
+    assert all(_hashes(result))
+
+
 @pytest.fixture
 def collapsed_nested_pair() -> tuple[StreamProtocol, StreamProtocol]:
     """Build the review's two orderings of content-equal, differently named slots."""
@@ -643,6 +671,94 @@ def test_unbound_slot_binding_has_no_source_chain(inner_job: bool) -> None:
     if inner_job:
         inner.bind(sources={"reading": source})
         assert result.source_chain() == source.content_hash()
+
+
+@pytest.mark.parametrize("threaded", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_rebind_under_nested_composite_bindings(threaded: bool, wrapped: bool) -> None:
+    """A warmed chain follows a rebind through nested bindings and wrappers."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SelectDataColumns
+    from orcapod.sources import CachedSource, DerivedSource
+
+    source = _source("reading", False)
+    replacement = _source("rebound", False)
+    database = InMemoryArrowDatabase()
+    select = SelectDataColumns(["x"])
+
+    def bindable() -> tuple[PipelineJob, StreamProtocol]:
+        job = PipelineJob(name="inner", database=database)
+        with job:
+            _ = source.select_data_columns(["x"], label="projection")
+        slot = job.nodes["reading"]
+        projection = job.nodes["projection"]
+        assert isinstance(slot, SourceJobNode)
+        assert isinstance(projection, OperatorJobNode)
+        upstream = (
+            CachedSource(DerivedSource(projection, source_id="wrapped"), database)
+            if wrapped
+            else slot
+        )
+        stream = select(upstream)
+        assert isinstance(stream, StreamProtocol)
+        return job, stream
+
+    inner, bound = bindable()
+
+    middle = PipelineJob(name="middle", database=database)
+    with middle:
+        _ = select(SourceNode.from_stream(bound, name="middle_input"), label="unused")
+    middle.bind(sources={"middle_input": bound})
+    middle_slot = middle.nodes["middle_input"]
+    assert isinstance(middle_slot, SourceJobNode)
+    outer = PipelineJob(name="outer", database=database)
+    with outer:
+        _ = select(SourceNode.from_stream(bound, name="outer_input"), label="result")
+    outer_bound = select(middle_slot)
+    assert isinstance(outer_bound, StreamProtocol)
+    outer.bind(sources={"outer_input": outer_bound})
+    result = outer.nodes["result"]
+    assert isinstance(result, OperatorJobNode)
+    before = result.source_chain(), *_hashes(result)
+
+    def read() -> tuple[ContentHash | None, object, object]:
+        return result.source_chain(), *_hashes(result)
+
+    if threaded:
+        ready, rebound = Event(), Event()
+
+        def read_through_rebind() -> tuple[ContentHash | None, object, object]:
+            assert read() == before
+            ready.set()
+            assert rebound.wait(5)
+            return read()
+
+        with ThreadPoolExecutor(1) as executor:
+            reader = executor.submit(read_through_rebind)
+            try:
+                assert ready.wait(5)
+                inner.bind(sources={"reading": replacement})
+            finally:
+                rebound.set()
+            after = reader.result(timeout=5)
+    else:
+        inner.bind(sources={"reading": replacement})
+        after = read()
+
+    assert after[0] != before[0]
+    assert after[1] != before[1]
+    assert after[2] == before[2]
+    fresh_job, fresh = bindable()
+    fresh_job.bind(sources={"reading": replacement})
+    middle.bind(sources={"middle_input": fresh})
+    fresh_outer = select(middle_slot)
+    assert isinstance(fresh_outer, StreamProtocol)
+    outer.bind(sources={"outer_input": fresh_outer})
+    assert read() == after
 
 
 @pytest.mark.parametrize("has_rows", [False, True])

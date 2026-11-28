@@ -92,7 +92,7 @@ the label.
 """
 
 
-def _nested_hash(content_hash: ContentHash) -> dict[str, str]:
+def nested_hash(content_hash: ContentHash) -> dict[str, str]:
     """Return the form in which a hash enters the structure that contains it.
 
     A hash fed into another hash carries its label (ITL-1154): the label names the
@@ -287,7 +287,7 @@ class SemanticAwarePythonHasher:
 
         # ContentHash is a terminal leaf -- embed its label and digest.
         if isinstance(obj, ContentHash):
-            return _nested_hash(obj)
+            return nested_hash(obj)
 
         # Circular-reference guard for containers.
         obj_id = id(obj)
@@ -329,7 +329,7 @@ class SemanticAwarePythonHasher:
             # A frozenset is a type of its own (ITL-1154): tagged apart from set.
             return {
                 "__type__": "frozenset" if isinstance(obj, frozenset) else "set",
-                "items": sorted(expanded_items, key=_canonical_json),
+                "items": sorted(expanded_items, key=canonical_json),
             }
 
         # Should not be reached if _is_structure() is consistent.
@@ -355,7 +355,7 @@ class SemanticAwarePythonHasher:
             return self._expand_structure(obj, _visited, resolver=resolver)
 
         # Non-structure, non-primitive: hash independently and embed the hash.
-        return _nested_hash(self.hash_object(obj, resolver=resolver))
+        return nested_hash(self.hash_object(obj, resolver=resolver))
 
     def _expand_mapping(
         self,
@@ -383,7 +383,7 @@ class SemanticAwarePythonHasher:
         ]
         if all(isinstance(k, str) and k != TYPE_KEY for k in obj):
             return dict(expanded)
-        pairs = sorted(([k, v] for k, v in expanded), key=_canonical_json)
+        pairs = sorted(([k, v] for k, v in expanded), key=canonical_json)
         return {"__type__": "dict", "items": pairs}
 
     def _expand_encoded(
@@ -436,7 +436,7 @@ class SemanticAwarePythonHasher:
         (the output of _expand_structure or a raw primitive).
         """
         try:
-            json_bytes = _canonical_json(obj).encode("utf-8")
+            json_bytes = canonical_json(obj).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"SemanticAwarePythonHasher: failed to JSON-serialise object of type "
@@ -498,7 +498,7 @@ class SemanticAwarePythonHasher:
 # ---------------------------------------------------------------------------
 
 
-def _canonical_json(obj: Any) -> str:
+def canonical_json(obj: Any) -> str:
     """Return the canonical JSON text of an expanded tree: the hashed preimage."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 

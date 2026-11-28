@@ -25,7 +25,7 @@ from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
-from orcapod.core.identity_chains import IdentityChainsMixin
+from orcapod.core.identity_chains import IdentityChainsMixin, track_binding_dependency
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.sources.base import table_is_rows
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -758,17 +758,19 @@ class SourceNodeBase(TraceableBase, IdentityChainsMixin, ABC):
         self, walk: IdentityWalkProtocol
     ) -> tuple[str, ContentHash | None]:
         """Use the declared slot name and follow the binding to a concrete source."""
+        if not walk.include_sources:
+            return self.name, None
         bound = self._bound_stream()
         if bound is None:
             return self.name, None
         from orcapod.core.sources.base import RootSource
 
         if isinstance(bound, RootSource):
-            return self.name, bound.content_hash()
+            return self.name, walk.binding_hash(bound)
         sources = walk.visit(bound).sources
         if sources is None or isinstance(bound, SourceNodeBase):
             return self.name, sources
-        return self.name, bound.content_hash()
+        return self.name, walk.binding_hash(bound)
 
     def _bound_stream(self) -> "StreamProtocol | None":
         """The concrete stream bound to this slot; a declaration has none."""
@@ -1899,6 +1901,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             Bound source's identity structure when bound; schema-based
             identity (inherited from SourceNodeBase) when unbound.
         """
+        track_binding_dependency(self)
         if self._bound_source is not None:
             return self._bound_source.identity_structure()
         return super().identity_structure()

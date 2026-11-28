@@ -302,10 +302,10 @@ A stream, invocation or job node carries three chains. `pipeline_hash()` describ
 structure. `source_chain()` starts at each slot with the bound source's own content hash.
 `name_chain()` starts with the slot's name. A raw stream outside a slot contributes
 an anonymous name term. Display labels do not participate. A single-input step passes both chains
-through unchanged unless the step contributes a term of its own. Multiple inputs are pooled in argument order for an ordered
-operator and by pipeline hash for a commutative operator. Within a pipeline-hash tie,
-the source and name chains each sort their own values. Repeated inputs contribute
-at every position.
+through unchanged unless the step contributes a term of its own. Ordered groups pool
+inputs in argument order. Commutative groups use the pipeline hash's canonical order,
+including when a group contains other groups. Within a tie the source and name chains
+each sort their own values. Repeated inputs contribute at every position.
 
 `node_hash()` combines the pipeline hash and the name chain. The chain-based content
 hash combines the pipeline hash and the source chain and is undefined while any
@@ -321,7 +321,8 @@ A polling source, including one wrapped in a cache, can report its source chain,
 name chain, and node hash before it knows its schema. The node hash combines a
 pending polling-source structure term with the name chain without polling. Once a batch
 supplies the schema, the node hash combines the pipeline hash with the same name
-chain. The chain-based content hash requires the schema.
+chain. The chain-based content hash requires the schema. Downstream identities that
+need the pipeline hash report that it is undefined until the schema is known.
 
 ## Hash site inventory
 
@@ -373,7 +374,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 
 | Location | Hash consumed | Into | Form | Call sites |
 |---|---|---|---|---|
-| nested hash in a structure | any nested hash: types, schemas, upstream streams, value hashes | the enclosing structure hash | `{"__type__": "hash", "label": ..., "digest": ...}` | `hashing/semantic_hashing/semantic_hasher.py:_nested_hash` |
+| nested hash in a structure | any nested hash: types, schemas, upstream streams, value hashes | the enclosing structure hash | `{"__type__": "hash", "label": ..., "digest": ...}` | `hashing/semantic_hashing/semantic_hasher.py:nested_hash` |
 | schema identity | the `arrow_schema_v1` hashes of a source's or slot's Arrow tag and data schemas, or of a function's output Arrow schema | a source's content and pipeline identity, system-tag column names, the function `uri` | the `ContentHash` objects, nested | `utils/schema_utils.py:arrow_schema_identity`, `utils/schema_utils.py:compute_schema_hash`, `core/data_function.py:DataFunctionBase.output_data_schema_hash` |
 | union and generic alias arguments | argument type hashes, sorted by digest, then label (ordering only) | the type hash, via the nested form | as above | `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes`, `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes.<locals>.<lambda>` |
 | logical-type cell, scalar and container | a value-hashed cell's value hash | the Arrow table hash | `<identifier>::<label>:<digest>`; a container cell: count, then per element a marker, a u64 length and the element token | `hashing/visitors.py:SemanticHashingVisitor.visit_extension` |
@@ -435,7 +436,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 | in-memory lookup keys for a validated operator input or input pair (ITL-1358) | `core/operators/index.py:Index.validate_unary_input`, `core/operators/index.py:Index.async_execute`, `core/operators/pick.py:Pick.validate_unary_input`, `core/operators/pick.py:Pick.async_execute`, `core/operators/semijoin.py:SemiJoin.validate_binary_inputs`, `core/operators/semijoin.py:SemiJoin.async_execute` |
 | in-memory topological sort of compiled and restored nodes, using the pipeline hash to order ready invocations | `pipeline/base.py:AbstractPipelineBase._ordered_node_map.<locals>.order_key` |
 | canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
-| canonical input order for source and name chains (pipeline digest, then each chain's labelled hash within a tie) | `core/identity_chains.py:_pool_group` |
+| canonical input order for source and name chains (pipeline inputs' canonical JSON, then each chain's labelled hash within a tie) | `core/identity_chains.py:_pool_group` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
 | comparing a stored hash with the computed one; comparing two schema hashes (bind, a stored read, a polled batch); error text | `core/nodes/source_node.py:SourceNodeBase._arrow_type_issue`, `core/sources/derived_source.py:DerivedSource._require_origin_types`, `core/sources/polling_source.py:PollingSource._require_declared_types`, `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
 

@@ -773,7 +773,7 @@ class StreamBase(TraceableBase, IdentityChainsMixin):
 
     def _identity_leaf(
         self, walk: IdentityWalkProtocol
-    ) -> tuple[str | None, ContentHash] | None:
+    ) -> tuple[str | None, ContentHash | None] | None:
         """A named source stands for its slot; a raw input has no slot name."""
         if self.producer is not None or self._identity_inputs():
             return None
@@ -788,7 +788,7 @@ class StreamBase(TraceableBase, IdentityChainsMixin):
                 if self.source_id != "unknown":
                     raise
                 name = "unknown"
-        return name, self.content_hash()
+        return name, walk.binding_hash(self) if walk.include_sources else None
 
     @property
     @abstractmethod

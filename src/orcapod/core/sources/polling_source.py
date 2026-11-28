@@ -22,6 +22,7 @@ import polars as pl
 import pyarrow as pa
 from typing_extensions import override
 
+from orcapod.core.identity_chains import refuse_identity_io
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.logical_types.canonical_form import declaration_form_schema
@@ -431,7 +432,9 @@ class PollingSource(RootSource, Generic[T]):
     def _identity_pipeline_hash(self, hasher: SemanticHasherProtocol) -> ContentHash:
         """The source combination requires a declared schema or a committed batch."""
         if self._declared_arrow is None and not self._batches:
-            raise ValueError("Polling source pipeline structure requires a schema.")
+            raise ValueError(
+                "Polling source pipeline identity is undefined: it requires a schema."
+            )
         return super()._identity_pipeline_hash(hasher)
 
     def _identity_node_pipeline_hash(
@@ -518,6 +521,7 @@ class PollingSource(RootSource, Generic[T]):
                 return tag_schema, self._data_schema
         if self._batches:
             return self._batches[0].output_schema(columns=columns, all_info=all_info)
+        refuse_identity_io()
         _ = self._sync_poll_and_commit()
         return self._get_combined_stream().output_schema(
             columns=columns, all_info=all_info
@@ -555,6 +559,7 @@ class PollingSource(RootSource, Generic[T]):
                 return tag_keys, tuple(self._data_schema.keys())
         if self._batches:
             return self._batches[0].keys(columns=columns, all_info=all_info)
+        refuse_identity_io()
         _ = self._sync_poll_and_commit()
         return self._get_combined_stream().keys(columns=columns, all_info=all_info)
 
@@ -783,6 +788,7 @@ class PollingSource(RootSource, Generic[T]):
 
         Safe to call concurrently with ``async_iter_data``.
         """
+        refuse_identity_io()
         with self._state_lock:
             cursor_snapshot = self._cursor
 

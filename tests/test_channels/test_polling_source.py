@@ -1891,3 +1891,34 @@ def test_cached_polling_source_has_node_hash_without_fetch(
     assert list(source)
     assert cached.node_hash() == source.node_hash() != pending
     assert cached._chain_content_hash() == source._chain_content_hash()
+
+
+def test_batch_identities_do_not_fetch_pending_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A downstream identity cannot infer a schema by polling its input."""
+    from orcapod.protocols.core_protocols import StreamProtocol
+    from orcapod.operators import Batch
+
+    impl = FakeDynamicSource(batches=[_batch(1, 10)])
+    source = PollingSource(
+        impl, tag_columns="id", source_id="pending", record_id_columns="id"
+    )
+    result = Batch(2)(source)
+    assert isinstance(result, StreamProtocol)
+
+    def unexpected_fetch() -> None:
+        pytest.fail("pending identities must not fetch for a schema")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(source, "_sync_poll_and_commit", unexpected_fetch)
+        guard.setattr(impl, "identity", unexpected_fetch)
+        name = result.name_chain()
+    with monkeypatch.context() as guard:
+        guard.setattr(source, "_sync_poll_and_commit", unexpected_fetch)
+        for accessor in (result.node_hash, result._chain_content_hash):
+            with pytest.raises(ValueError, match="undefined.*requires a schema"):
+                _ = accessor()
+    assert list(source)
+    assert result.name_chain() == name
+    assert result.node_hash() and result._chain_content_hash()
