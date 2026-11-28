@@ -977,7 +977,7 @@ class TestPreparePrefixedColumnsSourceInfoTokens:
         return field.type, field.nullable
 
     def test_string_token_is_large_string(self) -> None:
-        assert self._source_column("tok") == (pa.large_string(), False)
+        assert self._source_column("tok") == (pa.large_string(), True)
 
     def test_none_token_is_nullable_large_string(self) -> None:
         assert self._source_column(None) == (pa.large_string(), True)
@@ -985,13 +985,13 @@ class TestPreparePrefixedColumnsSourceInfoTokens:
     def test_list_token_is_large_list_of_large_string(self) -> None:
         assert self._source_column(["a", "b"]) == (
             pa.large_list(pa.large_string()),
-            False,
+            True,
         )
 
     def test_nested_list_token_nests_the_list_type(self) -> None:
         assert self._source_column([["a"], ["b", "c"]]) == (
             pa.large_list(pa.large_list(pa.large_string())),
-            False,
+            True,
         )
 
     def test_stream_with_nested_source_info_iterates(self) -> None:

@@ -926,14 +926,20 @@ def test_a_source_stream_or_pod_does_not_depend_on_the_arrangement_of_its_input(
 @pytest.mark.parametrize(
     "case", [*STREAM_CASES], ids=[case.label for case in STREAM_CASES]
 )
-def test_stream_and_rows_agree_on_tag_and_primary_data_fields(
+def test_stream_and_rows_agree_on_tag_data_and_token_fields(
     case: StreamCase, tmp_path: Path
 ) -> None:
     """Rows keep the stream's declared fields across tag orders and layouts."""
-    columns = {"system_tags": True}
+    columns = {"system_tags": True, "source": True}
     for order, layout in ARRANGEMENTS:
         stream = case.build(case.roles[0], order, layout, tmp_path)
         table = stream.as_table(columns=columns)
+        token_fields = {
+            field.name: field
+            for field in table.schema
+            if field.name.startswith("_source_")
+        }
+        assert all(field.nullable for field in token_fields.values())
         rows = [list(stream.iter_data())]
         if case.with_async:
             rows.append(
@@ -942,13 +948,21 @@ def test_stream_and_rows_agree_on_tag_and_primary_data_fields(
         for path_rows in rows:
             assert len(path_rows) == table.num_rows
             for tag, data in path_rows:
-                for row_table in (tag.as_table(columns=columns), data.as_table()):
+                for row_table in (
+                    tag.as_table(columns=columns),
+                    data.as_table(columns=columns),
+                ):
                     assert all(
                         field.equals(
                             table.schema.field(field.name), check_metadata=True
                         )
                         for field in row_table.schema
                     )
+                assert all(
+                    field.equals(token_fields[field.name], check_metadata=True)
+                    for field in data.source_info_table().schema
+                    if field.name in token_fields
+                )
 
 
 @pytest.mark.parametrize("role", ROLES)

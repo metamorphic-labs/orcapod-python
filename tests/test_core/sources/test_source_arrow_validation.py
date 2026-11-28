@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Collection
 from pathlib import Path
@@ -228,6 +229,37 @@ def test_accepts_two_non_nullable_string_system_tags(
     }
 
 
+@pytest.mark.parametrize("kind", [kind for kind in SOURCE_KINDS if kind != "spiral"])
+def test_source_rows_keep_the_streams_nullable_token_fields(
+    kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"])
+    _assert_token_fields_match_rows(_source(kind, table, tmp_path, monkeypatch))
+
+
+def _assert_token_fields_match_rows(stream: StreamProtocol) -> None:
+    """Every row carries the source's token declarations."""
+    table = stream.as_table(columns={"source": True, "system_tags": True})
+    fields = {
+        field.name: field for field in table.schema if field.name.startswith("_source_")
+    }
+    assert fields and all(field.nullable for field in fields.values())
+
+    async def token_schemas() -> list[pa.Schema]:
+        return [
+            data.source_info_table().schema
+            async for _, data in stream.async_iter_data()
+        ]
+
+    sync = [data.source_info_table().schema for _, data in stream.iter_data()]
+    for schemas in (sync, asyncio.run(token_schemas())):
+        assert len(schemas) == table.num_rows
+        for schema in schemas:
+            assert {field.name: field for field in schema} == fields
+
+
 @pytest.mark.parametrize("kind", [kind for kind in SOURCE_KINDS if kind != "sqlite"])
 def test_refuses_arrow_null_from_readers(
     kind: str,
@@ -392,10 +424,10 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
 
 
 @pytest.mark.parametrize("stored_flag", [False, True])
-def test_cached_source_reads_older_token_field_flags_as_stored(
+def test_cached_source_presents_older_token_fields_as_nullable(
     stored_flag: bool,
 ) -> None:
-    """A cache read uses the stored schema when its original source is unavailable."""
+    """A cache read presents nullable tokens even when its source is unavailable."""
     source = ArrowTableSource(
         _table(pa.field("extra", pa.string(), False), ["a", "b"]),
         tag_columns=TAGS,
@@ -428,7 +460,7 @@ def test_cached_source_reads_older_token_field_flags_as_stored(
         record_id_column=CachedSource.HASH_COLUMN_NAME,
         flush=True,
     )
-    assert cache.as_table(columns=columns).schema.field(token).nullable is stored_flag
+    assert cache.as_table(columns=columns).schema.field(token).nullable
     assert all(
         data.source_info_table().schema.field(token).nullable
         for _, data in cache.iter_data()
@@ -532,6 +564,7 @@ def test_spiral_can_nominate_a_tag_copy_as_a_custom_system_tag(
             "a",
             "b",
         ]
+        _assert_token_fields_match_rows(source)
 
 
 def test_spiral_validates_reserved_null_in_an_empty_scan_batch(

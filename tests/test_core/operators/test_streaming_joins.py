@@ -15,9 +15,8 @@ feed each kernel those inputs' transport tables cut into batches of random sizes
 and one-row batches included), in random interleavings of the inputs and of their ends,
 and compare.
 
-Field flags are compared as the stream built from the batches settles them: the
-system-tag and source-info fields by their values over the complete table (the last step
-of F, ``_flag_by_values``), on both sides, rows or none.
+Source-info flags are compared directly. The system tags can be opened to nullable
+for transport, so their observed nulls are compared over the complete table.
 """
 
 from __future__ import annotations
@@ -208,15 +207,16 @@ def _rows(table: pa.Table) -> Counter[tuple[Any, ...]]:
 
 
 def assert_same_fields(got: pa.Table, want: pa.Table) -> None:
-    """Same columns, types, field metadata and flags, after settling both (F's last step)."""
+    """Same columns, types, field metadata and flags for regular and token fields."""
     assert sorted(got.column_names) == sorted(want.column_names)
-    got = StaticOutputOperatorPod._flag_by_values(got.select(want.column_names))  # pyright: ignore[reportPrivateUsage]  # F's last step
-    want = StaticOutputOperatorPod._flag_by_values(want)  # pyright: ignore[reportPrivateUsage]  # F's last step
     for field in want.schema:
         other = got.schema.field(field.name)
         assert other.type == field.type, field.name
         assert other.metadata == field.metadata, field.name
-        assert other.nullable == field.nullable, field.name
+        if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
+            assert got[field.name].null_count == want[field.name].null_count, field.name
+        else:
+            assert other.nullable == field.nullable, field.name
 
 
 def assert_same_rows(
@@ -228,8 +228,7 @@ def assert_same_rows(
     """
     for batch in batches:
         assert batch.schema.names == list(kernel.output_columns)
-        # One schema for every batch of the run. The complete table settles the
-        # source-info flags. Join has already settled its sorted system tags.
+        # One schema for every batch of the run, with nullable tokens.
         assert batch.schema.equals(batches[0].schema, check_metadata=True)
         for field in batch.schema:
             if field.name.startswith(constants.SOURCE_PREFIX):

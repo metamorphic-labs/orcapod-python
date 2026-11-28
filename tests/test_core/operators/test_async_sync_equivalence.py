@@ -1010,9 +1010,24 @@ CASE = pytest.mark.parametrize("case", CASES, ids=[c.label for c in CASES])
 def test_async_rows_equal_sync_rows(case: Case) -> None:
     """The async path yields the sync path's types, order, system tags and hashes."""
     sources = case.make_sources()
-    assert_equivalent(
-        sync_rows(case.make_op(), *sources), async_rows(case.make_op(), *sources)
-    )
+    stream = case.make_op()(*sources)
+    fields = {
+        field.name: field
+        for field in stream.as_table(columns={"source": True}).schema
+        if field.name.startswith("_source_")
+    }
+    assert all(field.nullable for field in fields.values())
+    sync = list(stream.iter_data())
+    asynchronous = async_rows(case.make_op(), *sources)
+    assert_equivalent(sync, asynchronous)
+    for rows in (sync, asynchronous):
+        for _, data in rows:
+            tokens = data.source_info_table().schema
+            assert set(tokens.names) == fields.keys()
+            assert all(
+                field.equals(fields[field.name], check_metadata=True)
+                for field in tokens
+            )
 
 
 @pytest.mark.parametrize("reverse_columns", [False, True])

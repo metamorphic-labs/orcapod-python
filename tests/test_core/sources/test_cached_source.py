@@ -98,7 +98,7 @@ class TestCachedSourceCachePath:
         # The whole component: a labelled hash ("node:semantic_v1:...") must fail.
         assert path[-2] == f"node:{simple_source.content_hash().to_hex()}"
         # The layout version is always the last component (ITL-944).
-        assert path[-1] == "sdb_v1"
+        assert path[-1] == "sdb_v2"
 
     def test_cache_path_prefix(self, simple_source, db):
         prefix = ("my_project", "v1")
@@ -503,7 +503,7 @@ class TestCachedSourceWithSourceProxy:
         loaded = CachedSource(
             source=proxy,
             cache_database=db,
-            # An explicit cache_path excludes the layout component (sdb_v1).
+            # An explicit cache_path excludes the layout component (sdb_v2).
             cache_path=cached.cache_path[:-1],
         )
         # A cache presents its wrapped source's id (ITL-1425).
@@ -562,7 +562,7 @@ class TestCachedSourceWithSourceProxy:
         loaded = CachedSource(
             source=proxy,
             cache_database=db,
-            # An explicit cache_path excludes the layout component (sdb_v1).
+            # An explicit cache_path excludes the layout component (sdb_v2).
             cache_path=cached.cache_path[:-1],
         )
         assert loaded.source_id == cached.source_id == source.source_id

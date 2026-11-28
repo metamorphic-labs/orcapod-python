@@ -976,6 +976,19 @@ def _source_info_arrow_type_and_depth_known(
     return pa.large_list(fallback), False
 
 
+def source_info_field(name: str, kind: "pa.DataType") -> "pa.Field[Any]":
+    """Declare a source-info field, whose token can always be absent.
+
+    Args:
+        name: The prefixed column name.
+        kind: The token's Arrow type, including any list item fields.
+
+    Returns:
+        A field whose top-level nullability is always true.
+    """
+    return pa.field(name, kind, nullable=True)
+
+
 def prepare_prefixed_columns(
     table: "pa.Table | pa.RecordBatch",
     prefix_info: Collection[str]
@@ -1016,8 +1029,7 @@ def prepare_prefixed_columns(
         assigned to any prefix group, and ``prefixed_tables`` is a dictionary
         mapping each recognized prefix to its constructed ``pyarrow.Table``.
 
-        Nullability is preserved from the source columns for columns copied
-        directly from ``table``.
+        Ordinary fields keep their nullability. Source-info fields are always nullable.
     """
     all_prefix_info = {}
     if isinstance(prefix_info, Mapping):
@@ -1057,7 +1069,6 @@ def prepare_prefixed_columns(
 
     prefixed_column_names = defaultdict(list)
     prefixed_columns = defaultdict(list)
-    prefixed_column_nullables: dict[str, list[bool]] = defaultdict(list)
 
     target_column_names = [
         c
@@ -1069,7 +1080,6 @@ def prepare_prefixed_columns(
     for prefix, value_lut in all_prefix_info.items():
         target_prefixed_column_names = prefixed_column_names[prefix]
         target_prefixed_columns = prefixed_columns[prefix]
-        target_nullables = prefixed_column_nullables[prefix]
 
         for col_name in target_column_names:
             prefixed_col_name = f"{prefix}{col_name}"
@@ -1081,35 +1091,25 @@ def prepare_prefixed_columns(
                 value = value_lut
 
             if value is not None:
-                # Concrete token supplied as a Python value — column is never
-                # null. No Arrow type is attached, so the source-info rule
+                # No Arrow type is attached, so the source-info rule
                 # types it (a list token, nested or not, keeps its depth).
                 # Every caller passes source-info tokens here.
                 token = cast(SourceInfoValue, value)
                 column_values = pa.array(
                     [token] * num_rows, type=source_info_arrow_type(token)
                 )
-                col_nullable = False
             elif col_name in existing_columns:
-                # Pass-through from the source table — inherit its nullable flag.
                 existing_col = table[prefixed_col_name]
                 if existing_col.type == pa.string():
                     # Convert to large_string
                     column_values = pa.compute.cast(existing_col, pa.large_string())  # type: ignore
                 else:
                     column_values = existing_col
-                col_nullable = table.schema.field(prefixed_col_name).nullable
             else:
                 # No value available — column is genuinely all-null.
                 column_values = pa.array([None] * num_rows, type=pa.large_string())
-                col_nullable = True
-            # Safety: never declare non-nullable when the data actually has nulls
-            # (e.g. a pass-through column from a source that was non-nullable can
-            # gain nulls after a join populates only one side of the result).
-            col_nullable = col_nullable or bool(column_values.null_count > 0)
             target_prefixed_column_names.append(prefixed_col_name)
             target_prefixed_columns.append(column_values)
-            target_nullables.append(col_nullable)
 
     # Step 3: Create the final table, preserving nullable flags from the source table
     data_fields = [table.schema.field(name) for name in data_column_names]
@@ -1119,11 +1119,9 @@ def prepare_prefixed_columns(
     for prefix in all_prefix_info:
         schema = pa.schema(
             [
-                pa.field(name, col.type, nullable=nullable)
-                for name, col, nullable in zip(
-                    prefixed_column_names[prefix],
-                    prefixed_columns[prefix],
-                    prefixed_column_nullables[prefix],
+                source_info_field(name, col.type)
+                for name, col in zip(
+                    prefixed_column_names[prefix], prefixed_columns[prefix], strict=True
                 )
             ]
         )
@@ -1835,11 +1833,8 @@ def add_source_info(
             [f"{source_val}::{col}" for source_val in base_source],
             type=pa.large_string(),
         )
-        # Source info columns are always computed strings, never null.
         table = table.append_column(
-            pa.field(
-                f"{constants.SOURCE_PREFIX}{col}", pa.large_string(), nullable=False
-            ),
+            source_info_field(f"{constants.SOURCE_PREFIX}{col}", col_source.type),
             col_source,
         )
 

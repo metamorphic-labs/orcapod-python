@@ -594,7 +594,7 @@ class TestNamesHoldBareDigests:
     def test_cached_source_path_holds_the_bare_content_digest(self) -> None:
         """The cached-source path is ``node:<bare content digest>``, then the layout."""
         cached = CachedSource(_source(), cache_database=InMemoryArrowDatabase())
-        assert cached.cache_path[-1] == "sdb_v1"
+        assert cached.cache_path[-1] == "sdb_v2"
         component = cached.cache_path[-2]
         assert component.startswith("node:")
         assert BARE_SHA256.fullmatch(component.removeprefix("node:")), component

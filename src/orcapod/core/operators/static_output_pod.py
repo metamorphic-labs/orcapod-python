@@ -375,11 +375,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
         Each row contributes its own system-tag and ``_source_*`` columns, so
         every row keeps its own provenance tokens (a token embeds a per-row
-        identifier, so rows never share one). A ``_source_*`` field is declared
-        non-nullable unless some row's token is ``None``; ``Data.as_table``
-        declares every source-info field nullable, and this keeps the field
-        flags (which the operator node's per-row record hash covers) what they
-        were when a broadcast token made them non-nullable.
+        identifier, so rows never share one).
 
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
@@ -410,10 +406,6 @@ class StaticOutputOperatorPod(TraceableBase):
         combined_tags = arrow_utils.concat_tables_by_name(tag_tables)
         combined_data = arrow_utils.concat_tables_by_name(data_tables)
 
-        combined_data = StaticOutputOperatorPod._flag_source_info_nullability(
-            combined_data
-        )
-
         full_table = arrow_utils.hstack_tables(combined_tags, combined_data)
         return full_table, tuple(first_tag.keys()), data_tags
 
@@ -442,26 +434,6 @@ class StaticOutputOperatorPod(TraceableBase):
         placed = {*tag_keys, *system_tags, *source_info}
         data = [n for n in names if n not in placed]
         return table.select([*tag_keys, *system_tags, *data, *source_info])
-
-    @staticmethod
-    def _as_row_built_table(table: pa.Table, tag_keys: Sequence[str]) -> pa.Table:
-        """Return ``table`` as ``_rows_to_table`` would build it from the same rows.
-
-        Its columns in row order (``_in_row_order``) and each source-info field flagged
-        nullable only when some row's token is ``None``
-        (``_flag_source_info_nullability``). For a table with no rows: what a result
-        built from rows has, with no row (ITL-1131).
-
-        Args:
-            table: A table of user tags, system tags, data and source info.
-            tag_keys: The user tag columns, in order.
-
-        Returns:
-            The same arrays, reordered, under the new source-info field flags.
-        """
-        return StaticOutputOperatorPod._flag_source_info_nullability(
-            StaticOutputOperatorPod._in_row_order(table, tag_keys)
-        )
 
     @staticmethod
     def _zero_rows_in_row_order(result: StreamProtocol) -> StreamProtocol:
@@ -516,38 +488,11 @@ class StaticOutputOperatorPod(TraceableBase):
         return StaticOutputOperatorPod._zero_rows_in_row_order(result)
 
     @staticmethod
-    def _flag_by_values(table: pa.Table, *, system_tags: bool = True) -> pa.Table:
-        """Flag value-based fields nullable only when they hold a null.
-
-        The row-built form settles source-info flags from the complete table.
-        Callers that settle both provenance groups use this for transport layouts.
-        The table built from rows carries no schema metadata.
-
-        Args:
-            table: A table of user tags, system tags, data and source info.
-            system_tags: Also settle system-tag flags from values.
-
-        Returns:
-            The same arrays under the new field flags, with no schema metadata.
-        """
-        prefixes = (constants.SOURCE_PREFIX,)
-        if system_tags:
-            prefixes = (*prefixes, constants.SYSTEM_TAG_PREFIX)
-        fields = [
-            field.with_nullable(table.column(i).null_count > 0)
-            if field.name.startswith(prefixes)
-            else field
-            for i, field in enumerate(table.schema)
-        ]
-        # Same arrays, new field flags: no cast, so no value or type can change.
-        return pa.Table.from_arrays(table.columns, schema=pa.schema(fields))
-
-    @staticmethod
     def _type_source_info_by_values(table: pa.Table) -> pa.Table:
         """Type each source-info column from its tokens, as the rows of a table built from rows do.
 
-        A step of F (``_row_built_form``) on the complete table, beside
-        ``_flag_by_values``. A row's ``Data`` types each source-info token from its
+        This step of F (``_row_built_form``) runs on the complete table.
+        A row's ``Data`` types each source-info token from its
         value (``arrow_utils.source_info_arrow_type``, the one rule): a string or
         ``None`` as ``large_string``, a list as ``large_list`` of its first informative
         element's type, so a list of ``None`` or of empty lists shows fewer levels than
@@ -594,7 +539,7 @@ class StaticOutputOperatorPod(TraceableBase):
             if kind == field.type:
                 continue
             columns[index] = pa.chunked_array([pa.array(values, type=kind)])
-            fields[index] = pa.field(field.name, kind, nullable=field.nullable)
+            fields[index] = arrow_utils.source_info_field(field.name, kind)
             changed = True
         if not changed:
             return table
@@ -618,8 +563,7 @@ class StaticOutputOperatorPod(TraceableBase):
           own: the columns, their order, the declared system-tag fields, and the
           source-info fields in the form the rows give them;
         - on the complete table, what depends on the values of every row: each
-          source-info column's type, from its tokens (``_type_source_info_by_values``),
-          then the source-info field flags (``_flag_by_values``).
+          source-info column's type, from its tokens (``_type_source_info_by_values``).
 
         The equality with ``_rows_to_table`` is tested over every operator, source kind,
         column role and raw-stream provenance shape (ITL-1347, L0-L2).
@@ -639,12 +583,9 @@ class StaticOutputOperatorPod(TraceableBase):
                 then builds its rows (``_raise_as_rows_do``).
         """
         try:
-            return StaticOutputOperatorPod._flag_by_values(
-                StaticOutputOperatorPod._type_source_info_by_values(
-                    row_built_columns(table, keys)
-                ),
-                system_tags=False,
-            )
+            return StaticOutputOperatorPod._type_source_info_by_values(
+                row_built_columns(table, keys)
+            ).replace_schema_metadata(None)
         except RowBuiltFormUnavailable:
             raise
         except pa.ArrowException as error:
@@ -708,38 +649,14 @@ class StaticOutputOperatorPod(TraceableBase):
         )
 
     @staticmethod
-    def _flag_source_info_nullability(table: pa.Table) -> pa.Table:
-        """Declare each ``_source_*`` field nullable only if some row's token is ``None``.
-
-        The rule ``_rows_to_table`` applies to the rows it concatenates, and that a
-        zero-row input (``_zero_row_input``) applies to no row: there, no token is
-        ``None``, so every source-info field is non-nullable.
-
-        Args:
-            table: A table whose ``_source_*`` columns hold source-info tokens.
-
-        Returns:
-            The same arrays under the new field flags.
-        """
-        from orcapod.system_constants import constants
-
-        schema = table.schema
-        for i, field in enumerate(schema):
-            if field.name.startswith(constants.SOURCE_PREFIX):
-                nullable = table.column(i).null_count > 0
-                schema = schema.set(i, field.with_nullable(nullable))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
-        # Same arrays, new field flags: no cast, so no value or type can change.
-        return pa.Table.from_arrays(table.columns, schema=schema)
-
-    @staticmethod
     def _zero_row_input(upstream: StreamProtocol) -> StreamProtocol | None:
         """Return ``upstream`` as an operator input with no rows, typed as its rows are.
 
         The zero-row form of what ``_materialize_upstream`` builds from an upstream's
         rows: the upstream's zero-row table (``typed_zero_row_table``: user tags,
         system tags, data and source info, with the Arrow types its rows have) in the
-        column order and with the source-info flags ``_rows_to_table`` gives, as the
-        upstream's stream (``_as_upstream_stream``), so the stream's identity,
+        column order ``_rows_to_table`` gives, as the upstream's stream
+        (``_as_upstream_stream``), so the stream's identity,
         pipeline hash and system-tag column names are the upstream's (ITL-912).
 
         Args:
@@ -755,7 +672,7 @@ class StaticOutputOperatorPod(TraceableBase):
             return None
         tag_keys = upstream.keys()[0]
         return StaticOutputOperatorPod._as_upstream_stream(
-            StaticOutputOperatorPod._as_row_built_table(table, tag_keys),
+            StaticOutputOperatorPod._in_row_order(table, tag_keys),
             tag_keys,
             stream_data_tags(upstream),
             upstream,
@@ -1513,13 +1430,10 @@ def _named_tokens_as(
 def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
     """Put a stream's record batches under one another, or ``None`` with no row.
 
-    Batches built from different rows may differ in their provenance fields: a
-    system-tag or source-info field's nullability, and a source-info column's token
-    type, follow each batch's own values. Each source-info column is brought to the
-    type its tokens settle over all the batches (``settle_token_types``), and every
-    provenance field is flagged nullable, so that the batches have one schema; the
-    complete table's flags and types are then set by its values (``_row_built_form``).
-    A batch with no rows is left out. The values are unchanged.
+    Batches may differ in system-tag nullability and source-info token types.
+    System tags are opened to nullable and each source-info column is brought to
+    the type its tokens settle over all the batches (``settle_token_types``).
+    Batches with no rows are skipped. The values are unchanged.
 
     Args:
         batches: Record batches of one stream's rows, in order.
@@ -1532,13 +1446,15 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
         RowBuiltFormUnavailable: If a token cannot be represented in its column's
             settled type.
     """
+    from orcapod.utils import arrow_utils
+
     rows = [batch for batch in batches if batch.num_rows]
     if not rows:
         return None
+
     settled: dict[str, pa.DataType] = {}
     for batch in rows:
         settled = settle_token_types(batch, settled)
-    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     opened: list[pa.RecordBatch] = []
     for batch in rows:
         columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
@@ -1546,8 +1462,8 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
         for field, column in zip(batch.schema, batch.columns, strict=True):
             if field.name in settled:
                 column = _named_tokens_as(column, settled[field.name], field.name)
-                field = pa.field(field.name, settled[field.name])
-            if field.name.startswith(prefixes):
+                field = arrow_utils.source_info_field(field.name, settled[field.name])
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
                 field = field.with_nullable(True)
             columns.append(column)
             fields.append(field)

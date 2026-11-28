@@ -432,10 +432,9 @@ class Index(UnaryOperator):
                 if pa.types.is_large_list(input_token_type)
                 else input_token_type
             )
-            token_field = pa.field(
+            token_field = arrow_utils.source_info_field(
                 f"{constants.SOURCE_PREFIX}{self.out or self.column}",
                 token_type,
-                nullable=input_token.nullable,
             )
             if self.out is None:
                 position = input_schema.get_field_index(self.column)
@@ -447,7 +446,7 @@ class Index(UnaryOperator):
                 output_schema = input_schema.append(element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
                 output_schema = output_schema.append(token_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
-                self._as_row_built_table(output_schema.empty_table(), tag_columns),
+                self._in_row_order(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
                 data_tags=stream_data_tags(stream),

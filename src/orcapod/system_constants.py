@@ -32,7 +32,7 @@ PIPELINE_DB_SCHEMA_VERSION = "pdb_v2"
 RESULT_DB_SCHEMA_VERSION = "rdb_v1"
 TRACKING_DB_SCHEMA_VERSION = "tdb_v2"
 OPERATOR_DB_SCHEMA_VERSION = "odb_v2"
-SOURCE_DB_SCHEMA_VERSION = "sdb_v1"
+SOURCE_DB_SCHEMA_VERSION = "sdb_v2"
 STORED_DATA_CONTEXT = "data_context"
 # The data context of everything Orcapod wrote before v0.3. Its manifest is not shipped:
 # stored rows that carry this key, and tables without a data context column, belong to it.

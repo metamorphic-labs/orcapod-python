@@ -980,7 +980,7 @@ generation of hashing; rows of the current data context are the current entries.
   Function result   — rdb_v1, after the type's revision rev1 (RESULT_DB_SCHEMA_VERSION)
   Side-effect log   — tdb_v2 (TRACKING_DB_SCHEMA_VERSION)
   Operator cache    — odb_v2 (OPERATOR_DB_SCHEMA_VERSION)
-  Cached source     — sdb_v1 (SOURCE_DB_SCHEMA_VERSION)
+  Cached source     — sdb_v2 (SOURCE_DB_SCHEMA_VERSION)
 
 - The layout version is the last component of a table path. Every layout marker started at v1
   for the first release, 0.4.0 (developer, November 18, 2026, ITL-1259; 0.3.0 was withdrawn).
@@ -1029,7 +1029,7 @@ generation of hashing; rows of the current data context are the current entries.
   hashes in a path differ between builds. find_stale_tables(..., name_path=...) lists the
   store under the hash-free beginning of the node's path (ArrowDatabaseProtocol.list_table_paths;
   <function>, side_effect_function/<function>, side_effects/<pod>, relative to the node's
-  database; <prefix>/source for a cached source) and every table there whose last component
+  database; the explicit cache_path or <prefix>/source for a cached source) and every table there whose last component
   is not in contexts/stored.CURRENT_LAYOUTS is of another layout (tables_of_another_layout).
   A new layout constant must be added to CURRENT_LAYOUTS. A store that cannot list raises
   TableListingNotSupportedError: side-effecting nodes then warn and proceed (developer,
@@ -1350,8 +1350,11 @@ data. The rules:
   A raw `ArrowTableStream` still preserves `null` in its table in ITL-1543 part A.
   A row's system-tag fields come from its stream, including raw streams. Join
   uses those declarations on the async row path as well as in its tables.
-  Source-info token declarations and the row-built gate are tracked separately
-  under ITL-1557 and the PR 601 follow-up.
+  Streams, rows and record batches declare every `_source_*` token field nullable (ITL-1557).
+  The top-level flag comes from `arrow_utils.source_info_field` and is independent
+  of the token values and of any list item fields. CachedSource writes these fields
+  and their record hashes under `sdb_v2`. The operator cache retains its physical
+  `odb_v2` field flags and record hashes when storing output.
   A row built by `Data` still gives an untyped null the `large_string` type.
   PolarsFilter is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (arrow_utils.restore_column_types and

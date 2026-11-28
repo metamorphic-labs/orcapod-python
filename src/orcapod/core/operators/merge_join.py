@@ -473,9 +473,6 @@ class MergeJoin(BinaryOperator):
         # Merged (colliding) data columns become 2-element lists — always non-null
         for col in colliding_keys:
             output_nullable[col] = False
-            source_col = f"{constants.SOURCE_PREFIX}{col}"
-            if source_col in output_nullable:
-                output_nullable[source_col] = False
 
         # Inner join on the shared tag keys. A constant key makes the join a
         # cartesian product when the inputs share no tag; int8 explicitly, so a
@@ -554,11 +551,13 @@ class MergeJoin(BinaryOperator):
         # from the inputs (the large-normalized input type for pass-through
         # columns; the list type built above for merged columns), and
         # nullability comes from the captured input flags, falling back to
-        # null-count inference for system tag and source-info columns. The
+        # null-count inference for system tags. The
         # values are the inputs'.
         result_schema = pa.schema(
             [
-                pa.field(
+                arrow_utils.source_info_field(col_name, output_types[col_name])
+                if col_name.startswith(constants.SOURCE_PREFIX)
+                else pa.field(
                     col_name,
                     output_types[col_name],
                     nullable=output_nullable.get(

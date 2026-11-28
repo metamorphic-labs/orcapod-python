@@ -1115,6 +1115,11 @@ The record id names the row, and the source-info token names the row and its col
 value may contain `::`, so the record id may too; a source id and a column name cannot, so the
 token is split at its first `::` and its last `::` only, never at every `::`.
 
+Source-info fields (`_source_*`) are always nullable at the top level, including
+in a stream with no rows. List item fields follow the token type's own rules.
+A bare builder stream hashes the flags as part of its full Arrow table. A
+function node's row identity already uses nullable token fields.
+
 ```python
 subjects = DictSource(
     data=[{"subject": "s1", "age": 3, "weight": 20.5}],
@@ -1873,11 +1878,14 @@ Every row Orcapod stores names its data context in the column `__data_context`:
 | Function-node pipeline table | `pdb_v2` |
 | Function result table | `rdb_v1`, after the revision of the data function type's record (`.../python.function.v1/rev1/rdb_v1`; see [Data function types](data-function-types.md)) |
 | Operator-node cache table | `odb_v2` |
-| Cached-source table | `sdb_v1` |
+| Cached-source table | `sdb_v2` |
 | Side-effect invocation log | `tdb_v2` |
 
 The layout component is always the last component of a table's path, also when a
-`CachedSource` is given an explicit `cache_path`.
+`CachedSource` is given an explicit `cache_path`. The `sdb_v2` layout stores
+nullable token fields and hashes records with those flags. An `sdb_v1`
+table is reported as an older layout and left untouched. A bound source can
+populate a new `sdb_v2` table from its live data.
 
 **Rows of the current data context are the current entries.** Key lookups match rows of the
 current data context only, and every read of a whole table (a node's `as_table()`,
@@ -1894,8 +1902,8 @@ at a computed path. The beginning of a path holds no hash: the job, then the nam
 function (`<job>/<function>/...` and `<job>/_result/<function>/...`, or `<function>/...` in
 a separate result database;
 `side_effect_function/<function>` for a function pod that takes the invocation context;
-`side_effects/<pod>` for a side-effect pod; `<prefix>/source` for a cached source without
-an explicit `cache_path`). A node lists the tables stored under that beginning
+`side_effects/<pod>` for a side-effect pod; the explicit `cache_path` or `<prefix>/source`
+for a cached source). A node lists the tables stored under that beginning
 (`list_table_paths` of the database) and reports, once, those whose last component is not a
 current layout. They are not read, so they are reported without a number of rows:
 

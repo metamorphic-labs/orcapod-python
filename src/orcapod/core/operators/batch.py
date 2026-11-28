@@ -189,7 +189,11 @@ class Batch(UnaryOperator):
             list_type = arrow_utils.aggregated_list_type(
                 field.type, type_converter, column=field.name
             )
-            fields.append(pa.field(field.name, list_type, nullable=False))
+            fields.append(
+                arrow_utils.source_info_field(field.name, list_type)
+                if field.name.startswith(constants.SOURCE_PREFIX)
+                else pa.field(field.name, list_type, nullable=False)
+            )
             arrays.append(arrow_utils.aggregated_list_array(column, offsets, list_type))
         batched_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 

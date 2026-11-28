@@ -700,7 +700,7 @@ class TestACachedSourceIsNotTheJobs:
             _ = job.run()
         cache_tables = table_paths(cache)
         assert len(cache_tables) == 1 and cache_tables[0].startswith("c/")
-        assert not any(p.endswith("sdb_v1") for p in table_paths(db))
+        assert not any(p.endswith("sdb_v2") for p in table_paths(db))
 
 
 # B2 and B3 were fixed on main for every case by ITL-1412: these check that the order

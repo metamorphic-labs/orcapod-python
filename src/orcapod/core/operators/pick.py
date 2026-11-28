@@ -431,7 +431,7 @@ class Pick(UnaryOperator):
             # A picked value's token is a string (``_process_one``), typed by the
             # source-info type rule.
             token_name = f"{constants.SOURCE_PREFIX}{self.out or self.column}"
-            token_field = pa.field(
+            token_field = arrow_utils.source_info_field(
                 token_name, arrow_utils.source_info_arrow_type(token_name)
             )
             if self.out is None:
@@ -444,7 +444,7 @@ class Pick(UnaryOperator):
                 output_schema = input_schema.append(value_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
                 output_schema = output_schema.append(token_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
-                self._as_row_built_table(output_schema.empty_table(), tag_columns),
+                self._in_row_order(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
                 data_tags=stream_data_tags(stream),

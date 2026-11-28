@@ -296,7 +296,7 @@ class CachedSource(RootSource):
     def cache_path(self) -> tuple[str, ...]:
         """Cache table path: scoped to the source's content hash, then the layout version.
 
-        The layout version (``sdb_v1``) is always the last component, also when an
+        The layout version (``sdb_v2``) is always the last component, also when an
         explicit ``cache_path`` was given.
         """
         return self._unversioned_cache_path + (SOURCE_DB_SCHEMA_VERSION,)
@@ -307,8 +307,8 @@ class CachedSource(RootSource):
         Without an explicit ``cache_path`` the path holds a hash that can differ between
         builds, so caches of another layout are looked for anywhere under
         ``<cache_path_prefix>/source`` (ITL-954): those are caches of any source stored
-        there, and they are reported without a number of rows. They are not read and
-        are left unchanged.
+        there, and they are reported without a number of rows. With an explicit path,
+        list the layouts under that path. Older layouts are left untouched.
         """
         if self._stale_tables_checked:
             return
@@ -316,7 +316,7 @@ class CachedSource(RootSource):
         account_for_stale_tables(
             find_stale_tables(
                 self._cache_database,
-                name_path=None
+                name_path=self._unversioned_cache_path
                 if self._explicit_cache_path is not None
                 else self._cache_path_prefix + ("source",),
             ),

@@ -56,9 +56,9 @@ _NULL_TOKEN_TYPE = pa.large_string()
 
 def _source_info_field(name: str, token: SourceInfoValue) -> pa.Field[Any]:
     """The field of source-info column ``name`` holding ``token``, as a row's table has it."""
-    import pyarrow as _pa
-
-    return _pa.field(name, arrow_utils.source_info_arrow_type(token))
+    return arrow_utils.source_info_field(
+        name, arrow_utils.source_info_arrow_type(token)
+    )
 
 
 class Tag(Datagram):
@@ -637,10 +637,8 @@ class Data(Datagram):
             if all(name in self._source_info for name in names):
                 return self._ensure_source_info_table()
             return self._token_columns({})
-        # The fields of a row's own table: the name and the type, nullable, as
-        # ``_source_info_field`` makes them (a stream's may be non-null). The
-        # arrays are the stream's, wrapped again, never cast. A null token is a
-        # ``large_string`` null whatever its column declares.
+        # Keep the stream's token arrays. The row hash represents a null token
+        # as a large_string null whatever its column declares.
         columns = [
             pa.chunked_array([pa.nulls(1, _NULL_TOKEN_TYPE)])
             if column.null_count == len(column)
@@ -650,7 +648,10 @@ class Data(Datagram):
         return pa.Table.from_arrays(
             columns,
             schema=pa.schema(
-                [pa.field(f.name, c.type) for f, c in zip(typed.schema, columns)]
+                [
+                    arrow_utils.source_info_field(f.name, c.type)
+                    for f, c in zip(typed.schema, columns, strict=True)
+                ]
             ),
         )
 
@@ -675,7 +676,7 @@ class Data(Datagram):
                 token_type = _source_info_field(column_name, token).type
                 array = pa.chunked_array([pa.array([token], type=token_type)])
             arrays.append(array)
-            fields.append(pa.field(column_name, array.type))
+            fields.append(arrow_utils.source_info_field(column_name, array.type))
         return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
     def _keep_typed_tokens(self, changed: Self, origin: "Mapping[str, str]") -> None:

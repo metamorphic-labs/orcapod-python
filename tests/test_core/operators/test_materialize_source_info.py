@@ -275,39 +275,32 @@ class TestMaterializeToStream:
 
 
 class TestSourceInfoArrowFields:
-    """The ``_source_*`` fields keep the Arrow type and nullability they had before.
+    """Materialized token fields are nullable for scalar and list-valued tokens."""
 
-    Before ITL-845 a concrete (broadcast) source-info token made the field
-    non-nullable, and a row-0 ``None`` passed the column through as nullable. The
-    fix declares a field nullable exactly when some row's source-info token is
-    ``None``, which matches the old flag whenever the old values were right; the
-    stored schema, and so the operator node's per-row record hash, depend on it.
-    """
-
-    def test_scalar_source_info_tokens_non_nullable_large_string(self):
-        """Scalar source-info token fields stay non-nullable ``large_string``."""
+    def test_scalar_source_info_tokens_nullable_large_string(self):
+        """Scalar source-info token fields are nullable ``large_string``."""
         stream = _materialize(list(_source().iter_data()))
         fields = _source_fields(stream.as_table(columns={"source": True}))
         assert fields == {
-            "_source_x": pa.field("_source_x", pa.large_string(), nullable=False),
-            "_source_y": pa.field("_source_y", pa.large_string(), nullable=False),
+            "_source_x": pa.field("_source_x", pa.large_string(), nullable=True),
+            "_source_y": pa.field("_source_y", pa.large_string(), nullable=True),
         }
 
-    def test_list_source_info_tokens_non_nullable_large_list(self):
-        """List source-info fields stay non-nullable ``large_list<large_string>``."""
+    def test_list_source_info_tokens_nullable_large_list(self):
+        """List source-info fields are nullable ``large_list<large_string>``."""
         rows = list(Batch(2)(_source(4)).iter_data())
         stream = _materialize(rows)
         field = _source_fields(stream.as_table(columns={"source": True}))["_source_x"]
         assert field == pa.field(
-            "_source_x", pa.large_list(pa.large_string()), nullable=False
+            "_source_x", pa.large_list(pa.large_string()), nullable=True
         )
         list_type = field.type
         assert isinstance(list_type, pa.LargeListType)
         assert list_type.value_field.nullable is True
 
     @pytest.mark.parametrize("none_row", [0, 2])
-    def test_field_nullable_when_a_source_info_token_is_none(self, none_row: int):
-        """A ``_source_*`` field is nullable iff a row's source-info token is None."""
+    def test_field_nullable_even_when_every_token_is_present(self, none_row: int):
+        """Each source-info field is nullable, including columns without a missing token."""
         rows = list(_source(3).iter_data())
         rows[none_row] = (rows[none_row][0], rows[none_row][1].with_source_info(x=None))
         stream = _materialize(rows)
@@ -315,7 +308,7 @@ class TestSourceInfoArrowFields:
         assert fields["_source_x"] == pa.field(
             "_source_x", pa.large_string(), nullable=True
         )
-        assert fields["_source_y"].nullable is False
+        assert fields["_source_y"].nullable
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +540,7 @@ class TestSyncOrchestratorMaterialization:
         assert stream.content_hash() == node.content_hash()
         fields = _source_fields(stream.as_table(columns={"source": True}))
         assert fields["_source_x"] == pa.field(
-            "_source_x", pa.large_list(pa.large_string()), nullable=False
+            "_source_x", pa.large_list(pa.large_string()), nullable=True
         )
 
     def test_empty_buffer(self):

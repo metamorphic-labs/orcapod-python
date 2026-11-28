@@ -454,10 +454,8 @@ def test_a_barrier_operator_sees_its_input_as_a_job_gives_it(label: str) -> None
 # --- Arrivals from another producer -------------------------------------------------------
 
 
-def test_batch_takes_arrivals_whose_provenance_flags_differ() -> None:
-    """``AddTags`` feeding ``Batch(2)`` row by row: each arriving batch is built from its
-    own rows, so a source-info field is nullable in one (a null token) and not in the
-    next. ``Batch`` puts them together and gives the sync result."""
+def test_batch_takes_nullable_token_fields_across_arrivals() -> None:
+    """``AddTags`` sends nullable token fields whether or not the batch has a null."""
     raw = ArrowTableStream(
         pa.table(
             {
@@ -493,7 +491,7 @@ def test_batch_takes_arrivals_whose_provenance_flags_differ() -> None:
         return output.result(), flags
 
     result, flags = asyncio.run(go())
-    assert flags == {True, False}  # the arrivals did differ
+    assert flags == {True}
     assert_same_table(result.as_table(columns=ALL), expected)
     assert result.as_table(columns=ALL).to_pylist() == expected.to_pylist()
 
@@ -623,15 +621,6 @@ def _job_sync(op: StaticOutputOperatorPod, stream: StreamProtocol) -> StreamProt
     )
 
 
-def _schema_outcome(make: Callable[[], StreamProtocol]) -> tuple[str, Any]:
-    """The schema and rows of a stream's table, or the kind of error that refuses it."""
-    try:
-        table = make().as_table(columns=ALL)
-        return ("table", (table.schema, table.to_pylist()))
-    except Exception as error:  # noqa: BLE001  # the refusal is the outcome compared
-        return ("refused", type(error).__name__)
-
-
 @pytest.mark.parametrize("layout", ["one_batch", "one_row_per_batch"])
 def test_empty_source_info_lists_are_typed_from_their_tokens(layout: str) -> None:
     """A raw stream whose source-info column is a nested list type holding only empty
@@ -660,13 +649,8 @@ def test_empty_source_info_lists_are_typed_from_their_tokens(layout: str) -> Non
     assert got.schema.field("_source_x").type == pa.large_list(pa.large_string())
 
 
-def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:
-    """Pins a stream no job can run: a raw stream whose system-tag column holds a string
-    and a null. The job's sync path refuses it (the rows' system-tag fields differ in
-    their flags), and so does the channel, which builds such a stream from
-    its rows (CodeRabbit on PR #510); a job never sees such a stream,
-    because a source with a nullable system tag cannot be bound to a slot
-    (``SourceSpecMismatchError``)."""
+def test_a_nullable_system_tag_keeps_its_declared_field_on_both_paths() -> None:
+    """Rows of a raw stream retain the nullable system-tag declaration (ITL-1543)."""
     raw = ArrowTableStream(
         pa.table(
             {
@@ -678,12 +662,13 @@ def test_a_system_tag_with_a_null_is_refused_by_the_job_sync_path() -> None:
         ),
         tag_columns=["k"],
     )
-    assert _schema_outcome(lambda: _job_sync(SelectDataColumns(["x"]), raw)) == (
-        "refused",
-        "ArrowInvalid",
+    sync = _job_sync(SelectDataColumns(["x"]), raw).as_table(columns=ALL)
+    channel = run_on_channels(SelectDataColumns(["x"]), [raw], None).as_table(
+        columns=ALL
     )
-    with pytest.raises(pa.ArrowInvalid):
-        run_on_channels(SelectDataColumns(["x"]), [raw], None)
+    assert_same_table(channel, sync)
+    assert sync.schema.field(SYSTEM_TAG).nullable
+    assert sync[SYSTEM_TAG].to_pylist() == ["s", None]
 
 
 # --- Ending the output and closing the inputs ------------------------------------------------

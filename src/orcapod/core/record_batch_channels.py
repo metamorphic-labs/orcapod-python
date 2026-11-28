@@ -417,7 +417,7 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     ``large_string`` outside system tags, and only null values are taken there.
     System-tag field metadata must match the description. Batches may differ in
     their top-level provenance flags. The complete stream uses the declared system-tag
-    flags and settles source-info flags from values. A source-info column may
+    flags. Source-info fields are always nullable. A source-info column may
     carry any token type (``large_string`` or ``large_list`` of a token type).
     The complete table settles its type in ``_type_source_info_by_values``.
     """

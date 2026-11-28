@@ -2,7 +2,7 @@
 
 Orcapod v0.3 writes the data context key ``std:v1:default`` into the column
 ``__data_context`` of every table it stores, and every table moved to a new layout
-(the last path component): ``pdb_v2``, ``rdb_v1``, ``tdb_v2``, ``odb_v2``, ``sdb_v1``.
+(the last path component): ``pdb_v2``, ``rdb_v1``, ``tdb_v2``, ``odb_v2``, ``sdb_v2``.
 
 - Rows of the current data context are the current entries. Rows of another data context
   in the same table are never returned or reused, are left unchanged, and are reported
@@ -32,6 +32,7 @@ import pytest
 
 from orcapod import FunctionPod, PipelineJob, contexts, function_pod
 from orcapod.contexts import stored_data_contexts
+from orcapod.contexts.stored import with_data_context
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
 from orcapod.core.nodes.function_node import FunctionJobNode
@@ -211,7 +212,7 @@ def old_layout_path(path: tuple[str, ...]) -> tuple[str, ...]:
         return path[:-2] + ("rdb_v2",)
     if layout in renamed:
         return path[:-1] + (renamed[layout],)
-    assert layout in ("odb_v2", "sdb_v1"), path
+    assert layout in ("odb_v2", "sdb_v2"), path
     return path[:-1]
 
 
@@ -340,7 +341,7 @@ def table_path(store: Store, layout: str) -> tuple[str, ...]:
     return path
 
 
-LAYOUTS = ("pdb_v2", "rdb_v1", "odb_v2", "sdb_v1", "tdb_v2")
+LAYOUTS = ("pdb_v2", "rdb_v1", "odb_v2", "sdb_v2", "tdb_v2")
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +361,7 @@ class TestColumnAndLayout:
         assert layouts == sorted(LAYOUTS)
 
     def test_explicit_cache_path_ends_with_the_layout_component(self, store: Store):
-        """A ``cache_path`` given to ``CachedSource`` gets ``sdb_v1`` appended."""
+        """A ``cache_path`` given to ``CachedSource`` gets ``sdb_v2`` appended."""
         table = pa.table({"k": ["a"], "x": [1]})
         source = CachedSource(
             ArrowTableSource(
@@ -370,8 +371,8 @@ class TestColumnAndLayout:
             cache_path=("my", "cache"),
         )
         _ = source.as_table()
-        assert source.cache_path == ("my", "cache", "sdb_v1")
-        assert reopened(store).list_sources() == [("my", "cache", "sdb_v1")]
+        assert source.cache_path == ("my", "cache", "sdb_v2")
+        assert reopened(store).list_sources() == [("my", "cache", "sdb_v2")]
 
     @pytest.mark.parametrize("layout", LAYOUTS)
     def test_every_row_names_the_current_data_context(self, store: Store, layout: str):
@@ -649,12 +650,67 @@ class TestOldLayout:
         assert rows_of(source.get_all_records(), "x") == [1, 2]
         # The rows came from the source, not from the old cache (which holds the
         # same values): they were written to a cache of this version's layout.
-        assert source.cache_path[-1] == "sdb_v1"
+        assert source.cache_path[-1] == "sdb_v2"
         assert stored_data_contexts(reopened(store), source.cache_path) == {CURRENT: 2}
 
         after = snapshot(store)
         for path, old_rows in before.items():
             assert after[path] == old_rows, path
+
+    @pytest.mark.parametrize("cache_path", [None, ("explicit", "cache")])
+    def test_cached_source_reports_sdb_v1_and_writes_sdb_v2(
+        self,
+        new_store: Callable[[], Store],
+        caplog: pytest.LogCaptureFixture,
+        cache_path: tuple[str, ...] | None,
+    ):
+        """The old rows have a different schema and physical record hashes."""
+        store = new_store()
+        live = DictSource(
+            [{"k": "a", "x": 1}, {"k": "b", "x": 2}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="fixed",
+        )
+        source = CachedSource(live, cache_database=store, cache_path=cache_path)
+        old_path = (*source.cache_path[:-1], "sdb_v1")
+        old_rows = live.as_table(columns={"source": True, "system_tags": True})
+        token_index = old_rows.column_names.index("_source_x")
+        old_rows = old_rows.set_column(
+            token_index,
+            pa.field("_source_x", pa.large_string(), nullable=False),
+            old_rows.column(token_index),
+        )
+        hasher = live.data_context.arrow_hasher
+        old_hashes = [
+            hasher.hash_table(old_rows.slice(i, 1)).to_prefixed_digest()
+            for i in range(old_rows.num_rows)
+        ]
+        stored = with_data_context(
+            old_rows.add_column(
+                0, "_record_hash", pa.array(old_hashes, pa.large_binary())
+            ),
+            live.data_context_key,
+        )
+        store.add_records(old_path, stored, record_id_column="_record_hash", flush=True)
+        before = reopened(store).get_all_records(
+            old_path, record_id_column="_record_hash"
+        )
+        assert before is not None
+
+        with caplog.at_level(logging.WARNING, logger="orcapod"):
+            assert rows_of(source.as_table(), "x") == [1, 2]
+        assert source.cache_path == (*old_path[:-1], "sdb_v2")
+        assert any("sdb_v1" in message for message in caplog.messages)
+        after = reopened(store).get_all_records(
+            old_path, record_id_column="_record_hash"
+        )
+        assert after is not None and after.equals(before, check_metadata=True)
+        fresh = reopened(store).get_all_records(
+            source.cache_path, record_id_column="_record_hash"
+        )
+        assert fresh is not None and fresh.schema.field("_source_x").nullable
+        assert set(fresh["_record_hash"].to_pylist()).isdisjoint(old_hashes)
 
     def test_the_v0_migration_machinery_is_gone(self):
         """``SchemaVersionError``, ``ignore_schema`` and ``orcapod.migrations`` no
@@ -1427,7 +1483,7 @@ class TestInputOfAnotherDataContext:
             OTHER,
             OTHER,
         ]
-        assert stored_data_contexts(reopened(store), table_path(store, "sdb_v1")) == {
+        assert stored_data_contexts(reopened(store), table_path(store, "sdb_v2")) == {
             OTHER: 2
         }
 
@@ -1468,7 +1524,7 @@ class TestStoredDataContexts:
         path = table_path(store, layout)
         assert stored_data_contexts(reopened(store), path) == {CURRENT: 2}
 
-    @pytest.mark.parametrize("layout", ["pdb_v2", "rdb_v1", "odb_v2", "sdb_v1"])
+    @pytest.mark.parametrize("layout", ["pdb_v2", "rdb_v1", "odb_v2", "sdb_v2"])
     def test_table_holding_two_data_contexts(
         self, new_store: Callable[[], Store], layout: str
     ):

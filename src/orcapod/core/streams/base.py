@@ -271,8 +271,6 @@ def row_built_columns(
     4. Leave system-tag fields as declared. Give source-info fields the form their
        tokens give (``row_built_provenance``).
 
-    Source-info field nullability is settled over the complete table.
-
     Args:
         table: A table of user tags, system tags, data and source info.
         keys: The tag keys and the data keys of the stream ``table`` belongs to
@@ -321,9 +319,7 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
     fields carry no field metadata, and a source-info column has the type its tokens
     give (``_source_info_value_type``): a list's item field named ``item`` and
     nullable at every depth. The values are unchanged: a type that differs only in
-    its item fields is cast. The fields' nullability is left as it is
-    (``StaticOutputOperatorPod._flag_by_values`` decides it). Other fields are not
-    touched.
+    its item fields is cast. Other column groups keep their fields.
 
     Args:
         table: A table of user tags, system tags, data and source info.
@@ -339,7 +335,7 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
             kind = _source_info_value_type(field.type)
             if kind != field.type:
                 column = column.cast(kind)
-            new_field = pa.field(field.name, kind, nullable=field.nullable)
+            new_field = arrow_utils.source_info_field(field.name, kind)
         else:
             new_field = field
         changed = changed or not new_field.equals(field, check_metadata=True)
@@ -436,10 +432,9 @@ def stream_arrow_schema(
     stream that cannot type itself without rows answers with its Python schema
     converted by its data context (``arrow_types_declared`` is then false), and one
     whose schema is known only by polling (nothing declared, nothing polled:
-    ``schema_requires_io``) answers with no column. Each
-    source-info field is stated nullable: a table decides its flag from
-    its values (F's last step). System-tag fields keep their declared flags and
-    metadata. A source-info field's type is stated as the declared
+    ``schema_requires_io``) answers with no column. Source-info fields are nullable.
+    System-tag fields keep their declared flags and metadata. A source-info field's
+    type is stated as the declared
     token type; a complete table decides it from its tokens
     (``StaticOutputOperatorPod._type_source_info_by_values``), so consumers must not
     rely on it. A ``null`` column keeps the zero-row ``null`` type; rows
@@ -495,18 +490,16 @@ def stream_arrow_schema(
             )
         for name in data_schema:
             table = table.append_column(
-                pa.field(f"{constants.SOURCE_PREFIX}{name}", pa.large_string()),
+                arrow_utils.source_info_field(
+                    f"{constants.SOURCE_PREFIX}{name}", pa.large_string()
+                ),
                 pa.array([], pa.large_string()),
             )
     # The rows' keys: the data in the order of the stream's table (a poller that
     # fetched its columns in another order than it declares lists them so).
     keys = given_keys if given_keys is not None else keys_of_rows(table, typed.keys())
     names = row_built_names(table.column_names, keys)
-    schema = row_built_provenance(table.select(names)).schema
-    for index, field in enumerate(schema):
-        if field.name.startswith(constants.SOURCE_PREFIX):
-            schema = schema.set(index, field.with_nullable(True))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
-    return schema
+    return row_built_provenance(table.select(names)).schema
 
 
 class CompleteStreamFeed:

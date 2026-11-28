@@ -139,10 +139,9 @@ class _InputTap:
     each input with no rows and applies the operator to those, as the sync path
     applies it to the rebuilt upstream rows (ITL-1080). Those columns and types
     are what ``StaticOutputOperatorPod._rows_to_table`` makes of the input's
-    rows, and the only thing in them that depends on more than one row is the
-    nullability of a source-info column (nullable when some row's token is
-    ``None``). So the tap keeps the first row, and the first row with a ``None``
-    token for each source-info column, never the whole input.
+    rows. Keep the first row and the first occurrence of an absent token in
+    each source-info column. These sampled rows still go through the existing
+    row-built token type check before they are sliced to zero rows.
 
     Attributes:
         rows: The kept rows, in arrival order.
@@ -1419,6 +1418,28 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         for row_context_key in row_context_keys:
             require_same_data_context(row_context_key, self.data_context_key)
         output_table = output_table.drop([constants.CONTEXT_KEY])
+
+        # The odb_v2 schema and record hash use the token flags of the complete
+        # stored output. Stream reads through ArrowTableStream declare the
+        # logical token fields nullable again.
+        stored_fields = [
+            field.with_nullable(column.null_count > 0)
+            if field.name.startswith(constants.SOURCE_PREFIX)
+            else field
+            for field, column in zip(
+                output_table.schema, output_table.columns, strict=True
+            )
+        ]
+        output_table = pa.Table.from_arrays(
+            output_table.columns,
+            schema=pa.schema(
+                stored_fields,
+                metadata=cast(
+                    "dict[bytes | str, bytes | str] | None",
+                    output_table.schema.metadata,
+                ),
+            ),
+        )
 
         # The entry id of each row (ITL-1471) is computed from the row as the stream
         # gives it, before the bookkeeping columns are added.
