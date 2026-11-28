@@ -325,8 +325,8 @@ class SQLiteConnector:
     @contextmanager
     def store_table_transaction(
         self, table_name: str, path_json: str
-    ) -> Iterator[None]:
-        """Register and write a record table in one SQLite transaction."""
+    ) -> Iterator[bool]:
+        """Register and write a record table, yielding whether it already exists."""
         with self._lock:
             conn = self._require_open()
             _ = conn.execute("BEGIN IMMEDIATE")
@@ -366,7 +366,7 @@ class SQLiteConnector:
                         f'INSERT INTO main."{STORE_PATH_CATALOG}" (table_name, path_json) VALUES (?, ?)',
                         (table_name, path_json),
                     )
-                yield
+                yield physical is not None
                 conn.commit()
             except BaseException:
                 conn.rollback()

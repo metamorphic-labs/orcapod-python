@@ -524,8 +524,6 @@ class ConnectorArrowDatabase:
         full_path = self._path_prefix + record_path
         table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
-        if self._sql_store is not None:
-            self._has_committed_table(table_name, full_path)
         records = normalize_table_to_large_types(records, keep_null=True)
         self._connector.validate_records(records)
 
@@ -604,14 +602,8 @@ class ConnectorArrowDatabase:
             return list(pending.schema)
         return None
 
-    def _stored_columns(
-        self, table_name: str, full_path: tuple[str, ...]
-    ) -> "list[pa.Field[Any]] | None":
-        """The stored table's columns as the connector reports them now, in its order
-        (``get_column_info``, large-normalized types), or ``None`` when it does not
-        exist. Never remembered: each call asks the connector."""
-        if not self._has_committed_table(table_name, full_path):
-            return None
+    def _stored_columns(self, table_name: str) -> "list[pa.Field[Any]]":
+        """Read the columns of an existing table in its order and large types."""
         return [
             pa.field(
                 c.name,
@@ -804,15 +796,15 @@ class ConnectorArrowDatabase:
         try:
             self._require_table_name(table_name)
             transaction = (
-                nullcontext()
+                nullcontext(table_name in self._connector.get_table_names())
                 if self._sql_store is None
                 else self._sql_store.store_table_transaction(
                     table_name, store_table_path_json(record_path).decode()
                 )
             )
-            with transaction:
+            with transaction as table_exists:
                 self._write_ready_batch(
-                    record_key, record_path, table_name, pending, skip_existing
+                    record_key, table_name, pending, skip_existing, table_exists
                 )
         except BaseException:
             self._pending_commits.finish(record_key, committed=False)
@@ -825,15 +817,15 @@ class ConnectorArrowDatabase:
     def _write_ready_batch(
         self,
         record_key: str,
-        record_path: tuple[str, ...],
         table_name: str,
         pending: pa.Table,
         skip_existing: bool,
+        table_exists: bool,
     ) -> None:
         """Check the current schema and write the ready rows."""
         columns = _arrow_schema_to_column_infos(pending.schema)
         # Look up the held schema inside the write transaction (ITL-1367).
-        existing = self._stored_columns(table_name, record_path)
+        existing = self._stored_columns(table_name) if table_exists else None
         check = self._pending_commits.schema_check(record_key)
         if check is not None:
             check(pending.schema if existing is None else pa.schema(existing))
@@ -891,11 +883,6 @@ class ConnectorArrowDatabase:
             pending = self._pending_batches[record_key]
             filtered = pending.filter(pc.field(self.RECORD_ID_COLUMN) == record_id)
             if filtered.num_rows > 0:
-                if self._sql_store is not None:
-                    full_path = self._path_prefix + record_path
-                    self._has_committed_table(
-                        self._path_to_table_name(full_path), full_path
-                    )
                 return self._handle_record_id_column(filtered, record_id_column)
 
         # Check committed

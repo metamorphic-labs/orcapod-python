@@ -25,8 +25,8 @@ class SQLStoreConnector(Protocol):
 
     def store_table_transaction(
         self, table_name: str, path_json: str
-    ) -> AbstractContextManager[None]:
-        """Verify or register a path and commit its record write in one transaction."""
+    ) -> AbstractContextManager[bool]:
+        """Verify or register a path and yield whether its table already exists."""
         ...
 
 

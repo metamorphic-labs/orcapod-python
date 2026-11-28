@@ -477,8 +477,8 @@ class PostgreSQLConnector:
     @contextmanager
     def store_table_transaction(
         self, table_name: str, path_json: str
-    ) -> Iterator[None]:
-        """Register and write a record table in one PostgreSQL transaction."""
+    ) -> Iterator[bool]:
+        """Register and write a record table, yielding whether it already exists."""
         with self._lock:
             conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
             self._store_transaction_active = True
@@ -538,7 +538,7 @@ class PostgreSQLConnector:
                             ).format(catalog),
                             (table_name, path_json),
                         )
-                yield
+                yield physical is not None
                 conn.commit()
             except BaseException:
                 conn.rollback()
