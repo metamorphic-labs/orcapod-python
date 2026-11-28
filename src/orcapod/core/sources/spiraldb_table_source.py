@@ -25,6 +25,11 @@ Example::
     # The same restriction added to a built source: a new source, same identity
     source = SpiralDBTableSource("my-project-123456", "spike_event").where(unit_id=106)
 
+    # Only a window of a column, half-open: col("timestamp") >= start and < stop
+    source = SpiralDBTableSource("my-project-123456", "spike_event").where(
+        col("timestamp") >= start, col("timestamp") < stop
+    )
+
     # The spike time is a key column (a tag); also offer it as data
     source = SpiralDBTableSource(
         "my-project-123456", "spike_event", tags_as_data={"timestamp": "spike_time_us"}
@@ -74,7 +79,7 @@ from orcapod.databases.spiraldb_connector import (
 )
 from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
 from orcapod.types import ColumnConfig, Condition
-from orcapod.types.condition import check_equality_conditions
+from orcapod.types.condition import check_float_equalities, check_restriction
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 
@@ -133,30 +138,6 @@ def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
         f"the table has schema metadata {found.metadata} but the source was built "
         f"with {expected.metadata}"
     )
-
-
-def _checked_conditions(
-    conditions: Mapping[str, object], schema: "pa.Schema"
-) -> dict[str, object]:
-    """Check ``where`` conditions against the table's columns; convert nothing.
-
-    The one rule for condition values, ``check_equality_conditions``
-    (``orcapod.types.condition``), which ``Filter`` shares: a value is exactly of its
-    column's Python type and fits the column's Arrow type.
-
-    Args:
-        conditions: Column name to value.
-        schema: The table's columns (system columns removed).
-
-    Returns:
-        The conditions, in the given order.
-
-    Raises:
-        ValueError: If a column is not in the table.
-        TypeError: If a value is not of its column's type, does not fit it, or the
-            column's type has no equality condition.
-    """
-    return check_equality_conditions(conditions, schema)
 
 
 SPIRALDB_SOURCE_ID_HAS_TABLE_ID = True
@@ -249,10 +230,10 @@ class SpiralDBTableSource(RootSource):
             single column name. If ``None`` (default), the table's primary-key
             (key-schema) columns are used.
         system_tag_columns: Additional system-level tag columns.
-        where: Column name to value, or a ``Condition`` (``orcapod.types``). Only
-            rows in which every named column equals its value are read; SpiralDB
-            applies this before any row is transferred. Each value must be exactly of
-            its column's Python type (see ``where()``, the same mechanism).
+        where: Column name to value, or a ``Condition`` (``orcapod.types``) of
+            equalities and ranges. Only the rows that meet it are read; SpiralDB
+            applies it before any row is transferred. Values follow the same type
+            and exactness rules as ``where()``.
         limit: Read at most this many rows: the first in key order (after ``where``).
         asof: Read the table as of this version (microseconds, as SpiralDB's
             transaction timestamps). If ``None`` (default), the version the table has
@@ -282,8 +263,11 @@ class SpiralDBTableSource(RootSource):
         ValueError: If the table is not found, has no key schema, a tag column or a
             ``where`` column is not in the table, a ``where`` value is ``None``, or
             ``limit``, ``max_rows`` or ``batch_rows`` is not a positive integer.
-        TypeError: If a ``where`` value is not exactly of its column's Python type or
-            does not fit its Arrow type.
+        TypeError: If a ``where`` value has the wrong Python type, cannot be held
+            exactly by the column's Arrow type, or uses an unsupported condition.
+            Float columns without a logical type also take exactly representable
+            Python ints. The refusal of inexact float equalities holds for now
+            and will be revisited in ITL-1480.
         InputValidationError: If ``tags_as_data`` names a column that is not a tag
             column or not a key column, or a new name that is already a column, is
             given twice, or is reserved for system columns.
@@ -526,8 +510,8 @@ class SpiralDBTableSource(RootSource):
 
     def where(
         self,
-        mapping: "Mapping[str, object] | Condition | None" = None,
         /,
+        *conditions: "Mapping[str, object] | Condition | None",
         **columns: object,
     ) -> "SpiralDBTableSource":
         """Return a new source on the same table that reads only the matching rows.
@@ -544,12 +528,25 @@ class SpiralDBTableSource(RootSource):
         ``tags_as_data``, key columns, source id, label, data context). With a
         ``limit``, the new source reads the first ``limit`` rows that match.
 
-        Each condition is sent to SpiralDB as ``column == value``, and which rows it
-        selects is SpiralDB's own equality, not Orcapod's. For a float column that
-        means: whether a NaN value selects the NaN rows, and whether ``0.0`` selects
-        the ``-0.0`` rows, is decided by SpiralDB; under the usual floating-point rule
-        a NaN equals nothing, so such a condition may select no row. To select rows by
-        such values as Orcapod matches them, filter inside the pipeline.
+        Two kinds of condition are taken, all of which must hold: a column equal to a
+        value (a keyword, a mapping, ``col(c) == v``), and a range of an integer,
+        timestamp or date column (``col("t") >= start``, ``col("t") < stop``,
+        ``col("t").between(a, b)``, which includes both ends). Write a window half-open,
+        ``>= start`` and ``< stop``: adjacent windows then neither overlap nor leave a
+        gap. Ranges of one column add up, and may select no row; a null meets no
+        condition. Float ranges are refused for now (ITL-1477). Use ``filter`` for
+        ranges of unsupported types such as floats and strings. Anything else
+        (``is_in``, a null test, ``!=``, two columns, ``|``, ``~``) is refused too.
+
+        For now, ``where()`` refuses float equality values that the column's Arrow
+        type cannot hold exactly. For example, a plain float32 column accepts
+        ``0.5`` and ``1`` and raises ``TypeError`` for ``0.1`` at the call.
+        An equality sent to SpiralDB uses the service's own comparison. For a float column,
+        ``0.0`` does not select the ``-0.0`` rows. An equality to ``-0.0`` or a NaN is
+        refused for now (``TypeError``). SpiralDB matches them by their bits, while Orcapod
+        counts ``-0.0`` equal to ``0.0`` and NaN equal to NaN, so the rows read would
+        depend on which of two equal values a condition kept. ITL-1480 tracks revisiting
+        the float refusals. Use ``filter`` to compare these values by Orcapod's rules.
 
         A convenience: the arguments are given to ``Condition.of``, which builds the
         ``Condition`` (``orcapod.types``); the source checks it against its table and
@@ -562,26 +559,33 @@ class SpiralDBTableSource(RootSource):
         steps (``copy()`` and ``apply_restriction``) on their own.
 
         Args:
-            mapping: Column name to value, or a ``Condition``. Positional only, so
-                every column name can also be given as a keyword.
-            **columns: Column name to value, added to ``mapping``.
+            *conditions: Mappings of column name to value, and conditions (built with
+                ``col`` or ``Condition.of``). Positional only, so every column name
+                can also be given as a keyword.
+            **columns: Column name to value, added to ``conditions``.
 
         Returns:
             The restricted source; its modified time is the moment it was made.
 
         Raises:
             ValueError: If no condition is given, a column is not in the table, a
-                value is ``None``, a column is given in the mapping and as a keyword
-                with different values, or a column is already restricted to another
-                value.
-            TypeError: If a value is not exactly of its column's Python type or does
-                not fit the column's Arrow type: nothing is converted (a NumPy scalar,
-                a date given as a string), the column's type takes no equality
-                condition, or the condition holds anything but equalities (a
-                comparison, ``is_in``, a null test, ``|`` or ``~``: filter the stream
-                instead).
+                value is ``None``, or a column must equal two different values.
+            TypeError: If the value has the wrong Python type (for example, a NumPy
+                scalar or a date given as a string) or cannot be held exactly by the
+                column's Arrow type (for example, ``-1`` for an unsigned column).
+                Values are never converted, rounded or clamped. This error also
+                applies to unsupported conditions. For now, float equalities with
+                ``-0.0``, NaN, or values the column cannot hold exactly raise this
+                error (ITL-1480).
+                Use ``filter`` for unsupported conditions.
         """
-        condition = Condition.of(mapping, **columns)
+        try:
+            # As given, before merging: merging may keep 0.0 of 0.0 and -0.0, or
+            # refuse -0.0 beside another value as two values (ITL-1480).
+            check_float_equalities(*conditions, **columns)
+        except TypeError as exc:
+            raise TypeError(f"SpiralDB table {self._qualified!r}: {exc}") from exc
+        condition = Condition.of(*conditions, **columns)
         restricted = self._copy()
         try:
             restricted._apply_restriction(condition)
@@ -634,29 +638,18 @@ class SpiralDBTableSource(RootSource):
             condition: The condition to add.
 
         Raises:
-            ValueError: If a column is not in the table, or a column is already
-                restricted to another value.
-            TypeError: If a value is not of its column's type or does not fit it.
+            ValueError: If a column is not in the table, or a column must equal two
+                different values.
+            TypeError: If the condition holds anything but equalities and ranges, a
+                range names a column of another type, or a value is not of its
+                column's type or does not fit it.
         """
-        if not condition.only_equalities:
-            raise TypeError(
-                f"where takes equality conditions only today (column=value); "
-                f"{condition} has others. Filter the stream instead, as a step of "
-                f"the pipeline: source.filter(...) with the same condition"
-            )
-        _checked_conditions(condition.equalities, self._table_schema)
-        # A condition keeps a contradiction (it holds for no row), but a restriction
-        # is pushed down as one value per column: a second value for a column already
-        # restricted is refused here, as it always was.
-        for column, value in condition.equalities.items():
-            held = self._condition.equalities.get(column, value)
-            if not Condition.of({column: held}) == Condition.of({column: value}):
-                raise ValueError(
-                    f"column {column!r} is already restricted to {held!r}; it cannot "
-                    f"also equal {value!r} (a source reads one value per column; filter "
-                    "the stream to state a condition that holds for no row)"
-                )
-        self._condition = self._condition.combined(condition)
+        check_restriction(condition, self._table_schema)
+        combined = self._condition.combined(condition)
+        # Again with the one in force: a column equals one value (ranges add up, and
+        # a contradiction of ranges is kept: it reads no row).
+        check_restriction(combined, self._table_schema)
+        self._condition = combined
         self._update_modified_time()
 
     @property
@@ -813,9 +806,18 @@ class SpiralDBTableSource(RootSource):
         """Return the error for a read that goes over ``max_rows``."""
         return SourceTooLargeError(
             f"SpiralDB table {self._qualified!r}: {found}, more than "
-            f"max_rows={self._max_rows}. Read fewer rows with limit=<n> or "
-            "where={column: value}, or raise max_rows (max_rows=None removes the "
-            "cap; a pipeline job keeps every row in memory)."
+            f"max_rows={self._max_rows}{self._under_condition()}. Read fewer rows "
+            "with limit=<n> or a narrower where= or where(...) (equalities, and ranges "
+            "such as col(c) >= start, col(c) < stop), or raise max_rows "
+            "(max_rows=None removes the cap; a pipeline job keeps every row in memory)."
+        )
+
+    def _under_condition(self) -> str:
+        """Return `` under where <condition>`` for a restricted source, else nothing."""
+        return (
+            f" under where {self._condition.text()}"
+            if not self._condition.is_empty
+            else ""
         )
 
     def _key_tokens(self, table: "pa.Table") -> list[str]:
@@ -894,7 +896,7 @@ class SpiralDBTableSource(RootSource):
         # Keys must be unique across the whole read, not only within a slice.
         identifiers: set[str] = set()
         for batch in table.scan_batches(
-            where=dict(self._condition.equalities) or None,
+            where=None if self._condition.is_empty else self._condition,
             limit=limit,
             asof=asof,
         ):

@@ -13,8 +13,9 @@ the rule is applied.
 from __future__ import annotations
 
 import json
-import math
+import operator
 import os
+import struct
 import types
 import urllib.parse
 import uuid
@@ -67,7 +68,10 @@ RULES = {
     "non-null": "a null in a column, struct field or list item declared or stored "
     "non-null is refused",
     "literal": "a literal must have the column's exact type (large_string is none)",
-    "float-eq": "0.0 does not equal -0.0, and NaN equals NaN",
+    "float-eq": "floats match by bit pattern, including signed zeros and NaNs",
+    "float-order": "lt, lte, gt and gte order floats by IEEE 754 total order: the "
+    "negative NaN below -inf, -0.0 below 0.0, positive NaNs above inf (seen November 26, "
+    "2026, ITL-998); a null meets no comparison",
     "rows": "rows come in key order; filter before limit",
     "list": "the documented listing filters a dataset and pages; a page can be empty "
     "(documented, not seen)",
@@ -282,11 +286,24 @@ def _check_nulls(array: Any, field: pa.Field[Any], *, in_list: bool) -> None:
         _check_nulls(array.flatten(), t.value_field, in_list=True)
 
 
-def _bits(value: Any) -> Any:
-    """Return ``value`` so that ``==`` compares it as the service does (``float-eq``)."""
+def _ordered(value: Any) -> Any:
+    """Return ``value`` so that ``<`` orders it as the service does (``float-order``)."""
     if isinstance(value, float):
-        return "nan" if math.isnan(value) else (value, math.copysign(1.0, value))
+        (bits,) = struct.unpack("<q", struct.pack("<d", value))
+        return bits if bits >= 0 else -(bits & 0x7FFFFFFFFFFFFFFF) - 1
     return value
+
+
+def _compares(stored: Any, op: str, value: Any) -> bool:
+    """Return whether a stored value meets ``op value`` (not null)."""
+    if op == "==":
+        return stored == value
+    return {
+        "<": operator.lt,
+        "<=": operator.le,
+        ">": operator.gt,
+        ">=": operator.ge,
+    }[op](_ordered(stored), _ordered(value))
 
 
 # ------------------------------------------------------------------------------- the store
@@ -509,18 +526,18 @@ class _Literal:
 
 @dataclass(frozen=True)
 class FakePredicate:
-    """Equalities a row must all match."""
+    """Comparisons a row must all match: ``(column, literal, operator)``."""
 
-    terms: tuple[tuple[str, _Literal], ...]
+    terms: tuple[tuple[str, _Literal, str], ...]
 
     @property
     def equalities(self) -> list[tuple[str, Any]]:
         """The ``(column, value)`` pairs, in the order given."""
-        return [(name, wanted.value) for name, wanted in self.terms]
+        return [(name, wanted.value) for name, wanted, op in self.terms if op == "=="]
 
     def __repr__(self) -> str:
-        """Return the equalities as ``name == value`` terms joined by ``&``."""
-        return " & ".join(f"{name} == {value!r}" for name, value in self.equalities)
+        """Return the terms as ``name == value`` joined by ``&``."""
+        return " & ".join(f"{name} {op} {w.value!r}" for name, w, op in self.terms)
 
 
 def column(name: str) -> _Column:
@@ -532,12 +549,44 @@ def literal(value: Any, type: Any = None) -> _Literal:
     """Stand in for ``spiral.literal`` (``literal``): an explicit scalar type."""
     if type is None or pa.types.is_large_string(type) or pa.types.is_large_binary(type):
         raise TypeError(f"unsupported literal Arrow type {type}")
+    if pa.types.is_timestamp(type):
+        scalar = pa.scalar(value, type)
+        # Kept as its integer count, never a Python value: an instant at either end of
+        # a count (year 1 east of UTC, the ends of timestamp[ns]) has no datetime or
+        # pandas Timestamp in its zone. The scan reads the count as the same type.
+        return _Literal(scalar.value, type)
+    if (
+        pa.types.is_floating(type)
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+    ):
+        value = float(value)
     return _Literal(pa.scalar(value, type).as_py(), type)
 
 
 def eq(left: _Column, right: _Literal) -> FakePredicate:
     """Stand in for ``spiral.eq``."""
-    return FakePredicate(((left.name, right),))
+    return FakePredicate(((left.name, right, "=="),))
+
+
+def lt(left: _Column, right: _Literal) -> FakePredicate:
+    """Stand in for ``spiral.lt``."""
+    return FakePredicate(((left.name, right, "<"),))
+
+
+def lte(left: _Column, right: _Literal) -> FakePredicate:
+    """Stand in for ``spiral.lte``."""
+    return FakePredicate(((left.name, right, "<="),))
+
+
+def gt(left: _Column, right: _Literal) -> FakePredicate:
+    """Stand in for ``spiral.gt``."""
+    return FakePredicate(((left.name, right, ">"),))
+
+
+def gte(left: _Column, right: _Literal) -> FakePredicate:
+    """Stand in for ``spiral.gte``."""
+    return FakePredicate(((left.name, right, ">="),))
 
 
 def and_(left: FakePredicate, right: FakePredicate) -> FakePredicate:
@@ -638,9 +687,9 @@ class FakeKeyedTable:
         limit: int | None = None,
         batch_rows: int | None = None,
     ) -> FakeScan:
-        """Plan a scan (``rows``, ``literal``, ``float-eq``)."""
+        """Plan a scan (``rows``, ``literal``, ``float-eq``, ``float-order``)."""
         rows = self._store.read(self.resource_id, self._version)
-        for name, wanted in filter.terms if filter else ():
+        for name, wanted, op in filter.terms if filter else ():
             if rows.schema.field(name).type != wanted.type:
                 raise SpiralError(
                     "scan filter is unsupported: Comparison requires equal dtypes, got "
@@ -652,10 +701,19 @@ class FakeKeyedTable:
             if pa.types.is_temporal(wanted.type):
                 width = pa.int32() if pa.types.is_date32(wanted.type) else pa.int64()
                 stored, given = stored.cast(width), given.cast(width)
+            elif op == "==" and pa.types.is_floating(wanted.type):
+                # Read raw bits before to_pylist() can quiet a signaling NaN.
+                bits = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}[
+                    wanted.type.bit_width
+                ]
+                stored = pa.chunked_array(
+                    [chunk.view(bits) for chunk in stored.chunks], bits
+                )
+                given = given.view(bits)
             values, (value,) = stored.to_pylist(), given.to_pylist()
             rows = rows.filter(
                 pa.array(
-                    [v is not None and _bits(v) == _bits(value) for v in values],
+                    [v is not None and _compares(v, op, value) for v in values],
                     pa.bool_(),
                 )
             )
@@ -870,6 +928,10 @@ fake_module = types.SimpleNamespace(
     column=column,
     literal=literal,
     eq=eq,
+    lt=lt,
+    lte=lte,
+    gt=gt,
+    gte=gte,
     and_=and_,
     drop_column=drop_column,
 )
