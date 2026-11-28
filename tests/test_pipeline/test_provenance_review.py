@@ -3401,14 +3401,14 @@ def test_why_missing_reads_no_result_table(monkeypatch: pytest.MonkeyPatch) -> N
 
     Probe: the database's own ``refresh_table`` and ``get_all_records`` calls, by
     path (a result table's path ends in ``rdb_v1``, a pipeline table's in
-    ``pdb_v1``).
+    ``pdb_v2``).
     """
     job = _trials_job(InMemoryArrowDatabase())
     job.run()
     calls = _store_calls(monkeypatch, InMemoryArrowDatabase)
     answer = job.nodes["scores"].why_missing("trials", "row_0")
     assert not answer.missing and answer.entry_recorded is True
-    assert any(c[2][-1] == "pdb_v1" for c in calls)
+    assert any(c[2][-1] == "pdb_v2" for c in calls)
     assert not [c for c in calls if c[2][-1] == "rdb_v1"]
     calls.clear()
     job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
@@ -3636,8 +3636,8 @@ def test_two_entries_for_one_input_and_result_are_refused(
 ) -> None:
     """Two stored entries for one input and one result (async execution can record
     two copies of an identical input, one reusing the other's result) say different
-    things (entry id, computed or reused, run), and the held row does not record
-    which served it: the trace refuses rather than report the higher index. One
+    things (record id, computed or reused, run), and the held row does not record
+    which served it: the trace refuses rather than pick one. One
     entry traces as before. Covered for a function over a source and over an
     operator (the trials job's means reads GroupBy, scores reads the source)."""
     from orcapod.pipeline import provenance
@@ -3657,8 +3657,7 @@ def test_two_entries_for_one_input_and_result_are_refused(
         copies = [
             {
                 **entry,
-                "__pipeline_entry_id": b"semantic_v1:" + bytes(32),
-                "__pipeline_recomputation_index": 1,
+                "__pipeline_record_id": b"semantic_v1:" + bytes(32),
                 "__computed": not entry.get("__computed"),
             }
             for entry in entries

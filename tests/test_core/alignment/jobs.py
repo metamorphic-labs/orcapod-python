@@ -19,12 +19,13 @@ import pyarrow as pa
 
 from orcapod.core.operators.group_by import GROUP_BY_FOLD_LABEL
 from orcapod import PipelineJob
+from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import GroupBy, Join
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.run_summary import RunSummary
 from orcapod.system_constants import constants
-from orcapod.types import CacheMode
+from orcapod.types import CacheMode, PodConfig
 
 from .checker import Layout
 from .fixtures import Sources, content_hash_column, keys_a, make_sources
@@ -86,9 +87,14 @@ def build_job(
     sources = make_sources(scenario, input_order)
     derive_y(sources)
     job = PipelineJob(name=JOB_NAME, database=store)
-    pod = gated_fragile if fragile else gated_scale
+    # A prescribed completion order may require the last input row to start first.
+    pod = FunctionPod.from_fn(
+        gated_fragile if fragile else gated_scale,
+        output_keys="y",
+        pod_config=PodConfig(max_concurrency=None),
+    )
     with job:
-        scaled = pod.pod(sources.a, label="scaled")
+        scaled = pod(sources.a, label="scaled")
         Join()(scaled, sources.b, label="joined")
         GroupBy(by=["g"])(scaled, label="grouped")
     # OperatorNode.attach_databases is the public way to store an operator's rows.

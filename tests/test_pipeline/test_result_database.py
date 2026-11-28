@@ -722,7 +722,7 @@ def _dangling_record_ids(pipeline_root: pathlib.Path, result_root: pathlib.Path)
             result_ids.update(stored.column("__rid").to_pylist())
     record_ids: set[Any] = set()
     for path in pipeline.list_table_paths(()):
-        if path[-1] == "pdb_v1":
+        if path[-1] == "pdb_v2":
             stored = pipeline.get_all_records(path)
             assert stored is not None
             record_ids.update(stored.column(constants.DATA_RECORD_ID).to_pylist())
@@ -792,7 +792,7 @@ class TestCommitOrderAcrossTwoDatabases:
             with pytest.raises(OrcapodDatabaseWriteError) as info:
                 _ = job.run(orchestrator=orchestrator)
         published = DeltaTableDatabase(pipeline_root)
-        assert [p for p in published.list_table_paths(()) if p[-1] == "pdb_v1"] == []
+        assert [p for p in published.list_table_paths(()) if p[-1] == "pdb_v2"] == []
         assert "result" in str(info.value) and "rdb_v1" in "/".join(
             info.value.record_path
         )
@@ -821,7 +821,7 @@ class TestForeignPipelineRowsFromAnotherHandle:
         _ = job.run(orchestrator=orchestrator)
         delivered.clear()
 
-        (path,) = [p for p in pipeline.list_table_paths(()) if p[-1] == "pdb_v1"]
+        (path,) = [p for p in pipeline.list_table_paths(()) if p[-1] == "pdb_v2"]
         stored = pipeline.get_all_records(path, record_id_column="__rid")
         assert stored is not None
         context = stored.schema.get_field_index("__data_context")

@@ -2,8 +2,8 @@
 
 Provides ``LoggingObserver``, a drop-in observer that captures stdout,
 stderr, Python logging, and tracebacks from every data execution and writes
-structured log rows to any ``ArrowDatabaseProtocol`` implementation
-(in-memory, Delta Lake, etc.).
+structured log rows to an ``ArrowDatabaseProtocol`` store such as in-memory
+or Delta Lake.
 
 Example::
 
@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 from uuid_utils import uuid7
 
+from orcapod.pipeline._observer_database import require_observer_database
 from orcapod.pipeline.logging_capture import install_capture_streams
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 
@@ -151,8 +152,11 @@ class LoggingObserver:
         obs = LoggingObserver(log_database=db.at("my_pipeline", "_log"))
 
     Args:
-        log_database: Any ``ArrowDatabaseProtocol`` instance.  May be
+        log_database: An ``ArrowDatabaseProtocol`` instance. May be
             a root database or a scoped view created via ``db.at(...)``.
+
+    Raises:
+        SpiralDBObserverNotSupportedError: If the database is backed by SpiralDB.
 
     Note:
         Construction calls `install_capture_streams`
@@ -164,6 +168,7 @@ class LoggingObserver:
         self,
         log_database: ArrowDatabaseProtocol,
     ) -> None:
+        require_observer_database(log_database)
         self._db = log_database
         self._current_run_id: str = ""
         # Activate tee-capture as soon as the observer is created.

@@ -261,7 +261,7 @@ def test_the_async_path_gives_the_sync_rows_in_every_tag_order(roles: str) -> No
 
 
 # ---------------------------------------------------------------------------
-# Jobs: the same nodes, table paths and record ids for every tag order
+# Jobs: the same nodes, table paths and instance ids for every tag order
 # ---------------------------------------------------------------------------
 
 
@@ -291,8 +291,10 @@ def _job_record(
                 str(v) for v in records.column("__input_data_hash").to_pylist()
             )
         else:
+            # A pipeline record id holds the result id, which is random too: the
+            # lookup column, the instance id, is compared (ITL-1471).
             record[name] = sorted(
-                str(v) for v in records.column("__record_id").to_pylist()
+                str(v) for v in records.column("__pipeline_instance_id").to_pylist()
             )
     return record
 
@@ -302,7 +304,7 @@ def _job_record(
 def test_a_job_has_the_same_nodes_and_table_paths_for_every_tag_order(
     roles: str, orchestrator: Any
 ) -> None:
-    """Node hashes, every table path, stored record ids and rows: one value for 6 orders."""
+    """Node hashes, every table path, stored instance ids and rows: one value for 6 orders."""
     records = [_job_record(order, roles, orchestrator) for order in TAG_ORDERS]
     assert all(record == records[0] for record in records)
 

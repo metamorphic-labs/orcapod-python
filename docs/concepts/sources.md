@@ -462,7 +462,8 @@ print(first.row_count_estimate)  # rows in the whole table; reads every key to c
 
 - `limit=n` reads the first `n` rows in key order.
 - `where={column: value, ...}` reads the rows in which every named column equals its value
-  (`source.where(...)` adds conditions to a built source; see
+  (`source.where(...)` adds conditions to a built source, and also takes ranges of integer,
+  timestamp and date columns, such as a window of time; see
   [Restricting a source versus filtering in the pipeline](#restricting-a-source-versus-filtering-in-the-pipeline)).
 - `asof=` reads the table as of an earlier version, and keeps reading it. Without it, a
   source reads the version the table had when the source was built, in every read, until a
@@ -513,8 +514,45 @@ same rows. The conditions are a `Condition` (`orcapod.types`): `where(...)` buil
 given instead (`events.where(Condition.of(unit_id=106, session_index=2))`). A source
 restricted by a condition, a `limit=`, or both is **restricted**. Every source states its
 restriction through two read-only properties: `condition` (the empty `Condition` when it
-reads every row) and `row_limit` (`None` without a limit). A restriction is not an
-operator:
+reads every row) and `row_limit` (`None` without a limit).
+
+**Ranges.** Source range restrictions are available only on `SpiralDBTableSource` (other
+sources are tracked in ITL-1219). `where` takes a range of an integer, timestamp or date
+column, written with `col` as in `filter`. A half-open window, `>= start` and `< stop`, lets
+adjacent windows meet without gaps or overlaps. `col(c).between(a, b)` includes both ends.
+
+The `timestamp` column in this example stores microsecond counts as `uint64`. An Arrow
+timestamp column takes `datetime` bounds, aware when the column has a time zone and naive
+when it has none.
+
+<!-- docs-test: skip -->
+```python
+from orcapod import col
+
+hour = 3_600_000_000
+first_hour = events.where(col("timestamp") >= 0, col("timestamp") < hour)
+second_hour = events.where(col("timestamp") >= hour, col("timestamp") < 2 * hour)
+one_unit = first_hour.where(unit_id=106)  # a range and an equality
+```
+
+Ranges and equalities all must hold, on one column or several, given in one call or across
+chained calls in any order: the order never changes the rows, the condition or how it is
+saved. Ranges that cannot all hold are kept and read no row. A null meets no range. SpiralDB
+applies a range in the scan, so only the window's rows are transferred, and the row cap
+counts them. A bound is checked as an equality value is: exactly of the column's Python type
+(`int`, `datetime`, `date`), held exactly by its Arrow type (`-1` is refused for an unsigned
+column, a microsecond for `timestamp[s]`, a naive `datetime` for a zoned column), never
+converted, rounded or clamped. Ranges of strings, binary values, booleans and other
+unsupported types are refused, as are conditions such as `is_in`, null tests, `!=`,
+comparisons between columns, `|`, and `~`.
+
+Use `filter` for float ranges. Orcapod evaluates `filter` after the read, treating `0.0` and
+`-0.0` as equal and all NaNs as one value ordered after every number. `where` pushes the
+condition into SpiralDB, whose IEEE 754 total order puts `-0.0` below `0.0`. For example,
+`filter(col("x") >= 0.0)` keeps rows with `-0.0`. SpiralDB would drop those rows if it
+applied the same condition. `where` refuses float ranges for now (ITL-1477).
+
+A restriction is not an operator:
 
 - An operator (`Filter`, `SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
   graph and part of the pipeline's identity: a pipeline with a filter computes something
@@ -534,9 +572,11 @@ identities and reused by the full run. Use an operator when selecting rows is pa
 the pipeline computes. Restrict on tag (key) columns where you can; a condition on a data
 column is allowed.
 
-`where` and `stream.filter` take the same equalities, written the same way, and keep the same
-rows (for a float column, `where` uses the table system's own equality for NaN and `-0.0`,
-`filter` Orcapod's: see [Filter](operators.md#filter)). One spelling differs: `filter` takes
+`where` and `stream.filter` accept the same equality syntax. For float columns, `where`
+uses SpiralDB's equality and, for now, refuses a value the column cannot hold exactly.
+`where(x=0.0)` selects positive zero only. For now, `where` also refuses `-0.0` and NaN.
+ITL-1480 tracks revisiting these refusals. See [Filter](operators.md#filter) for
+Orcapod's equality rules. `filter` takes
 `label=` (the step's label, as every stream method does), so a column named `label` is written
 `filter({"label": "x"})` or `filter(col("label") == "x")`, while `where(label="x")` restricts
 that column. Neither takes `None` as a value: both raise `ValueError` and point to
@@ -553,7 +593,7 @@ explore = events.where(unit_id=106, session_index=2)
 # The pipeline: the same selection as a step, part of every downstream identity.
 kept = events.filter(unit_id=106, session_index=2)
 
-# Anything but equality is a filter; where refuses it and points to filter.
+# Use a filter for conditions such as is_in that where cannot apply.
 late = events.filter(col("spike_time_us") >= 1_000_000, col("unit_id").is_in([106, 107]))
 ```
 
@@ -566,10 +606,9 @@ timestamp columns, on a source without a `limit`. With a `limit` it does not: th
 reads the first rows that match the `where`, so the `filter` sees other rows than it would
 over the source alone (with `limit=2` and unit ids `[1, 2, 2]`, `filter(unit_id=2)` alone
 keeps one row, the `where` and the `filter` together keep two). On a float column it does
-not either when the value is a NaN or a signed zero:
-`where` matches by the table system's equality (a NaN may match no row), `filter` by
-Orcapod's (a NaN matches the NaN rows), so `where` can drop rows the `filter` alone would
-keep. For such a value, filter without the `where`.
+not either when the value is `0.0`: `where` matches by the table system's equality (`0.0`
+does not match `-0.0`), `filter` by Orcapod's (it does), so `where` can drop rows the `filter`
+alone would keep. For such a value, use `filter` on its own.
 
 <!-- docs-test: skip -->
 ```python
@@ -630,39 +669,48 @@ print(Condition.of(day=day, started=started, recorded=recorded))
 
 - **One mechanism.** `where()` adds to the conditions given with `where=` (a mapping or a
   `Condition`) when the source was built (`Condition.combined`), and SpiralDB applies them
-  in the scan. A column already restricted to another value
-  is refused, as is a column the table does not have, `None` (a null equals nothing) and
+  in the scan. If you call `SpiralDBConnector.scan_batches` directly, its PROVISIONAL
+  `where` parameter takes a `Condition`. Use `Condition.of(...)` to wrap a mapping.
+  A column already restricted to another value is refused, as is a column the table
+  does not have, `None` (a null equals nothing) and
   `where()` with no condition. Everything else of the source is carried over: the pinned
   table version, `limit`, `max_rows`, the tags and data-tags, `tags_as_data`, the key
   columns, the source id and the label. The original source is not changed.
-- **No conversion.** A value must be exactly of its column's Python type: an `int` for an
-  integer column (not `True`, not `1.0`, not a NumPy scalar: use `.item()`), a `float` for a
-  float column, a `datetime.date` for a date column and a `datetime.datetime` for a timestamp
-  column (not a string; see below), and it must fit the column's Arrow type. A timestamp
-  column with a time zone takes an aware `datetime`, one without a zone a naive `datetime`.
-  Anything else raises `TypeError`, naming the column and both types. Columns of other types
-  (lists, structs) take no condition.
+- **Exact values.** An integer column takes a Python `int`, a float column takes a Python
+  `float`, a date column takes a `datetime.date`, and a timestamp column takes a
+  `datetime.datetime`. A float column without a logical type also takes a Python `int`.
+  A timestamp column with a time zone takes an aware `datetime`.
+  A timestamp column without a zone takes a naive `datetime`. To use a NumPy scalar,
+  call `.item()` first. For float equality, `where()` currently raises `TypeError` at the
+  call if the column's Arrow type cannot hold the value exactly. For example, on a
+  `float32` column, `where(x=0.5)` is valid and `where(x=0.1)` raises. ITL-1480 tracks
+  revisiting this refusal. Lists and structs take no condition.
 - **The table system's equality.** Each condition is sent to SpiralDB as `column == value`,
-  and which rows it selects is SpiralDB's own equality, not Orcapod's. For a float column, NaN
-  selects the NaN rows and `0.0` does not select the `-0.0` rows (seen on the service, not
-  documented by it). A value that no `float32` is exactly, such as `0.1`, selects no row of a
-  `float32` column. SpiralDB cannot compare a `float16` column, so Orcapod reads the rows the
+  and which rows it selects is SpiralDB's own equality, not Orcapod's. For a float column,
+  `0.0` does not select the `-0.0` rows (seen on the service, not documented by it). An
+  equality to `-0.0` or a NaN raises `TypeError` for now and points to `filter`. SpiralDB matches
+  them by their bits, while Orcapod counts `-0.0` equal to `0.0` and NaN equal to NaN, so
+  the rows read would depend on which of two equal values a condition kept. ITL-1480 tracks
+  revisiting the float refusals. SpiralDB cannot compare a `float16` column, so Orcapod reads the rows the
   other conditions select and compares them itself, by the same rule and before `limit`. To
   select rows by such values as Orcapod matches them, filter
-  inside the pipeline (`PolarsFilter`). A NaN or infinite value is saved as
-  `{"float": "nan"}`, `{"float": "inf"}` or `{"float": "-inf"}`, since JSON has no such number.
-- **One restriction per table in a pipeline.** A restricted source has the unrestricted
-  source's content hash, and each call to `where()` returns a new source object.
-  Call `where()` once and reuse its result when several parts of the pipeline need
-  the same restriction. If two distinct source objects with the same content hash
-  enter a pipeline, Orcapod raises `InconsistentSourceError` even when the two
-  restrictions are equal. The one-restriction check also looks through wrappers
-  such as `CachedSource` and bound `SourceProxy` objects. It rejects different
-  restrictions on the same source, including a restricted and an unrestricted read.
+  inside the pipeline (`PolarsFilter`). An infinite value is saved as `{"float": "inf"}` or
+  `{"float": "-inf"}`, since JSON has no such number.
+- **One restriction per source identity in a pipeline.** Restrictions are equal by statement.
+  On an integer column, `t >= 3` and `t > 2` select the same rows but count as two
+  restrictions. A restriction leaves the `source_id` and `content_hash` unchanged. Each
+  call to `where()` returns a new source object. Call `where()` once and reuse its result
+  when several parts of the pipeline need the same restriction. Distinct source objects
+  with the same content hash raise `InconsistentSourceError` even when their restrictions
+  are equal. The separate one-restriction check looks through projections, operator
+  chains and live source wrappers. It rejects different restrictions on the same source,
+  including a restricted and an unrestricted read. Give each window its own `source_id`
+  to use both in the same pipeline. These checks run at construction, compilation,
+  binding and the start of each run.
 - **With `limit=`.** A source built with `limit=n` reads the first `n` rows that match, in
   key order: the conditions are applied first.
-- **Conditions as values.** Two conditions are equal when they require the same columns to
-  equal the same values, in any order. Values of different types differ (`1`, `True` and
+- **Conditions as values.** Equality compares the columns, operators and values in any
+  order. Values of different types differ (`1`, `True` and
   `1.0`); floats compare as Orcapod matches them (`0.0` equals `-0.0`, NaN equals NaN); an
   aware `datetime` is its instant, so one instant written in two zones is one value, and the
   two 01:30 of a daylight-saving overlap (`fold`) are two. This equality decides whether two
@@ -705,8 +753,8 @@ print(Condition.of(day=day, started=started, recorded=recorded))
 - **Stored rows stay.** A run over a restricted source deletes nothing: a job node shows the
   rows of its current run, and `node.as_source()` shows everything stored for it.
 
-`where()` is a copy of the source with the restriction applied to the copy; a later version
-offers the two steps on their own, and restrictions on other kinds of source.
+`where()` copies the source and applies the restriction to the copy. ITL-1219 tracks exposing
+the two steps separately and extending restrictions to other source types.
 
 **Running again.** A run first checks the source: when the table has a newer version (rows
 added since the source was built or last checked), the source reads that version from then

@@ -7,11 +7,21 @@ the optional ``psycopg`` driver (``pip install 'orcapod[postgresql]'``).
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 
-from orcapod.hashing.file_hashers import FileHashKey
+from orcapod.hashing.file_hashers import (
+    FILE_HASH_CACHE_SCHEMA_VERSION,
+    FileHashKey,
+    matches_stored_file_hash,
+    parse_stored_file_hash,
+    serialize_storable_file_hash,
+    stored_hash_format,
+)
 from orcapod.types import ContentHash
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -20,9 +30,6 @@ except ImportError as _exc:  # pragma: no cover
         "PostgresHashCacher requires psycopg. "
         "Install it with: pip install 'orcapod[postgresql]'"
     ) from _exc
-
-# Current schema version.  Increment when the DDL changes.
-_SCHEMA_VERSION = 1
 
 
 def _redact_conninfo(conninfo: str) -> str:
@@ -48,17 +55,13 @@ def _redact_conninfo(conninfo: str) -> str:
 class PostgresHashCacher:
     """PostgreSQL-backed file hash cacher.
 
-    Stores file hashes keyed on ``(path, mtime_ns, size)`` in a shared
-    PostgreSQL database. Uses thread-local connections for thread safety
-    and ``INSERT ... ON CONFLICT DO NOTHING`` for concurrent-insert safety.
+    Stores file hashes keyed on ``(path, mtime_ns, size, algorithm)`` in a shared
+    PostgreSQL database. Uses thread-local connections for thread safety.
 
     The hash is stored as a BYTEA in ``{method}:{raw_digest}`` format via
-    ``ContentHash.to_prefixed_digest()``.
-
-    Schema versioning is tracked in a companion ``file_hash_cache_meta``
-    table. If an existing database is detected with an old schema (e.g.
-    missing the ``cached_at`` column), a ``ValueError`` is raised explaining
-    the required migration DDL.
+    ``ContentHash.to_prefixed_digest()``. Each algorithm has its own row in
+    ``file_hash_cache_v2``. The companion ``file_hash_cache_v2_meta`` table records
+    schema version 2. Older cache tables and their metadata are left untouched.
 
     Requires ``psycopg[binary]>=3.0`` (install with
     ``pip install 'orcapod[postgresql]'``).
@@ -76,16 +79,14 @@ class PostgresHashCacher:
             ``None`` and ``0`` disable the threshold (default behaviour).
             Negative values raise ``ValueError``. Defaults to ``None``.
         match_mtime: When ``True`` (default), cache hits require
-            ``path``, ``mtime_ns``, and ``size`` to all match. When
-            ``False``, only ``path`` and ``size`` are compared; among
+            all four key fields to match. When ``False``, ``path``, ``size``, and
+            ``algorithm`` are compared; among
             multiple matching entries the one with the highest ``mtime_ns``
             is returned. The write path is unaffected — ``mtime_ns`` is
             always stored.
 
     Raises:
-        ValueError: If ``min_cache_size_bytes`` is negative, or if the
-            target database contains a ``file_hash_cache`` table with an
-            outdated schema (missing ``cached_at``).
+        ValueError: If ``min_cache_size_bytes`` is negative.
     """
 
     def __init__(
@@ -109,101 +110,65 @@ class PostgresHashCacher:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        """Create cache tables and verify the schema version.
-
-        Uses a dedicated one-shot connection so schema setup happens once on
-        construction, independent of the thread-local connection pool.
-
-        The companion ``file_hash_cache_meta`` table stores a
-        ``('schema_version', N)`` row.  If the ``file_hash_cache`` table
-        already exists but is missing the ``cached_at`` column, a
-        ``ValueError`` is raised with the migration DDL to apply.
-        """
+        """Create the version 2 cache and its metadata alongside older tables."""
         with psycopg.connect(self._conninfo) as conn:
-            # Main cache table (idempotent).
+            # Concurrent first-time setup in one schema must serialize its DDL.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock("
+                "hashtext(current_schema()), hashtext('file_hash_cache_v2'))"
+            )
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS file_hash_cache (
+                CREATE TABLE IF NOT EXISTS file_hash_cache_v2 (
                     path      TEXT   NOT NULL,
                     mtime_ns  BIGINT NOT NULL,
                     size      BIGINT NOT NULL,
+                    algorithm TEXT   NOT NULL,
                     hash      BYTEA  NOT NULL,
                     cached_at BIGINT NOT NULL
                         DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
-                    PRIMARY KEY (path, mtime_ns, size)
+                    PRIMARY KEY (path, mtime_ns, size, algorithm)
                 )
                 """
             )
-            # Supporting index for match_mtime=False lookups: WHERE path=%s AND size=%s
-            # ORDER BY mtime_ns DESC.  The PK (path, mtime_ns, size) cannot serve this
-            # efficiently because size is not a leftmost prefix.
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_file_hash_cache_path_size_mtime
-                ON file_hash_cache (path, size, mtime_ns DESC)
+                CREATE INDEX IF NOT EXISTS idx_file_hash_cache_v2_path_size_algorithm_mtime
+                ON file_hash_cache_v2 (path, size, algorithm, mtime_ns DESC)
                 """
             )
-            # Schema-version metadata table (idempotent).
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS file_hash_cache_meta (
+                CREATE TABLE IF NOT EXISTS file_hash_cache_v2_meta (
                     key   TEXT NOT NULL PRIMARY KEY,
                     value TEXT NOT NULL
                 )
                 """
             )
-
-            # Detect old schema: file_hash_cache exists but lacks cached_at.
-            # Constrain table_schema to the current search_path schemas so that
-            # a same-named table in a different schema does not shadow the check.
-            row = conn.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = 'file_hash_cache'
-                  AND column_name = 'cached_at'
-                  AND table_schema = ANY(current_schemas(false))
-                """
-            ).fetchone()
-            if row is None:
-                raise ValueError(
-                    "PostgreSQL hash cache table exists but uses an outdated schema "
-                    "(missing the 'cached_at' column, schema version 0). "
-                    "Apply the following migration and then retry:\n\n"
-                    "    ALTER TABLE file_hash_cache\n"
-                    "        ADD COLUMN cached_at BIGINT NOT NULL\n"
-                    "        DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT;\n"
-                    "    INSERT INTO file_hash_cache_meta (key, value)\n"
-                    "        VALUES ('schema_version', '1')\n"
-                    "        ON CONFLICT (key) DO UPDATE SET value = '1';\n"
-                )
-
-            # Record (or update) schema version so the meta table always
-            # reflects what the running code has verified/initialized.
             conn.execute(
                 """
-                INSERT INTO file_hash_cache_meta (key, value)
+                INSERT INTO file_hash_cache_v2_meta (key, value)
                 VALUES ('schema_version', %s)
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                ON CONFLICT (key) DO NOTHING
                 """,
-                (str(_SCHEMA_VERSION),),
+                (str(FILE_HASH_CACHE_SCHEMA_VERSION),),
             )
 
     def _connection(self) -> "psycopg.Connection[tuple[object, ...]]":
         """Return this thread's connection, opening it on first use."""
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = psycopg.connect(self._conninfo)
+            conn = psycopg.connect(self._conninfo, autocommit=True)
+            conn.isolation_level = psycopg.IsolationLevel.READ_COMMITTED
             self._local.conn = conn
         return conn
 
     def get(self, key: FileHashKey) -> ContentHash | None:
         """Return the cached ``ContentHash`` for ``key``, or ``None`` on miss.
 
-        When ``match_mtime=True`` (default), the query filters on
-        ``path``, ``mtime_ns``, and ``size``. When ``match_mtime=False``,
-        only ``path`` and ``size`` are filtered and results are ordered
-        by ``mtime_ns DESC`` so the most recent entry is returned.
+        When ``match_mtime=True`` (default), all four key fields must match.
+        When ``match_mtime=False``, the newest entry for the path, size and
+        algorithm is returned.
 
         Args:
             key: File hash cache key.
@@ -211,36 +176,49 @@ class PostgresHashCacher:
         Returns:
             Cached ``ContentHash``, or ``None`` if not found.
         """
+        algorithm = str.__str__(key.algorithm)
+        hash_format = stored_hash_format(algorithm)
+        if hash_format is None:
+            return None  # Invalid labels can include NULs, which PostgreSQL rejects.
         conn = self._connection()
         if self._match_mtime:
             row = conn.execute(
-                "SELECT hash FROM file_hash_cache "
-                "WHERE path=%s AND mtime_ns=%s AND size=%s",
-                (str(key.path), key.mtime_ns, key.size),
+                "SELECT hash FROM file_hash_cache_v2 "
+                "WHERE path=%s AND mtime_ns=%s AND size=%s AND algorithm=%s",
+                (str(key.path), key.mtime_ns, key.size, algorithm),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT hash FROM file_hash_cache "
-                "WHERE path=%s AND size=%s ORDER BY mtime_ns DESC LIMIT 1",
-                (str(key.path), key.size),
+                "SELECT hash FROM file_hash_cache_v2 "
+                "WHERE path=%s AND size=%s AND algorithm=%s "
+                "ORDER BY mtime_ns DESC LIMIT 1",
+                (str(key.path), key.size, algorithm),
             ).fetchone()
         if row is None:
             return None
-        blob: bytes = bytes(row[0])
-        method_bytes, digest = blob.split(b":", 1)
-        return ContentHash(method=method_bytes.decode("ascii"), digest=digest)
+        return parse_stored_file_hash(row[0], algorithm, *hash_format)
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         """Store ``value`` under ``key``.
 
         No-ops silently when ``read_only=True`` or when ``key.size`` is below
-        ``min_cache_size_bytes``. Uses ``INSERT ... ON CONFLICT DO NOTHING``
-        so concurrent inserts of the same key from multiple workers are safe.
+        ``min_cache_size_bytes``. Putting the existing hash is also a no-op.
+        Replacing a malformed stored value refreshes its timestamp and logs a warning.
 
         Args:
             key: File hash cache key.
             value: ``ContentHash`` to store.
+
+        Raises:
+            ValueError: If the hash label or digest length is invalid for the key
+                (checked before the write guards), if the store matches a row
+                with another label, or if a different well-formed hash exists
+                under the same key.
         """
+        algorithm = str.__str__(key.algorithm)
+        prefix, digest_size, stored_value = serialize_storable_file_hash(
+            algorithm, value
+        )
         if self._read_only:
             return
         if (
@@ -250,21 +228,64 @@ class PostgresHashCacher:
         ):
             return
         conn = self._connection()
-        conn.execute(
-            """
-            INSERT INTO file_hash_cache (path, mtime_ns, size, hash)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (path, mtime_ns, size) DO NOTHING
-            """,
-            (str(key.path), key.mtime_ns, key.size, value.to_prefixed_digest()),
+        fields = (str(key.path), key.mtime_ns, key.size, algorithm)
+        with conn.transaction():
+            while True:
+                inserted = conn.execute(
+                    """
+                    INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (path, mtime_ns, size, algorithm) DO NOTHING
+                    """,
+                    (*fields, stored_value),
+                )
+                if inserted.rowcount == 1:
+                    return
+                # A separate statement sees a competing insert after it commits.
+                # Lock the existing row through comparison and repair. If clear()
+                # deleted it in the meantime, retry against the current table.
+                existing = conn.execute(
+                    """
+                    SELECT algorithm, hash FROM file_hash_cache_v2
+                    WHERE path=%s AND mtime_ns=%s AND size=%s AND algorithm=%s
+                    FOR NO KEY UPDATE
+                    """,
+                    fields,
+                ).fetchone()
+                if existing is None:
+                    continue
+                stored_algorithm, blob = existing
+                # psycopg returns TEXT as bytes under SQL_ASCII.
+                stored_label = (
+                    str.encode(stored_algorithm)
+                    if isinstance(stored_algorithm, str)
+                    else stored_algorithm
+                )
+                if bytes.__eq__(prefix[:-1], stored_label) is not True:
+                    raise ValueError(
+                        f"Cache matched a row with algorithm label {stored_algorithm!r} "
+                        f"for key label {algorithm!r}"
+                    )
+                if blob == stored_value:
+                    return
+                if matches_stored_file_hash(blob, prefix, digest_size):
+                    raise ValueError(f"Different hash already cached for {key!r}")
+                _ = conn.execute(
+                    """
+                    UPDATE file_hash_cache_v2
+                    SET hash=%s, cached_at=EXTRACT(EPOCH FROM statement_timestamp())::BIGINT
+                    WHERE path=%s AND mtime_ns=%s AND size=%s AND algorithm=%s
+                    """,
+                    (stored_value, *fields),
+                )
+                break
+        logger.warning(
+            "Replaced a malformed cached hash for %s (%s)", key.path, algorithm
         )
-        conn.commit()
 
     def clear(self) -> None:
         """Delete all rows from the cache table."""
-        conn = self._connection()
-        conn.execute("DELETE FROM file_hash_cache")
-        conn.commit()
+        self._connection().execute("DELETE FROM file_hash_cache_v2")
 
     def close(self) -> None:
         """Close this thread's database connection."""

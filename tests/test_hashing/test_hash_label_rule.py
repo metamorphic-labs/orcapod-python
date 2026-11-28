@@ -465,7 +465,7 @@ class TestRenamingALabelMovesEveryHashItFeeds:
                 ContentHash.from_prefixed_digest(value).digest
                 for value in cast(
                     "list[bytes]",
-                    records.column("__pipeline_base_entry_id").to_pylist(),
+                    records.column("__pipeline_instance_id").to_pylist(),
                 )
             )
 
@@ -577,10 +577,10 @@ class TestNamesHoldBareDigests:
         assert BARE_SHA256.fullmatch(schema_component.removeprefix("schema:"))
 
     def test_operator_table_path_holds_bare_digests(self) -> None:
-        """An operator-cache table path holds bare digests, then the layout (``odb_v1``)."""
+        """An operator-cache table path holds bare digests, then the layout (``odb_v2``)."""
         node, store = _run_cached_join()
         (path,) = store.list_sources()
-        assert path == node.node_identity_path + ("odb_v1",)
+        assert path == node.node_identity_path + ("odb_v2",)
         assert path[0] == "Join"
         assert BARE_SHA256.fullmatch(path[1]), path
         assert path[2].startswith("schema:")
@@ -807,6 +807,10 @@ class TestProducerlessStreamIdentity:
 
 SOURCE_ROOT = Path(orcapod.__file__).parent
 LABEL_DEFINITIONS = {
+    "sha256": "hashing/hash_utils.py",
+    "hash_path": "hashing/hash_utils.py",
+    "xxh64": "hashing/hash_utils.py",
+    "crc32": "hashing/hash_utils.py",
     "semantic_v1": "hashing/semantic_hashing/semantic_hasher.py",
     "arrow_v1": "hashing/arrow_hashers.py",
     "arrow_ordered_v1": "hashing/arrow_hashers.py",

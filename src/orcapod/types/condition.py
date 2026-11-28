@@ -67,7 +67,7 @@ Operator: TypeAlias = Literal[
 """The operator of a ``Term``."""
 
 EQUALS: Operator = "=="
-"""The operator of an equality term (``where`` takes only these)."""
+"""The operator of an equality term."""
 
 COMPARISONS: frozenset[str] = frozenset({"==", "!=", "<", "<=", ">", ">="})
 """The operators that compare a column with a value or with another column."""
@@ -396,36 +396,97 @@ def is_ordered_type(arrow_type: pa.DataType) -> bool:
     return expected is not None and expected is not bool
 
 
-def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
+_EPOCH_MICROSECONDS = instant_microseconds(datetime(1970, 1, 1, tzinfo=timezone.utc))
+_MICROSECONDS_PER_COUNT = {"s": 1_000_000, "ms": 1_000, "us": 1}
+
+
+def timestamp_count(value: datetime, arrow_type: pa.TimestampType) -> int:
+    """Return the count of ``arrow_type``'s unit since the epoch that is ``value``.
+
+    Computed from the value's instant (an aware value) or wall time (a naive one) in
+    integers, never through a ``datetime`` in the column's zone, so an instant with no
+    Python ``datetime`` in that zone (year 1 east of UTC, year 9999 west of it) is held
+    when the column's type holds it, and a fraction of a second in an offset counts.
+
+    Args:
+        value: The value; its kind (aware or naive) is already checked against the
+            column's zone.
+        arrow_type: The column's timestamp type.
+
+    Raises:
+        TypeError: If no count of the unit is the value exactly (a microsecond for
+            ``timestamp[s]``), or the count is beyond the type's 64-bit range
+            (``timestamp[ns]`` reaches years 1677 to 2262).
+    """
+    micros = instant_microseconds(value)
+    if micros is None:
+        micros = instant_microseconds(value.replace(tzinfo=timezone.utc))
+    assert micros is not None and _EPOCH_MICROSECONDS is not None
+    since_epoch = micros - _EPOCH_MICROSECONDS
+    if arrow_type.unit == "ns":
+        count, rest = since_epoch * 1_000, 0
+    else:
+        count, rest = divmod(since_epoch, _MICROSECONDS_PER_COUNT[arrow_type.unit])
+    if rest:
+        raise TypeError(f"holds {arrow_type}, which cannot hold {value!r} exactly")
+    if not -(2**63) <= count < 2**63:
+        raise TypeError(
+            f"holds {arrow_type}, which cannot hold {value!r}: the instant is beyond "
+            f"the range of a 64-bit count of {arrow_type.unit}"
+        )
+    return count
+
+
+def check_value_for_column(
+    value: object,
+    column: pa.DataType | pa.Field[pa.DataType],
+    *,
+    require_exact: bool = False,
+) -> None:
     """Check one condition value against the Arrow type of its column; convert nothing.
 
     The literal rule (ITL-1374, section 2.6): the value must be exactly of
     ``condition_value_type(arrow_type)``, and the column's type must hold it exactly
     (``7`` for ``uint32``; not ``-1`` for ``uint32``, ``300`` for ``int8``, a
-    microsecond for ``timestamp[s]``). A float is rounded to a narrower float column's
-    precision, as the column stores any value, and refused only when finite and beyond
-    its range. A zoned timestamp column takes an aware ``datetime``, any other a naive
-    one.
+    microsecond for ``timestamp[s]``). For an in-pipeline filter, a float can be rounded
+    to the column's precision, provided a finite value stays finite. For now, a
+    source restriction refuses float equality values the column cannot hold exactly.
+    ITL-1480 tracks revisiting this refusal. A restriction also takes a Python int a
+    plain float column can hold exactly. Logical columns retain the Python type
+    requirement of their storage.
+    A zoned timestamp column takes an aware ``datetime``, any other a naive one.
 
     Args:
         value: The value.
-        arrow_type: The column's Arrow type.
+        column: The Arrow field for a restriction, or the Arrow type for a filter.
+        require_exact: Apply the source restriction rule to floating-point values.
 
     Raises:
         TypeError: If the value is not of the column's type, does not fit it, or the
             column's type takes no value condition. The message names the type and
             the value, not the column: the caller names it.
     """
+    arrow_type = column.type if isinstance(column, pa.Field) else column
     expected = condition_value_type(arrow_type)
     if expected is None:
         raise TypeError(
             f"holds {arrow_type}, which a value condition does not support; only a "
             "null test (is_null, is_not_null) takes it"
         )
-    if type(value) is not expected:
+    float_int = (
+        require_exact
+        and expected is float
+        and type(value) is int
+        and not (
+            isinstance(column, pa.Field)
+            and b"ARROW:extension:name" in (column.metadata or {})
+        )
+    )
+    if type(value) is not expected and not float_int:
         raise TypeError(
-            f"holds {arrow_type} ({expected.__name__}), but the value {value!r} is a "
-            f"{type(value).__name__}; convert it explicitly to {expected.__name__} (a "
+            f"holds {arrow_type} ({expected.__name__}), but the value "
+            f"{_literal_repr(value)} is a {type(value).__name__}; convert it explicitly "
+            f"to {expected.__name__} (a "
             "NumPy scalar with .item(), a date or time string with date.fromisoformat "
             "or datetime.fromisoformat): Orcapod converts no value"
         )
@@ -436,7 +497,11 @@ def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
                 f"holds {arrow_type}, so the value must be "
                 f"{'an aware' if zoned else 'a naive'} datetime; got {value!r}"
             )
-    if isinstance(value, float):
+    if isinstance(value, datetime) and pa.types.is_timestamp(arrow_type):
+        assert isinstance(arrow_type, pa.TimestampType)
+        timestamp_count(value, arrow_type)
+        return
+    if isinstance(value, float) and not require_exact:
         # Rounding to the column's precision is how a float column stores any
         # value, so it is not refused; a finite value beyond its range is.
         stored = pa.scalar(value, type=arrow_type).as_py()
@@ -444,13 +509,32 @@ def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
             raise TypeError(f"holds {arrow_type}, whose range does not reach {value!r}")
         return
     try:
-        exact = _same_stored_value(pa.scalar(value, type=arrow_type).as_py(), value)
+        # Arrow imposes its own int-to-float limits, even for exactly representable
+        # integers above those limits. Compare to the original int after the round trip.
+        scalar_value = (
+            float(value) if expected is float and type(value) is int else value
+        )
+        exact = _same_stored_value(
+            pa.scalar(scalar_value, type=arrow_type).as_py(), value
+        )
     except (pa.ArrowInvalid, OverflowError) as exc:
         raise TypeError(
-            f"holds {arrow_type}, which cannot hold {value!r}: {exc}"
+            f"holds {arrow_type}, which cannot hold {_literal_repr(value)} exactly: {exc}"
         ) from exc
     if not exact:
-        raise TypeError(f"holds {arrow_type}, which cannot hold {value!r} exactly")
+        raise TypeError(
+            f"holds {arrow_type}, which cannot hold {_literal_repr(value)} exactly"
+        )
+
+
+def _literal_repr(value: object) -> str:
+    """Show a rejected literal even when Python limits integer string conversion."""
+    if type(value) is int:
+        try:
+            return repr(value)
+        except ValueError:
+            return f"an integer with {value.bit_length()} bits"
+    return repr(value)
 
 
 def _same_stored_value(stored: object, value: object) -> bool:
@@ -465,6 +549,8 @@ def _same_stored_value(stored: object, value: object) -> bool:
         value_instant = instant_microseconds(value)
         if stored_instant is not None and value_instant is not None:
             return stored_instant == value_instant
+    if isinstance(stored, float) and isinstance(value, float) and math.isnan(value):
+        return math.isnan(stored)
     return stored == value
 
 
@@ -650,7 +736,8 @@ def check_equality_conditions(
 ) -> dict[str, object]:
     """Check ``where`` equalities against a table's columns; convert nothing.
 
-    ``check_value_for_column`` for each, after the column is found.
+    Call ``check_value_for_column`` after finding each column. For now, refuse float
+    equality values the column cannot hold exactly (ITL-1480).
 
     Args:
         conditions: Column name to value.
@@ -671,12 +758,157 @@ def check_equality_conditions(
             f"Columns: {schema.names}"
         )
     for column, value in conditions.items():
-        arrow_type = schema.field(column).type
         try:
-            check_value_for_column(value, arrow_type)
+            check_value_for_column(value, schema.field(column), require_exact=True)
         except TypeError as exc:
             raise TypeError(f"column {column!r} {exc}") from exc
     return dict(conditions)
+
+
+def is_range_type(arrow_type: pa.DataType) -> bool:
+    """Return whether a source's restriction takes a range of a column of ``arrow_type``.
+
+    Integers of every width, timestamps of every unit and zone, and dates: the table
+    system orders their values as Orcapod does. Float ranges are refused for now
+    (ITL-1477) because SpiralDB uses IEEE 754 total order. Strings and binary follow
+    the table system's collation. Use ``filter`` for these ranges.
+
+    Args:
+        arrow_type: The column's Arrow type.
+
+    Returns:
+        Whether a range of the column can be a restriction.
+    """
+    return (
+        pa.types.is_integer(arrow_type)
+        or pa.types.is_timestamp(arrow_type)
+        or pa.types.is_date(arrow_type)
+    )
+
+
+_RESTRICTION_FORMS = (
+    "where takes equalities (column=value) and ranges (col(c) >= a, col(c) < b, "
+    "col(c).between(a, b)), all of which must hold"
+)
+_TO_FILTER = (
+    "Filter the stream instead, as a step of the pipeline: source.filter(...) with the "
+    "same condition"
+)
+
+
+def check_restriction(condition: Condition, schema: pa.Schema) -> None:
+    """Check a source's restriction against its table's columns; convert nothing.
+
+    A restriction is applied by the table system, so it takes only what the table
+    system tests as Orcapod would: a column equal to a value, and a range (``<``,
+    ``<=``, ``>``, ``>=``; ``between`` is two of them) of an integer, timestamp or date
+    column (``is_range_type``). All must hold. A column equals one value; ranges add
+    up and may select no row. Every value passes ``check_value_for_column``: exactly
+    of its column's Python type (or an int for a plain float column), held exactly by its
+    column's Arrow type. The refusal of inexact float equalities holds for now and
+    will be revisited in ITL-1480.
+
+    Args:
+        condition: The condition.
+        schema: The table's columns (system columns removed).
+
+    Raises:
+        ValueError: If a column is not in the table, or must equal two values.
+        TypeError: If the condition holds anything else, a range names a column of
+            another type, a value is not of its column's type or does not fit it,
+            or a column is to equal ``-0.0`` or a NaN (``check_float_equalities``).
+    """
+    terms: list[Term] = []
+    for node in condition.root.children:
+        if not (
+            isinstance(node, Term)
+            and not node.path.fields
+            and not isinstance(node.value, ColumnOperand)
+            and (node.operator == EQUALS or node.operator in ORDER_COMPARISONS)
+        ):
+            raise TypeError(
+                f"{_RESTRICTION_FORMS}; {condition} has others. {_TO_FILTER}"
+            )
+        terms.append(node)
+    unknown = list(
+        dict.fromkeys(t.path.column for t in terms if t.path.column not in schema.names)
+    )
+    if unknown:
+        raise ValueError(
+            f"where names columns that the table does not have: {unknown}. "
+            f"Columns: {schema.names}"
+        )
+    equal_to: dict[str, object] = {}
+    for term in terms:
+        column, value = term.path.column, term.value
+        field = schema.field(column)
+        if term.operator != EQUALS and not is_range_type(field.type):
+            raise TypeError(
+                f"column {column!r} holds {field.type}; where takes a range of an "
+                f"integer, timestamp or date column only. {_TO_FILTER}"
+            )
+        try:
+            check_value_for_column(value, field, require_exact=True)
+        except TypeError as exc:
+            raise TypeError(f"column {column!r} {exc}") from exc
+        if term.operator != EQUALS:
+            continue
+        check_float_equalities({column: value})
+        held = equal_to.setdefault(column, value)
+        if not _same_condition_value(held, value):
+            raise ValueError(
+                f"column {column!r} is already restricted to {held!r}; it cannot "
+                f"also equal {value!r} (a source reads one value per column; filter "
+                "the stream to state a condition that holds for no row)"
+            )
+
+
+def _matched_by_bits(value: object) -> bool:
+    """Return whether ``value`` is a float the table system and Orcapod match apart."""
+    return isinstance(value, float) and (
+        math.isnan(value) or (value == 0.0 and math.copysign(1.0, value) < 0)
+    )
+
+
+def check_float_equalities(
+    *conditions: Mapping[str, object] | Condition | None, **columns: object
+) -> None:
+    """For now, refuse equality to ``-0.0`` or NaN before merging (ITL-1480).
+
+    Orcapod counts ``-0.0`` equal to ``0.0`` and NaN equal to NaN, so ``Condition.of``
+    and ``combined`` keep one of two such values; SpiralDB matches a float by its bits
+    (``-0.0`` only ``-0.0``, a NaN only its own bit pattern). The rows read would then
+    depend on which of two equal values was kept, so neither is taken. Checked on the
+    arguments as given (each mapping, each condition's top-level equalities, the
+    keywords), since merging may already have dropped one; every other float
+    equality is handled as before. Float ranges are refused for now by
+    ``check_restriction`` (ITL-1477).
+
+    Args:
+        *conditions: The mappings and conditions given to ``where``.
+        **columns: The keywords given to ``where``.
+
+    Raises:
+        TypeError: If a column is to equal ``-0.0`` or a NaN.
+    """
+    given: list[tuple[object, object]] = list(columns.items())
+    for argument in conditions:
+        if isinstance(argument, Condition):
+            given.extend(
+                (node.path.column, node.value)
+                for node in argument.root.children
+                if isinstance(node, Term) and node.operator == EQUALS
+            )
+        elif isinstance(argument, Mapping):
+            given.extend(argument.items())
+    for column, value in given:
+        if _matched_by_bits(value):
+            raise TypeError(
+                f"column {column!r}: where takes no equality to {value!r}. SpiralDB "
+                "matches -0.0 and NaN by their bits, while Orcapod counts -0.0 equal "
+                "to 0.0 and NaN equal to NaN, so which rows are read would depend on "
+                f"which of two equal values was kept (ITL-1480). {_TO_FILTER}"
+            )
 
 
 # -----------------------------------------------------------------------------
@@ -956,7 +1188,7 @@ class Condition:
     not. ``Condition.of`` builds the equalities ``where()`` takes; ``col(name)`` builds
     the rest; ``&``, ``|`` and ``~`` combine conditions. It knows nothing of a source, a
     limit or an identity. A source uses one to choose which of its rows are read
-    (``SpiralDBTableSource.where``, ITL-1218: equalities only), a restriction in no hash;
+    (``SpiralDBTableSource.where``: equalities and ranges), a restriction in no hash;
     the ``Filter`` operator takes one as a step of the pipeline, its identity the
     condition's ``canonical_form()`` (ITL-1374).
 
@@ -1016,6 +1248,7 @@ class Condition:
     @classmethod
     def of(
         cls,
+        /,
         *conditions: Mapping[str, object] | Condition | None,
         **columns: object,
     ) -> Condition:
@@ -1135,7 +1368,7 @@ class Condition:
 
     @property
     def only_equalities(self) -> bool:
-        """Whether every requirement is a column equal to a value (``where`` takes only these).
+        """Whether every requirement is a column equal to a value.
 
         True for the empty condition. A field of a struct, or a comparison of two
         columns, is not an equality in this sense.
@@ -1302,7 +1535,9 @@ class Condition:
     def to_config(self) -> dict[str, object]:
         """Return the condition as it is saved, JSON-ready.
 
-        Only equalities: column name to value, as before (a date, datetime or bytes value
+        In canonical order (the order ``canonical_form`` sorts the requirements), so
+        equal conditions are saved alike, whatever order they were given in (ITL-998).
+        Only equalities: column name to value (a date, datetime or bytes value
         written as ``{"date": iso}``, ``{"datetime": iso}`` or ``{"bytes": hex}``, a NaN
         or infinite float as ``{"float": "nan"}``, ``{"float": "inf"}`` or
         ``{"float": "-inf"}``, any other value as it is). Anything else: one key,
@@ -1318,8 +1553,9 @@ class Condition:
         if not self.only_equalities:
             return {_TREE_KEY: _node_to_config(self._root)}
         return {
-            column: _condition_value_to_config(value)
-            for column, value in self.equalities.items()
+            node.path.column: _condition_value_to_config(node.value)
+            for node in _canonically_sorted(self._root.children)
+            if isinstance(node, Term)
         }
 
     @classmethod

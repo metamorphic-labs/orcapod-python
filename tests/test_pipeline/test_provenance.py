@@ -223,7 +223,7 @@ def test_shared_memoized_result_is_traced_exactly(tmp_path: Path) -> None:
     # u0 and u2 have equal inputs: one stored result, two entries, two records.
     assert unit_runs["u0"] is not None and unit_runs["u2"] is not None
     assert unit_runs["u0"].result_id == unit_runs["u2"].result_id
-    assert unit_runs["u0"].entry_id != unit_runs["u2"].entry_id
+    assert unit_runs["u0"].record_id != unit_runs["u2"].record_id
     assert {unit_runs["u0"].computed_here, unit_runs["u2"].computed_here} == {
         True,
         False,
@@ -265,28 +265,18 @@ def test_trace_through_a_batch(tmp_path: Path, mode: str) -> None:
     job = build(tmp_path, fold="batch")
     run(job, mode)
     held = job.nodes["means"].as_table().to_pylist()
-    # Batch keeps every tag, list-valued: the first batch's tags select it.
-    first = held[0]
-    trace = job.nodes["means"].trace(
-        {
-            "unit": first["unit"],
-            "session": first["session"],
-            "subject": first["subject"],
-        },
-        "mean_hz",
-    )
+    # The singleton remainder can appear first in the held results.
+    full_batch = next(row for row in held if len(row["unit"]) == 2)
+    tags = {name: full_batch[name] for name in ("unit", "session", "subject")}
+    trace = job.nodes["means"].trace(tags, "mean_hz")
     members = [s for s in trace.root.walk() if s.node == "unit_rates"]
     assert [m.member for m in members] == [0, 1]
-    assert [dict(m.tags)["unit"] for m in members] == first["unit"]
+    assert [dict(m.tags)["unit"] for m in members] == full_batch["unit"]
     # The selection feeding means (by structure: numbered labels follow hashes).
     selection = job.nodes["means"].upstreams[0].label
     grouped = [s for s in trace.root.walk() if s.node == selection]
     held_batch = job.nodes[selection].as_table().to_pylist()
-    (batch,) = [
-        b
-        for b in held_batch
-        if b["unit"] == first["unit"] and b["session"] == first["session"]
-    ]
+    (batch,) = [b for b in held_batch if all(b[name] == v for name, v in tags.items())]
     assert [m.value for m in members] == batch["rate_hz"]
     assert len(grouped) == 1
 
@@ -470,11 +460,11 @@ def test_reader_keeps_the_nodes_own_entries(tmp_path: Path) -> None:
     theirs, _ = other.nodes["unit_rates"]._stored_provenance()
     assert mine is not None and theirs is not None
     assert mine.num_rows == theirs.num_rows == 5
-    assert set(mine.column("__pipeline_entry_id").to_pylist()).isdisjoint(
-        theirs.column("__pipeline_entry_id").to_pylist()
+    assert set(mine.column("__pipeline_record_id").to_pylist()).isdisjoint(
+        theirs.column("__pipeline_record_id").to_pylist()
     )
     for column in (
-        "__pipeline_base_entry_id",
+        "__pipeline_instance_id",
         "__node_content_hash",
         "__computed",
         "__input_data_hash",

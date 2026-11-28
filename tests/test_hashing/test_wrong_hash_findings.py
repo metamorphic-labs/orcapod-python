@@ -698,7 +698,7 @@ class TestRecordIdType:
             """Return the sorted stored operator-cache keys of a node."""
             # The cache table is the node's path plus its layout component (ITL-944).
             (path,) = db.list_sources()
-            assert path == node.node_identity_path + ("odb_v1",)
+            assert path == node.node_identity_path + ("odb_v2",)
             table = db.get_all_records(path, record_id_column="_record_hash")
             return sorted(table.column("_record_hash").to_pylist())
 

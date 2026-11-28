@@ -12,6 +12,8 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
+    require_custom_system_tags,
+    require_supported_nullable_types,
 )
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -78,6 +80,9 @@ class DataFrameSource(RootSource):
 
         tag_columns = _normalize_column_list(tag_columns)
 
+        require_supported_nullable_types(
+            polars_data_utils.get_system_columns(df).to_arrow().schema
+        )
         df = polars_data_utils.drop_system_columns(df)
 
         missing = set(tag_columns) - set(df.columns)
@@ -86,10 +91,13 @@ class DataFrameSource(RootSource):
 
         arrow_table = df.to_arrow()
         if schema is not None:
+            require_supported_nullable_types(schema)
+            require_custom_system_tags(arrow_table, system_tag_columns, schema=schema)
             arrow_table = arrow_table.cast(schema)
         else:
             # Polars defaults all fields to nullable=True; infer the correct
             # flags from the actual data before passing to the builder.
+            require_supported_nullable_types(arrow_table.schema)
             arrow_table = arrow_table.cast(
                 arrow_utils.infer_schema_nullable(arrow_table)
             )
