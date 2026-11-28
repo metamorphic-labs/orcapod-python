@@ -2,7 +2,7 @@
 
 ``pod(a, b)`` is the convenient call: the inputs are joined as before and, when the joined
 stream carries data columns that are not parameters of the function, one automatic
-``SelectDataColumns`` is placed between the join and the pod. ``pod(a, b, strict=True)`` and
+``SelectDataColumns`` is placed between the join and the pod. ``pod(a, b, strict_columns=True)`` and
 ``pod.process(a, b)`` are exact: an extra column is an error.
 
 Every test drives the public interface.
@@ -277,7 +277,7 @@ _JOINED_CONTENT_HASH = (
 def test_matching_inputs_build_the_pipeline_they_built_before() -> None:
     """With nothing to drop, all three calls give the stream ``pod(a, b)`` gave before."""
     convenient = add.pod(_xs(), _ys())
-    strict = add.pod(_xs(), _ys(), strict=True)
+    strict = add.pod(_xs(), _ys(), strict_columns=True)
     exact = add.pod.process(_xs(), _ys())
 
     _assert_same_stream(convenient, exact)
@@ -328,10 +328,16 @@ def test_matching_input_adds_no_select_node_to_a_job() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_strict_call_rejects_an_extra_column() -> None:
-    """``strict=True`` raises the error ``process`` raises."""
+def test_strict_columns_call_rejects_an_extra_column() -> None:
+    """``strict_columns=True`` raises the error ``process`` raises."""
     with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
-        add.pod(_wide(), strict=True)
+        add.pod(_wide(), strict_columns=True)
+
+
+def test_call_rejects_the_old_strict_keyword() -> None:
+    """The renamed option is the only keyword for exact column validation."""
+    with pytest.raises(TypeError, match="unexpected keyword argument 'strict'"):
+        add.pod(_wide(), strict=True)  # pyright: ignore[reportCallIssue]
 
 
 def test_process_rejects_an_extra_column() -> None:
@@ -340,13 +346,13 @@ def test_process_rejects_an_extra_column() -> None:
         add.pod.process(_wide())
 
 
-def test_process_takes_no_strict_argument() -> None:
-    """``process`` has no ``strict`` argument: it is always strict."""
+def test_process_takes_no_strict_columns_argument() -> None:
+    """``process`` has no ``strict_columns`` argument: it is always strict."""
     with pytest.raises(TypeError):
-        add.pod.process(_wide(), strict=False)  # pyright: ignore[reportCallIssue]
+        add.pod.process(_wide(), strict_columns=False)  # pyright: ignore[reportCallIssue]
 
 
-@pytest.mark.parametrize("mode", ["convenient", "strict", "process"])
+@pytest.mark.parametrize("mode", ["convenient", "strict_columns", "process"])
 def test_missing_required_column_is_an_error_in_every_mode(mode: str) -> None:
     """A parameter without a default must have a column, however the pod is applied.
 
@@ -356,8 +362,8 @@ def test_missing_required_column_is_an_error_in_every_mode(mode: str) -> None:
     with pytest.raises(ValueError, match="'y'"):
         if mode == "convenient":
             add.pod(_xs(extra=1))
-        elif mode == "strict":
-            add.pod(_xs(), strict=True)
+        elif mode == "strict_columns":
+            add.pod(_xs(), strict_columns=True)
         else:
             add.pod.process(_xs())
 
@@ -455,7 +461,7 @@ def test_misspelt_column_for_a_defaulted_parameter_is_dropped_and_logged(
     assert len(records) == 1
     assert "'Y'" in records[0].getMessage()
     with pytest.raises(ValueError, match="column 'Y' is not a parameter"):
-        add_default.pod(misspelt, strict=True)
+        add_default.pod(misspelt, strict_columns=True)
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +491,7 @@ def test_function_with_invocation_context_drops_unused_columns() -> None:
 
     _assert_same_stream(automatic, by_hand)
     with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
-        add_with_ctx.pod(_wide(), strict=True)
+        add_with_ctx.pod(_wide(), strict_columns=True)
 
 
 def test_cached_function_pod_drops_unused_columns() -> None:
@@ -506,7 +512,7 @@ def test_cached_function_pod_drops_unused_columns() -> None:
     assert [(row["k"], row["total"]) for row in _rows(by_hand)] == [(1, 5), (2, 9)]
     assert [row["total"] for row in _rows(automatic)] == [5, 9]
     with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
-        cached(_wide(), strict=True)
+        cached(_wide(), strict_columns=True)
     with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
         cached.process(_wide())
 
@@ -528,6 +534,8 @@ def test_decorator_cached_pod_drops_unused_columns() -> None:
         return x + y
 
     assert [row["total"] for row in _rows(cached_add.pod(_wide()))] == [5, 9]
+    with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
+        _ = cached_add.pod(_wide(), strict_columns=True)
 
 
 def test_wrapped_function_pod_drops_unused_columns() -> None:
@@ -539,7 +547,7 @@ def test_wrapped_function_pod_drops_unused_columns() -> None:
 
     _assert_same_stream(automatic, by_hand)
     with pytest.raises(ValueError, match="column 'extra' is not a parameter"):
-        wrapped(_wide(), strict=True)
+        wrapped(_wide(), strict_columns=True)
 
 
 def test_function_taking_arbitrary_keywords_gets_no_select() -> None:
@@ -566,7 +574,7 @@ def test_function_taking_arbitrary_keywords_gets_no_select() -> None:
         pod(_wide())
 
 
-def test_other_pods_take_no_strict_argument() -> None:
+def test_other_pods_take_no_strict_columns_argument() -> None:
     """Operators and side-effect pods keep ``__call__`` as an alias of ``process``."""
 
     def record(x: int, y: int, extra: int, ctx: InvocationContext) -> None:
@@ -582,9 +590,9 @@ def test_other_pods_take_no_strict_argument() -> None:
     pod = SideEffectPod(record)
 
     with pytest.raises(TypeError):
-        pod(_wide(), strict=False)  # pyright: ignore[reportCallIssue]
+        pod(_wide(), strict_columns=False)  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
-        Join()(_xs(), _ys(), strict=False)
+        Join()(_xs(), _ys(), strict_columns=False)
     assert tuple(pod(_wide()).keys()[1]) == ("x", "y", "extra")
 
 

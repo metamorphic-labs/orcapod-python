@@ -98,13 +98,13 @@ def _wide_source() -> DictSource:
     )
 
 
-@pytest.mark.parametrize("call", ["process", "strict"])
+@pytest.mark.parametrize("call", ["process", "strict_columns"])
 def test_extra_column_error_names_the_column_and_logs_nothing(
     caplog: pytest.LogCaptureFixture, call: str
 ) -> None:
     """An extra column raises one error naming it, with no log line and no "data data".
 
-    The exact calls raise it: ``pod.process(stream)`` and ``pod(stream, strict=True)``.
+    The exact calls raise it: ``pod.process(stream)`` and ``pod(stream, strict_columns=True)``.
     A plain ``pod(stream)`` drops the extra column instead (ITL-807).
 
     Args:
@@ -115,7 +115,7 @@ def test_extra_column_error_names_the_column_and_logs_nothing(
         if call == "process":
             compute_bmi.pod.process(_wide_source())
         else:
-            compute_bmi.pod(_wide_source(), strict=True)
+            compute_bmi.pod(_wide_source(), strict_columns=True)
 
     message = str(excinfo.value)
     assert "data data" not in message

@@ -837,15 +837,15 @@ convenient call and `pod.process(a, b)` the exact primitive:
   must equal those of a pipeline with that select written by hand (the stream's
   `select_data_columns` method builds the same operator, and `a.join(b)` the same `Join`).
   Nothing to drop means no step. One info log names the dropped columns; it is not a warning.
-- `pod(a, b, strict=True)` and `pod.process(a, b)` reject an extra column. `strict` is part of
-  no identity. `process` never takes a `strict` argument and never drops a column.
+- `pod(a, b, strict_columns=True)` and `pod.process(a, b)` reject an extra column.
+  `strict_columns` is part of no identity. `process` always uses the exact column contract.
 - A missing required column is an error in every form. Tags are never dropped. A data column
   shared by two inputs fails at the join, used or not: no special handling.
 - No select is added when the data function's `accepts_arbitrary_keywords` is true (no kind
   today; `PythonDataFunction` rejects `**kwargs`).
 - Function pods only. An operator's and a `SideEffectPod`'s `__call__` stay aliases of
-  `process` with no `strict` argument. There is no global setting.
-- A test of the exact input contract uses `process` or `strict=True`.
+  `process` with no `strict_columns` argument. There is no global setting.
+- A test of the exact input contract uses `process` or `strict_columns=True`.
 
 **Operator** (`core/operators/`) — structural pod transforming streams without adding or
 synthesizing data; it may add a tag (`AddTags`). All subclass `StaticOutputPod`:
