@@ -73,6 +73,9 @@ from orcapod.utils import arrow_utils
 pytestmark = [
     pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning"),
     pytest.mark.filterwarnings("ignore::orcapod.errors.RejoinDifferingColumnWarning"),
+    # PolarsFilter is built here on purpose; the warning of every construction is tested in
+    # test_polars_filter_warning.py (ITL-1296).
+    pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning"),
 ]
 
 Row: TypeAlias = tuple[TagProtocol, DataProtocol]

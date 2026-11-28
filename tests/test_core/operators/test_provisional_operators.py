@@ -24,6 +24,10 @@ from orcapod.operators import PolarsFilter
 from orcapod.sources import ArrowTableSource
 from orcapod.utils.provisional import recording_provisional_uses
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 
 @pytest.fixture(autouse=True)
 def fresh_process() -> Iterator[None]:
