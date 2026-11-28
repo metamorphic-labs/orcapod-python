@@ -1,17 +1,17 @@
 """
 Tests for DerivedSource — Phase 6 of the redesign.
 
-DerivedSource is returned by FunctionNode.as_source() and presents the
+DerivedSource is returned by FunctionJobNode.as_source() and presents the
 DB-computed results of a FunctionNode as a static, reusable stream.
 
 Coverage:
-- Construction via FunctionNode.as_source()
+- Construction via FunctionJobNode.as_source()
 - Protocol conformance: RootSource, StreamProtocol, PipelineElementProtocol
 - source == None, upstreams == () (pure stream, no upstream pod)
 - iter_data() and as_table() return empty results before run()
 - Correct data after FunctionNode.run()
 - output_schema() and keys() delegate to origin FunctionNode
-- content_hash() tied to origin FunctionNode's content hash
+- content_hash() uses the full source id and schema
 - Same-origin DerivedSources share content_hash
 - pipeline_hash() is schema-only (RootSource base case)
 - Different-data same-schema DerivedSources share pipeline_hash but differ in content_hash
@@ -62,28 +62,28 @@ def _make_node(n: int = 3, db: InMemoryArrowDatabase | None = None) -> FunctionJ
 class TestDerivedSourceConstruction:
     def test_as_source_returns_derived_source(self):
         node = _make_node(n=3)
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         assert isinstance(src, DerivedSource)
 
     def test_derived_source_is_root_source(self):
-        src = _make_node(n=3).as_source()
+        src = _make_node(n=3).as_source(source_id="stored")
         assert isinstance(src, RootSource)
 
     def test_derived_source_is_stream_protocol(self):
-        src = _make_node(n=3).as_source()
+        src = _make_node(n=3).as_source(source_id="stored")
         assert isinstance(src, StreamProtocol)
 
     def test_derived_source_is_pipeline_element_protocol(self):
-        src = _make_node(n=3).as_source()
+        src = _make_node(n=3).as_source(source_id="stored")
         assert isinstance(src, PipelineElementProtocol)
 
     def test_producer_is_none(self):
         """DerivedSource is a root stream — source returns None."""
-        src = _make_node(n=3).as_source()
+        src = _make_node(n=3).as_source(source_id="stored")
         assert src.producer is None
 
     def test_upstreams_is_empty(self):
-        src = _make_node(n=3).as_source()
+        src = _make_node(n=3).as_source(source_id="stored")
         assert src.upstreams == ()
 
 
@@ -94,24 +94,24 @@ class TestDerivedSourceConstruction:
 
 class TestDerivedSourceBeforeRun:
     def test_iter_data_empty_before_run(self):
-        src = _make_node(n=3).as_source()
+        src = _make_node(n=3).as_source(source_id="stored")
         assert list(src.iter_data()) == []
 
     def test_as_table_empty_before_run(self):
-        src = _make_node(n=3).as_source()
+        src = _make_node(n=3).as_source(source_id="stored")
         table = src.as_table()
         assert table.num_rows == 0
 
     def test_empty_table_has_correct_columns_before_run(self):
         node = _make_node(n=3)
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         table = src.as_table()
         assert "id" in table.column_names
         assert "result" in table.column_names
 
     def test_empty_table_schema_matches_origin(self):
         node = _make_node(n=3)
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         tag_schema, data_schema = src.output_schema()
         _ = src.as_table()
         assert "id" in tag_schema
@@ -128,7 +128,7 @@ class TestDerivedSourceAfterRun:
     def src(self) -> DerivedSource:
         node = _make_node(n=4)
         node.run()
-        return node.as_source()
+        return node.as_source(source_id="stored")
 
     def test_iter_data_yields_correct_count(self, src):
         assert len(list(src.iter_data())) == 4
@@ -178,7 +178,7 @@ class TestDerivedSourceRoundTrip:
         node_results = sorted(cast(int, p["result"]) for _, p in node.iter_data())
 
         # Now get via DerivedSource
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         src_results = sorted(cast(int, p["result"]) for _, p in src.iter_data())
 
         assert node_results == src_results
@@ -186,7 +186,7 @@ class TestDerivedSourceRoundTrip:
     def test_derived_source_tag_schema_matches_node(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         node_tag_schema, _ = node.output_schema()
         src_tag_schema, _ = src.output_schema()
         assert node_tag_schema == src_tag_schema
@@ -194,7 +194,7 @@ class TestDerivedSourceRoundTrip:
     def test_derived_source_data_schema_matches_node(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         _, node_data_schema = node.output_schema()
         _, src_data_schema = src.output_schema()
         assert node_data_schema == src_data_schema
@@ -205,7 +205,7 @@ class TestDerivedSourceRoundTrip:
 
         node1 = _make_node(n=3)
         node1.run()
-        src = node1.as_source()
+        src = node1.as_source(source_id="stored")
 
         # Build a second node that reads the result column as input.
         # Use a fresh DB so node2 computes cleanly without inheriting node1's records.
@@ -247,7 +247,7 @@ class TestDerivedSourceSchema:
     def test_output_schema_returns_two_mappings(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         tag_schema, data_schema = src.output_schema()
         assert isinstance(tag_schema, Mapping)
         assert isinstance(data_schema, Mapping)
@@ -255,35 +255,35 @@ class TestDerivedSourceSchema:
     def test_output_schema_tag_has_id(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         tag_schema, _ = src.output_schema()
         assert "id" in tag_schema
 
     def test_output_schema_data_has_result(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         _, data_schema = src.output_schema()
         assert "result" in data_schema
 
     def test_keys_tag_has_id(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         tag_keys, _ = src.keys()
         assert "id" in tag_keys
 
     def test_keys_data_has_result(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         _, data_keys = src.keys()
         assert "result" in data_keys
 
     def test_keys_consistent_with_output_schema(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         tag_keys, data_keys = src.keys()
         tag_schema, data_schema = src.output_schema()
         assert set(tag_keys) == set(tag_schema.keys())
@@ -299,35 +299,21 @@ class TestDerivedSourceIdentity:
     def test_content_hash_is_stable(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         assert src.content_hash() == src.content_hash()
 
     def test_same_origin_same_content_hash(self):
         """Two DerivedSources from the same node have the same content_hash."""
         node = _make_node(n=3)
         node.run()
-        src1 = node.as_source()
-        src2 = node.as_source()
+        src1 = node.as_source(source_id="stored")
+        src2 = node.as_source(source_id="stored")
         assert src1.content_hash() == src2.content_hash()
-
-    def test_content_hash_tied_to_origin(self):
-        """DerivedSource content_hash is derived from origin FunctionNode's content_hash."""
-        db = InMemoryArrowDatabase()
-        node = _make_node(n=3, db=db)
-        node.run()
-        src = node.as_source()
-        # The DerivedSource identity_structure wraps origin.content_hash()
-        # so its content_hash depends on the node's content_hash
-        # (changing data → different node content_hash → different src content_hash)
-        node_different_data = _make_node(n=5, db=InMemoryArrowDatabase())
-        node_different_data.run()
-        src_different = node_different_data.as_source()
-        assert src.content_hash() != src_different.content_hash()
 
     def test_pipeline_hash_is_stable(self):
         node = _make_node(n=3)
         node.run()
-        src = node.as_source()
+        src = node.as_source(source_id="stored")
         assert src.pipeline_hash() == src.pipeline_hash()
 
     def test_pipeline_hash_is_schema_only(self):
@@ -340,8 +326,8 @@ class TestDerivedSourceIdentity:
         node_a.run()
         node_b = _make_node(n=7)  # same schema, different data count
         node_b.run()
-        src_a = node_a.as_source()
-        src_b = node_b.as_source()
+        src_a = node_a.as_source(source_id="stored")
+        src_b = node_b.as_source(source_id="stored")
         # Same output schema → same pipeline_hash
         assert src_a.pipeline_hash() == src_b.pipeline_hash()
 
@@ -356,7 +342,7 @@ class TestDerivedSourceIdentity:
         db = InMemoryArrowDatabase()
         node_double = _make_node(n=3, db=db)
         node_double.run()
-        src_double = node_double.as_source()
+        src_double = node_double.as_source(source_id="stored")
 
         node_triple = FunctionJobNode(
             function_pod=FunctionPod(data_function=triple_pf),
@@ -364,16 +350,12 @@ class TestDerivedSourceIdentity:
             pipeline_database=db,
         )
         node_triple.run()
-        src_triple = node_triple.as_source()
+        src_triple = node_triple.as_source(source_id="stored")
 
         assert src_double.pipeline_hash() != src_triple.pipeline_hash()
 
-    def test_same_data_different_origin_content_hash_differs(self):
-        """
-        Two FunctionNodes processing the same data but using different DB instances
-        should still produce DerivedSources with the same content_hash (since
-        content_hash depends on function + input stream, not the DB).
-        """
+    def test_same_named_source_hashes_match_across_databases(self):
+        """Equal named source identities agree across database instances."""
         from orcapod.core.data_function import PythonDataFunction
 
         pf = PythonDataFunction(double, output_keys="result")
@@ -391,8 +373,10 @@ class TestDerivedSourceIdentity:
         )
         node_a.run()
         node_b.run()
-        # Same function + same input stream → same content_hash → same DerivedSource content_hash
-        assert node_a.as_source().content_hash() == node_b.as_source().content_hash()
+        assert (
+            node_a.as_source(source_id="stored").content_hash()
+            == node_b.as_source(source_id="stored").content_hash()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -401,40 +385,6 @@ class TestDerivedSourceIdentity:
 
 
 class TestDerivedSourceId:
-    def test_source_id_is_set(self):
-        node = _make_node(n=3)
-        src = node.as_source()
-        # Should not raise
-        assert isinstance(src.source_id, str)
-
-    def test_source_id_has_no_pipeline_path(self):
-        node = _make_node(n=3)
-        src = node.as_source()
-        # The default is derived_v1:<label>:<hex>; the node path is not part of it
-        # (ITL-957, ITL-1425).
-        assert "/" not in src.source_id
-        assert src.source_id == f"derived_v1:{node.content_hash().to_string()}"
-
-    def test_source_id_contains_full_content_hash(self):
-        node = _make_node(n=3)
-        src = node.as_source()
-        full_hash = node.content_hash().to_string()
-        # A default source id built from a hash keeps the hash's label.
-        assert src.source_id.endswith(f":{full_hash}")
-
-    def test_different_nodes_different_source_ids(self):
-        node_a = _make_node(n=3)
-        node_b = _make_node(n=5)
-        src_a = node_a.as_source()
-        src_b = node_b.as_source()
-        assert src_a.source_id != src_b.source_id
-
-    def test_same_node_same_source_id(self):
-        node = _make_node(n=3)
-        src_a = node.as_source()
-        src_b = node.as_source()
-        assert src_a.source_id == src_b.source_id
-
     def test_explicit_source_id_overrides_default(self):
         node = _make_node(n=3)
         src = DerivedSource(
@@ -451,7 +401,9 @@ def test_derived_source_empty_cache_preserves_nullability():
     """
     # _make_node() builds a FunctionJobNode with data output "result: int" (required).
     node = _make_node()
-    source = node.as_source()  # DerivedSource backed by unrun node → empty cache
+    source = node.as_source(
+        source_id="stored"
+    )  # DerivedSource backed by unrun node → empty cache
 
     # as_table() triggers _get_stream() which hits the empty-cache branch
     table = source.as_table()

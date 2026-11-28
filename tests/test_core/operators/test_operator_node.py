@@ -407,14 +407,14 @@ class TestOperatorNodeDerivedSource:
         op = MapData({"x": "renamed_x"})
         node = _make_node(op, (simple_stream,), db=db, cache_mode=CacheMode.LOG)
         node.run()
-        source = node.as_source()
+        source = node.as_source(source_id="stored")
         assert isinstance(source, DerivedSource)
 
     def test_as_source_round_trip(self, simple_stream, db):
         op = MapData({"x": "renamed_x"})
         node = _make_node(op, (simple_stream,), db=db, cache_mode=CacheMode.LOG)
         node.run()
-        source = node.as_source()
+        source = node.as_source(source_id="stored")
         # iter_data should yield the same data
         data = list(source.iter_data())
         assert len(data) == 3
@@ -423,13 +423,13 @@ class TestOperatorNodeDerivedSource:
         op = MapData({"x": "renamed_x"})
         node = _make_node(op, (simple_stream,), db=db, cache_mode=CacheMode.LOG)
         node.run()
-        source = node.as_source()
+        source = node.as_source(source_id="stored")
         assert source.output_schema() == node.output_schema()
 
     def test_as_source_before_run_returns_empty(self, simple_stream, db):
         op = MapData({"x": "renamed_x"})
         node = _make_node(op, (simple_stream,), db=db, cache_mode=CacheMode.LOG)
-        source = node.as_source()
+        source = node.as_source(source_id="stored")
         # Before run, DerivedSource returns an empty stream (zero rows)
         assert list(source.iter_data()) == []
         table = source.as_table()

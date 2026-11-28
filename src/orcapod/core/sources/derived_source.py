@@ -17,7 +17,7 @@ from typing_extensions import override
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
-from orcapod.core.sources.source_ids import hash_source_name
+from orcapod.core.sources.source_ids import derived_source_name
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
@@ -142,7 +142,9 @@ class DerivedSource(RootSource):
         - ``pipeline_hash`` is schema-only, as for every root source.
 
     Identity (plain form):
-        - ``content_hash`` is tied to the origin node's content hash.
+        - ``content_hash`` follows the root source rule: the full source id,
+          the Arrow schema identity and the empty key tuple. The default source
+          id includes the job path and the origin's content hash (ITL-1564).
         - ``pipeline_hash`` is schema-only, so plain derived sources with
           identical schemas share the same pipeline DB table.
 
@@ -155,17 +157,16 @@ class DerivedSource(RootSource):
     (the marker of ``data_tags``), which must be the node's own (a name in
     both halves of its keys); a table that disagrees is refused. Over a source they
     are the source's own. A ``tags_as_data`` copy of a data-tag is a new,
-    plain data column. Nothing is added to the identity for the binding, because it
-    is already there: the plain form's ``content_hash`` is the origin's, which carries
-    it, and every ``pipeline_hash`` and the ``tags_as_data`` form's ``content_hash``
-    hash the output schema, in which a data-tag is in both halves.
+    plain data column. Both forms hash the output schema, in which a data-tag
+    appears in both the tag and data halves.
 
     Args:
         origin: The source or DB-backed job node to derive from.
         source_id: The source's name; its id is ``derived_v1:<name>`` (ITL-1425).
-            Required with ``tags_as_data``; the plain form defaults the name to
-            ``<algorithm label>:<hex>`` of the origin's content hash, so its id is
-            ``derived_v1:semantic_v1:<hex>``.
+            Required with ``tags_as_data`` or when the origin has no usable job
+            name. The plain form defaults to
+            ``derived_v1:<job path>:<algorithm label>:<hex>``, using the origin's
+            job name and content hash.
         tags_as_data: Maps a tag column of the origin to the name of the data
             column that receives a copy of it.
         record_id_columns: Key columns whose values identify a row in record IDs and
@@ -178,8 +179,8 @@ class DerivedSource(RootSource):
         InputValidationError: If ``tags_as_data`` names a column that is not a tag
             of the origin, or a new name that is already a column, is repeated,
             or is reserved.
-        ValueError: If ``tags_as_data`` is given without a ``source_id`` (before the
-            origin is read), or ``record_id_columns`` without ``tags_as_data``.
+        ValueError: If neither an explicit name nor a default is available, or
+            ``record_id_columns`` is used without ``tags_as_data``.
         TypeError: If the origin is a source and ``tags_as_data`` is not given.
 
     Example::
@@ -284,12 +285,11 @@ class DerivedSource(RootSource):
             kwargs.setdefault("data_context", origin.data_context_key)
 
         self._explicit_source_id = source_id
-        if source_id is None:
-            # Only the plain form gets here without a source id. Its default name is
-            # the origin's content hash with its label, after the kind part
-            # (ITL-1425): ``derived_v1:<algorithm label>:<hex>``.
-            source_id = hash_source_name(origin.content_hash())
         super().__init__(source_id=source_id, **kwargs)
+        if source_id is None and not isinstance(origin, RootSource):
+            self._source_name = derived_source_name(
+                origin.job_name, origin.content_hash()
+            )
         self._origin = origin
         self._record_id_columns = key_columns
         self._key_columns = key_columns or ()
@@ -308,22 +308,19 @@ class DerivedSource(RootSource):
     def identity_structure(self) -> Any:
         """Return what the content hash is built from.
 
-        The plain form is tied to the origin node's content hash. The
-        ``tags_as_data`` form is the root source rule (``source_id``, output schema,
-        key columns) followed by the sorted mapping items: two mappings can give
-        the same schema (two tag columns of one type copied to one name) while the
-        copy holds different values, so with an explicit ``source_id`` the mapping
-        has to tell the sources apart (ITL-1000).
+        Both forms start with the root source rule: the full source id, Arrow
+        schema identity and key columns. The ``tags_as_data`` form appends the
+        sorted mapping items so two mappings with the same schema and source id
+        can still name different copies (ITL-1000).
 
         Returns:
             The identity structure.
         """
-        self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
+        identity = super().identity_structure()
         if self._tags_as_data is None:
-            # Tied precisely to the specific node's data identity
-            return (self._origin.content_hash(),)
+            return identity
         return (
-            *super().identity_structure(),
+            *identity,
             ("tags_as_data", tuple(sorted(self._tags_as_data.items()))),
         )
 

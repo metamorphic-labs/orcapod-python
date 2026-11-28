@@ -19,6 +19,9 @@ class RunHoldingNode:
     their stream base, so their ``is_stale`` covers their whole ancestry.
     """
 
+    # PipelineJob sets this on the nodes that can serve their stored rows as a source.
+    job_name: tuple[str, ...] | None = None
+
     # The summary of the node's last ``run()`` (with the nodes it ran first); a class
     # default so nodes rebuilt from a saved descriptor start without one.
     _last_run: Any = None

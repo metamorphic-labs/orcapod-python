@@ -742,7 +742,15 @@ forms: its identity may change in a later release.
 [`PipelineJob`](function-pods.md#pipelinejob-database-backed-cached-execution) that has run
 and presents them as a new source. You get one by calling `as_source()` on the node, for
 example `job.nodes["bmi"].as_source()`. This is useful for chaining pipeline stages: run a
-job, then use one of its outputs as the input of a new pipeline. The `as_source()` of a node
+job, then use one of its outputs as the input of a new pipeline.
+
+The default source id includes the job's name and the node's content hash, for example
+`derived_v1:analysis/nightly:semantic_v1:<hex>`. Job name components are joined with `/`.
+A missing or empty job name, or a name component containing `/` or `:`, requires an
+explicit `source_id`. Jobs with the same name and node content hash get the same default
+id across databases. The stored rows retain their provenance.
+
+The `as_source()` of a node
 downstream of a `Join` or `MergeJoin` of two sources cannot yet be bound as a source of a new
 `PipelineJob`: its schema is the node's, which declares a pair of system tags for each joined
 source, and binding accepts exactly one pair, so it is refused with `SourceSpecMismatchError`
@@ -858,7 +866,7 @@ print(sorted(PROVISIONAL_SOURCES))
 | Source | What is still open |
 |---|---|
 | `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the declared schema (ITL-1316); it holds the source id (ITL-1425) |
-| `DerivedSource`, both forms | the plain form (`node.as_source()`) hashes only its origin's content hash and accepts a `source_id` its identity does not use; the `tags_as_data` form changed just before this release (ITL-1317) |
+| `DerivedSource`, both forms | the plain form (`node.as_source()`) hashes its full source id, Arrow schema identity and empty key tuple (ITL-1564); the `tags_as_data` form changed just before this release (ITL-1317) |
 
 So everything built on a `DerivedSource`, whether it came from `node.as_source()` or from
 `DerivedSource(origin, tags_as_data=...)`, is provisional too: every step downstream of it

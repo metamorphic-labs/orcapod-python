@@ -16,6 +16,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
+from orcapod import PipelineJob
 from orcapod.config import HashingConfig, OrcapodConfig
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
@@ -29,6 +30,7 @@ from orcapod.core.sources import (
     ListSource,
     RootSource,
 )
+from orcapod.core.sources.source_ids import derived_source_name
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.system_constants import constants
 from orcapod.types import CacheMode
@@ -223,39 +225,105 @@ NODES = [_function_node, _operator_node]
 NODE_IDS = ["function_node", "operator_node"]
 
 
+def _job(name: str | tuple[str, ...], database: InMemoryArrowDatabase) -> PipelineJob:
+    """Compile a function and an operator over a named source."""
+    job = PipelineJob(name=name, database=database)
+    with job:
+        doubled = FunctionPod.from_fn(double, output_keys="result")(
+            _dict_source(source_id="inputs"), label="double"
+        )
+        MapData({"result": "renamed_result"})(doubled, label="rename")
+    return job
+
+
+@pytest.mark.parametrize("label", ["double", "rename"])
+def test_default_names_the_job_and_node_content(label):
+    first = _job(("project", "first"), InMemoryArrowDatabase().at("database_prefix"))
+    second = _job(("project", "second"), InMemoryArrowDatabase())
+    another_database = _job(("project", "first"), InMemoryArrowDatabase())
+    a, b, c = (job.nodes[label] for job in (first, second, another_database))
+    assert a.content_hash() == b.content_hash() == c.content_hash()
+    labelled_hash = a.content_hash().to_string()
+    derived = a.as_source()
+    assert derived.source_id == f"derived_v1:project/first:{labelled_hash}"
+    assert b.as_source().source_id == f"derived_v1:project/second:{labelled_hash}"
+    assert derived.source_id == a.as_source().source_id == c.as_source().source_id
+    assert derived.source_id == DerivedSource(a).source_id
+    assert derived.content_hash() != b.as_source().content_hash()
+    assert derived.content_hash() == c.as_source().content_hash()
+    assert derived.pipeline_hash() == b.as_source().pipeline_hash()
+
+
+@pytest.mark.parametrize("label", ["double", "rename"])
+def test_plain_content_identity_uses_the_given_source_name(label):
+    node = _job("first", InMemoryArrowDatabase()).nodes[label]
+    first = node.as_source(source_id="my:first")
+    second = node.as_source(source_id="my:second")
+    assert first.source_id == "derived_v1:my:first"
+    assert first.identity_structure() == RootSource.identity_structure(first)
+    assert first.identity_structure()[-1] == ()
+    assert first.content_hash() != second.content_hash()
+    assert first.pipeline_hash() == second.pipeline_hash()
+
+
+@pytest.mark.parametrize("label", ["double", "rename"])
+def test_save_and_load_preserve_the_default_name(tmp_path, label):
+    database = InMemoryArrowDatabase()
+    job = _job(("project", "first"), database)
+    job.run()
+    saved = tmp_path / "job.json"
+    job.save(saved)
+    loaded = PipelineJob.load(saved, database=database)
+    original = job.nodes[label].as_source()
+    restored = loaded.nodes[label].as_source()
+    assert restored.source_id == original.source_id
+    assert restored.content_hash() == original.content_hash()
+
+
+@pytest.mark.parametrize("name", [("project:part",), ()])
+def test_unsafe_job_name_requires_an_explicit_source_id(name):
+    node = _job(name, InMemoryArrowDatabase()).nodes["double"]
+    with pytest.raises(ValueError, match="give the source a source_id"):
+        node.as_source()
+    assert node.as_source(source_id="my:name").source_id == "derived_v1:my:name"
+
+
+@pytest.mark.parametrize("name", [("project/part",), ("",)])
+def test_invalid_path_components_cannot_contribute_to_a_default_id(name):
+    with pytest.raises(ValueError, match="give the source a source_id"):
+        derived_source_name(name, _function_node().content_hash())
+
+
+@pytest.mark.asyncio
+async def test_plain_source_reads_stored_rows_sync_and_async():
+    origin = DictSource(
+        data=[{"id": 1, "group": "a", "x": 10, "y": 20}],
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+        source_id="inputs",
+    )
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="stage", database=database)
+    with job:
+        MapData({"x": "renamed_x"})(origin, label="rename")
+    node = job.nodes["rename"]
+    assert isinstance(node, OperatorJobNode)
+    node.attach_databases(database.at(*job.name), cache_mode=CacheMode.LOG)
+    job.run()
+    source = node.as_source()
+    expected = list(source.iter_data())
+    assert [row async for row in source.async_iter_data()] == expected
+    assert [dict(tag) for tag, _ in expected] == [{"id": 1, "group": "a"}]
+    assert [dict(data) for _, data in expected] == [{"renamed_x": 10, "y": 20}]
+
+
 @pytest.mark.parametrize("make_node", NODES, ids=NODE_IDS)
 class TestAsSourceDefaultSourceId:
-    def test_as_source_id_is_derived_plus_the_labelled_content_hash(self, make_node):
+    def test_without_a_job_an_explicit_source_id_is_required(self, make_node):
         node = make_node()
-        assert (
-            node.as_source().source_id
-            == f"derived_v1:{node.content_hash().to_string()}"
-        )
-
-    def test_kind_is_defined_once_on_the_class(self, make_node):
-        node = make_node()
-        assert DerivedSource.SOURCE_KIND == "derived"
-        assert node.as_source().source_id.startswith(
-            f"{DerivedSource.SOURCE_KIND}_v{DerivedSource.SOURCE_VERSION}:"
-        )
-
-    def test_as_source_id_has_three_parts_and_no_node_path(self, make_node):
-        node = make_node()
-        source_id = node.as_source().source_id
-        assert len(source_id.split(":")) == 3
-        assert "/" not in source_id
-        for component in node.node_identity_path:
-            assert component not in source_id
-
-    def test_as_source_uses_the_derived_source_default(self, make_node):
-        node = make_node()
-        assert node.as_source().source_id == DerivedSource(node).source_id
-
-    def test_as_source_id_is_the_same_before_and_after_the_run(self, make_node):
-        node = make_node()
-        before = node.as_source().source_id
-        node.run()
-        assert node.as_source().source_id == before
+        with pytest.raises(ValueError, match="give the source a source_id"):
+            node.as_source()
+        assert node.as_source(source_id="my:name").source_id == "derived_v1:my:name"
 
     def test_given_name_is_never_changed(self, make_node):
         source = DerivedSource(make_node(), source_id="my:name")

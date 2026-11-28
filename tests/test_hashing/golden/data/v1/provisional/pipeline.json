@@ -49,8 +49,10 @@
     "_tag_source_id::65dce1d2f45e53ee8ca443ce84a42415855cb65e9aaf39fec732bfce77d818fc::65dce1d2f45e53ee8ca443ce84a42415855cb65e9aaf39fec732bfce77d818fc",
     "_tag_record_id::65dce1d2f45e53ee8ca443ce84a42415855cb65e9aaf39fec732bfce77d818fc::65dce1d2f45e53ee8ca443ce84a42415855cb65e9aaf39fec732bfce77d818fc"
   ],
-  "default_source_ids.as_source[function_node].source_id": "derived_v1:semantic_v1:2b0bbea125de8660f08433ab9b8083ce706f92de396aee9044243bfa24fd820c",
-  "default_source_ids.as_source[operator_node].source_id": "derived_v1:semantic_v1:d7df0467089ca4c21aa2064558f85ea884a8490141702d6b3849ae44312838fa",
+  "default_source_ids.as_source[function_node].content_hash": "semantic_v1:7e0e1aa7b7e71a6094cd86664e4323426b38b7650c83bc0ea3ff86716b2c59cb",
+  "default_source_ids.as_source[function_node].source_id": "derived_v1:golden_default_source_ids:semantic_v1:2b0bbea125de8660f08433ab9b8083ce706f92de396aee9044243bfa24fd820c",
+  "default_source_ids.as_source[operator_node].content_hash": "semantic_v1:4f9a221f505388db567386f96ec21ac8a1283f4619e4d7ec051881e8b3748969",
+  "default_source_ids.as_source[operator_node].source_id": "derived_v1:golden_default_source_ids:semantic_v1:d7df0467089ca4c21aa2064558f85ea884a8490141702d6b3849ae44312838fa",
   "filter.keyword.content_hash": "semantic_v1:08eae19ca38bebbb364b1b87f250622e3f2be6525a77b8fea2dc9e7a135de2ce",
   "filter.keyword.pipeline_hash": "semantic_v1:502dbd4f7c834033377ef48af654bbae4e4f9d3262bfd5c0a1bafc46ab7dcf53",
   "filter.keyword.row[{\"cohort\":\"a\",\"subject\":\"s1\"}]._tag_record_id::d568cb5cf0644ff50a49f2af3cb5b806e93678cbecc5999c5a8dd525ea07f192": "row_0",

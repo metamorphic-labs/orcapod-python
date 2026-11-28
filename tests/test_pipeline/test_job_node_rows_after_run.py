@@ -539,5 +539,5 @@ class TestAsyncOutputCloseFails:
         # No run is held: the node reads empty (ITL-1095); the database keeps the rows.
         assert node.head(10).status is ViewStatus.NOT_COMPUTED
         assert _values(node, lambda r: (r["k"], r["y"])) == []
-        stored = node.as_source().as_table().to_pylist()
+        stored = node.as_source(source_id="stored").as_table().to_pylist()
         assert sorted((r["k"], r["y"]) for r in stored) == [(0, 6), (1, 7)]

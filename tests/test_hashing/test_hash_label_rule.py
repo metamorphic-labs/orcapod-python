@@ -611,13 +611,11 @@ class TestNamesHoldBareDigests:
         labelled = node.content_hash().to_string()
         assert labelled.startswith("semantic_v1:")
 
-        # as_source() gives the DerivedSource default; the node path is not part
-        # of the id (ITL-957).
         from_node = node.as_source()
-        assert from_node.source_id == f"derived_v1:{labelled}"
+        assert from_node.source_id == f"derived_v1:label_rule_job:{labelled}"
 
         plain = DerivedSource(origin=node)
-        assert plain.source_id == f"derived_v1:{labelled}"
+        assert plain.source_id == from_node.source_id
 
     def test_source_info_token_of_a_function_output_holds_no_label(self) -> None:
         """A function output's source-info token starts with the bare function ``uri``."""

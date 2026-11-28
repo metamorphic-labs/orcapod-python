@@ -875,17 +875,13 @@ class TestNodeOrigin:
         stage2.run()
         assert stage2.nodes["j"].as_table().num_rows == 5
 
-    def test_plain_as_source_is_unchanged(self):
+    def test_plain_as_source_reads_the_origin_schema(self):
         job = _upper_job()
         job.run()
         node = job.nodes["upper"]
         plain = node.as_source()
         assert plain.keys() == node.keys()
-        assert plain.identity_structure() == (node.content_hash(),)
-        # No source_id is passed: the plain form takes the DerivedSource default,
-        # ``derived_v1:<algorithm label>:<hex>`` of the node's content hash (ITL-957,
-        # ITL-1425).
-        assert plain.source_id == f"derived_v1:{node.content_hash().to_string()}"
+        assert plain.source_id == f"derived_v1:stage1:{node.content_hash().to_string()}"
         assert _prefixed(plain.as_table(all_info=True), "_tag_") == []
 
 
@@ -1039,11 +1035,6 @@ class TestRequiredSourceIdOnNodes:
         assert a.keys() == b.keys()
         assert a.content_hash() == b.content_hash()
         assert a.as_table(all_info=True).equals(b.as_table(all_info=True))
-
-    def test_plain_as_source_keeps_its_default(self, make_node):
-        node = make_node()
-        expected = f"derived_v1:{node.content_hash().to_string()}"
-        assert node.as_source().source_id == expected
 
 
 PROBE_COPIES = {"name": "name_copy", "probe_id": "probe_copy"}

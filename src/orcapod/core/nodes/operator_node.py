@@ -2232,20 +2232,20 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
     ):
         """Return a DerivedSource backed by the DB records of this node.
 
-        Without ``tags_as_data`` and ``source_id``, its ``source_id`` is the
-        ``DerivedSource`` default, ``derived_v1:<algorithm label>:<hex>`` of this
-        node's content hash.
+        The plain form's default id is
+        ``derived_v1:<job path>:<algorithm label>:<hex>``, using the job name and
+        this node's content hash.
 
         Args:
             tags_as_data: Maps a tag column of this node to the name of a data
                 column that receives a copy of it. When given, the result is a
                 new root source with its own provenance, which needs a
                 ``source_id``; see ``DerivedSource``.
-            source_id: The source's name. Required with ``tags_as_data``, which
-                has no default (ITL-1313).
+            source_id: The source's name. Required with ``tags_as_data`` or when
+                there is no usable job name.
 
         Raises:
-            ValueError: If ``tags_as_data`` is given without a ``source_id``.
+            ValueError: If neither an explicit name nor a default is available.
             RuntimeError: If no database is attached.
             InputValidationError: If ``tags_as_data`` is not valid for this
                 node's columns.
@@ -2255,9 +2255,6 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
 
         from orcapod.core.sources.derived_source import DerivedSource
 
-        # Without a source_id the plain form takes the DerivedSource default
-        # (``derived_v1:<algorithm label>:<hex>`` of this node's content hash); the
-        # ``tags_as_data`` form refuses to be built without one (ITL-1313).
         return DerivedSource(
             origin=self,
             source_id=source_id,

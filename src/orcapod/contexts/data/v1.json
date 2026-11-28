@@ -262,7 +262,7 @@
         "provisional": {
             "arrow.json": "a44e0f9b4312a2ac5edeedf9f3e35bda43a3ee012bd7c5a1e66f7269eaacd05e",
             "datagram.json": "7b5331ac948712ed3cebf79d3e6d33aafbe594f832386e1cdcc1b7e24e8ccc58",
-            "pipeline.json": "0d4d32606de1a40e9795b6b3a581835f003ac2fb6ebfe7d5cf1827b6ff6f5ab5",
+            "pipeline.json": "f1601980b6173ea82c7242e59bc39c52f72943c1239d0e70d545b38726f2f740",
             "schema.json": "4177b86267f0384ce5b383b40372a0e7008ff3668e55d215adc137888672d1d6",
             "semantic.json": "03c079117e3c05f9e2532445defdc9d110d846e6c6e54a35cdc03b6ea2fa68c4",
             "torch.json": "f345e94fe42fd7493a77296b8fd894bf69e3d228d6a86f7bde4d9bc72ed4b803"

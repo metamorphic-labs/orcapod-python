@@ -626,8 +626,10 @@ algorithm produced it.**
   hex digest: `to_hex()`. A name later fed into a hash (the function `uri` in a pod's
   identity, system-tag column names in an entry-id table) is still a name.
 - Source ids: every source id is `<kind>_v<N>:<name>` (ITL-1425). A default name built from
-  a hash is `<label>:<hex>` (`derived_v1:semantic_v1:<hex>`, via `to_string()`, never a
-  label literal; built by `hash_source_name`). A value folded by an operation is
+  a hash is `<label>:<hex>` (via `to_string()`, never a label literal; built by
+  `hash_source_name`). A plain derived source prefixes the labelled node hash with the
+  job path, giving `derived_v1:<job path>:<label>:<hex>` (`derived_source_name`, ITL-1564).
+  A value folded by an operation is
   `<operation label>:<hex>` (`batch_v1:` / `group_v1:`, for the folded source id and record id
   alike).
 - Record ids (developer, November 16, 2026, ITL-1154): the record-id system tag holds the row
@@ -902,7 +904,9 @@ too. The given string is its name (derived_v1:<name> in system-tag values and so
 tokens, ITL-1425), and with the sorted mapping the source id is the source's identity (the
 origin enters only through the schema). The
 config type key stays derived. DerivedSource without tags_as_data (a job node's stored records)
-keeps its old identity; do not change it (ITL-956).
+uses the root source identity: full source id, Arrow schema identity and an empty key
+tuple. The default source id carries the job path and the node's labelled content hash
+(ITL-1564). A given source name also enters the content hash.
 
 ### Two identity chains
 
@@ -1475,7 +1479,11 @@ data. The rules:
   The name-shaped-like-an-id warning is for a given name only, not a default location.
   Tokens, system tags and source_id show the full id; a record id
   never holds the source id. A DerivedSource with tags_as_data has no default: it requires
-  a source_id (ITL-1313). A default name built from a hash is <algorithm label>:<hex>, built
+  a source_id (ITL-1313).
+  The plain form takes the job path from PipelineJob.name, joining its components with
+  `/`. A missing or empty name or a component containing `/` or `:` requires an explicit
+  source_id. The database location does not enter the id (ITL-1564).
+  A default name built from a hash is <algorithm label>:<hex>, built
   only by core/sources/source_ids.hash_source_name (an in-memory source hashes its table as
   given; hash_in_key_order=True, refused without key columns or with a source_id, hashes
   it sorted by the key columns in key order, arrow_utils.key_row_order, an Arrow sort after

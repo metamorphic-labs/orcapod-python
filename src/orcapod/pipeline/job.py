@@ -253,6 +253,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         compiled_by_name: dict[str, Any] = {}
         compiled_by_hash: dict[str, Any] = {}
         for h, n in self._persistent_node_map.items():
+            if isinstance(n, (FunctionJobNode, OperatorJobNode)):
+                n.job_name = self.name
             if isinstance(n, SourceJobNode) and n.bound_source is not None:
                 compiled_by_name[n.name] = n.bound_source
                 compiled_by_hash[h] = n.bound_source
@@ -2140,6 +2142,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Callers needing blueprint nodes for rendering use job.pipeline.dag.
         job_dag: OrcaDAG = OrcaDAG()
         for node in job._persistent_node_map.values():
+            if isinstance(node, (FunctionJobNode, OperatorJobNode)):
+                node.job_name = job.name
             job_dag.add_node(node)
         for u_hash, v_hash in job._graph_edges:
             u_node = job._persistent_node_map.get(u_hash)
