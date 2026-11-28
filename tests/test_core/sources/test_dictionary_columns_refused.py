@@ -355,7 +355,9 @@ FRAME_ENCODED = [("a",), ("v",), ("a", "b"), ("b", "v")]
 
 
 def _pandas(encoded: tuple[str, ...]) -> pd.DataFrame:
-    frame = pd.DataFrame(FRAME_COLUMNS)
+    frame = pd.DataFrame(FRAME_COLUMNS).astype(
+        {"a": "string", "b": "string", "v": "string"}
+    )
     for name in encoded:
         frame[name] = frame[name].astype("category")
     return frame
@@ -770,7 +772,7 @@ def test_a_frame_decoded_with_polars_builds(dtype: str) -> None:
 def test_a_frame_decoded_with_pandas_builds() -> None:
     frame = _pandas(("a", "b", "v"))
     for name in ("a", "b", "v"):
-        frame[name] = frame[name].astype(frame[name].cat.categories.dtype)
+        frame[name] = frame[name].astype("string")
     source = DataFrameSource(frame, tag_columns=["a", "b"], tag_only_columns=True)
     assert source.as_table(all_info=True).num_rows == 3
 

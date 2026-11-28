@@ -48,7 +48,7 @@ def _dict(_tmp: Path, key: Any) -> Any:
 
 def _data_frame(_tmp: Path, key: Any) -> Any:
     return DataFrameSource(
-        _TABLE.to_pandas(),
+        _TABLE.to_pandas().astype({"k": "string"}),
         tag_columns=["k"],
         record_id_columns=key,
         tag_only_columns=True,

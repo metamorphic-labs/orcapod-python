@@ -1506,6 +1506,10 @@ data. The rules:
   list, any other container of Python values, a NumPy array, a `Series` and a `LazyFrame`
   are refused when the source is built (`data_frame_source._require_data_frame`, a
   `TypeError` naming the type and the remedy), never typed through Polars.
+  A pandas `object` column needs an explicit Arrow field in `schema=` (ITL-1330).
+  Convert directly to that field and refuse the first inexact value, naming the column
+  and value. Pandas categoricals with object categories and Polars `Object` columns
+  must be converted to a typed dtype before building a source.
   An aware value of any zone is stored as its exact instant (an offset with a part below
   one second is converted to UTC first: Arrow drops that part; any other value is handed to
   Arrow as before, so no stored value moves); a naive value raises `NaiveDatetimeError` (strict policy); a

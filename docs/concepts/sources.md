@@ -42,6 +42,13 @@ to `DictSource` or `ListSource`, which type them by Orcapod's rules (a naive `da
 refused there, and nanoseconds are never dropped). To have Polars infer the types instead,
 build the frame yourself and pass it.
 
+A pandas column with dtype `object` needs an explicit Arrow field in `schema=`.
+Each value must fit the declared type exactly. A timestamp with nanoseconds, for
+example, raises an error if the declared unit is microseconds and the value would
+lose precision. You can also convert the column to a typed dtype first with
+`astype("string")`, `pd.to_datetime`, or `convert_dtypes()`. Convert Polars
+`Object` columns to a typed dtype before passing the frame.
+
 ```python
 import polars as pl
 
@@ -213,7 +220,7 @@ print(source.as_table().schema.field("session").type)
 ```
 
 With polars, `pl.col("session").cast(pl.String)` decodes a `Categorical` or `Enum` column.
-With pandas, `astype` with the categories' dtype decodes a `Categorical` of strings. Both
+With pandas, `astype("string")` decodes a `Categorical` of strings to a typed column. Both
 return a new frame or column: keep it before building the source.
 
 ```python
@@ -231,7 +238,7 @@ print(DataFrameSource(frame, tag_columns=["session"], tag_only_columns=True).key
 
 table = pd.DataFrame({"session": ["s1", "s2", "s1"], "trial": [1, 1, 2]})
 table["session"] = table["session"].astype("category")
-table["session"] = table["session"].astype(table["session"].cat.categories.dtype)
+table["session"] = table["session"].astype("string")
 print(DataFrameSource(table, tag_columns=["session"], tag_only_columns=True).keys())
 # (('session',), ('trial',))
 ```

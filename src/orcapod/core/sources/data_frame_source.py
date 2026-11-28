@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import logging
-from collections.abc import Collection
+import math
+from collections.abc import Collection, Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
@@ -20,13 +21,13 @@ from orcapod.core.sources.stream_builder import (
     require_supported_nullable_types,
 )
 from orcapod.errors import InputValidationError
-from orcapod.utils import arrow_utils, polars_data_utils
+from orcapod.system_constants import constants
+from orcapod.utils import arrow_utils
+from orcapod.utils.datetime_utils import instant_microseconds
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
     from polars._typing import ArrowArrayExportable, ArrowStreamExportable
-
-logger = logging.getLogger(__name__)
 
 
 def _exports_arrow(data: object) -> bool:
@@ -88,6 +89,144 @@ def _require_data_frame(data: object) -> None:
     )
 
 
+def _require_declared_pandas_columns(
+    frame: pd.DataFrame, schema: pa.Schema | None
+) -> list[tuple[int, pa.Field[Any]]]:
+    """Resolve object columns from dtype and schema without reading values."""
+    columns = []
+    for index, (label, dtype) in enumerate(frame.dtypes.items()):
+        name = str(label)
+        if (
+            isinstance(dtype, pd.CategoricalDtype)
+            and dtype.categories is not None
+            and pd.api.types.is_object_dtype(dtype.categories.dtype)
+        ):
+            raise InputValidationError(
+                f"Pandas categorical column {name!r} has object-dtype categories. "
+                "Decode it to a typed dtype such as astype('string') before building "
+                "a DataFrameSource."
+            )
+        if not pd.api.types.is_object_dtype(dtype):
+            continue
+        if schema is None or name not in schema.names:
+            raise InputValidationError(
+                f"Pandas column {name!r} has dtype object. Declare its type with "
+                "schema=, convert it to a typed dtype (for example astype('string'), "
+                "pd.to_datetime, or convert_dtypes()), or use DictSource for Python values."
+            )
+        columns.append((index, schema.field(name)))
+    return columns
+
+
+def _object_value_matches(value: Any, converted: Any, field: pa.Field[Any]) -> bool:
+    """Check an Arrow conversion for changes to the original Python value."""
+    if isinstance(value, np.datetime64):
+        value = pd.Timestamp(value)
+    if value is None or value is pd.NA or value is pd.NaT:
+        return field.nullable and converted is None
+    if isinstance(value, datetime) and isinstance(converted, datetime):
+        instant = instant_microseconds(value)
+        result = instant_microseconds(converted)
+        if instant is not None and result is not None:
+            return instant == result and getattr(value, "nanosecond", 0) == getattr(
+                converted, "nanosecond", 0
+            )
+        return instant is None and result is None and value == converted
+    if isinstance(value, np.timedelta64):
+        value = pd.Timedelta(value)
+    elif isinstance(value, (np.generic, np.ndarray)):
+        value = value.tolist()
+    kind = field.type
+    if isinstance(kind, pa.StructType):
+        if isinstance(value, tuple):
+            value = dict(zip(converted, value, strict=True))
+        return (
+            isinstance(value, Mapping)
+            and value.keys() <= converted.keys()
+            and all(
+                _object_value_matches(value.get(key), item, kind.field(key))
+                for key, item in converted.items()
+            )
+        )
+    if isinstance(kind, pa.MapType):
+        pairs = list(value.items()) if isinstance(value, Mapping) else value
+        if not isinstance(pairs, (list, tuple)):
+            return False
+        return len(pairs) == len(converted) and all(
+            _object_value_matches(key, stored_key, kind.key_field)
+            and _object_value_matches(item, stored_item, kind.item_field)
+            for (key, item), (stored_key, stored_item) in zip(
+                pairs, converted, strict=True
+            )
+        )
+    if isinstance(value, (list, tuple)) and isinstance(converted, (list, tuple)):
+        if not isinstance(
+            kind,
+            (
+                pa.ListType,
+                pa.LargeListType,
+                pa.FixedSizeListType,
+                pa.ListViewType,
+                pa.LargeListViewType,
+            ),
+        ):
+            return False
+        return len(value) == len(converted) and all(
+            _object_value_matches(item, result, kind.value_field)
+            for item, result in zip(value, converted, strict=True)
+        )
+    if isinstance(value, float):
+        if math.isnan(value):
+            return isinstance(converted, float) and math.isnan(converted)
+        if value == 0.0 and math.copysign(1.0, value) < 0:
+            return isinstance(converted, float) and math.copysign(1.0, converted) < 0
+    return bool(value == converted)
+
+
+def _pandas_object_array(values: pd.Series, field: pa.Field[Any]) -> pa.Array[Any]:
+    """Convert to the declared type and report the first incompatible value."""
+    scalars = []
+    for row, value in enumerate(values):
+        try:
+            missing = value is pd.NA or value is pd.NaT
+            scalar = pa.scalar(None if missing else value, type=field.type)
+            if not scalar.is_valid and not field.nullable:
+                raise ValueError("the field is non-nullable")
+            if not _object_value_matches(value, scalar.as_py(), field):
+                raise ValueError("conversion would change the value")
+        except (pa.ArrowException, TypeError, ValueError, OverflowError) as exc:
+            raise InputValidationError(
+                f"Pandas object column {field.name!r} cannot represent value {value!r} "
+                f"at row {row} exactly as {field.type}: {exc}."
+            ) from exc
+        scalars.append(scalar)
+    return pa.array(scalars, type=field.type)
+
+
+def _pandas_to_arrow(frame: pd.DataFrame, schema: pa.Schema | None) -> pa.Table:
+    """Keep the native conversion for typed columns and build object columns in Arrow."""
+    columns = _require_declared_pandas_columns(frame, schema)
+    if not columns:
+        return pl.DataFrame(frame).to_arrow()
+    objects = {
+        index: _pandas_object_array(frame.iloc[:, index], field)
+        for index, field in columns
+    }
+    typed = pl.DataFrame(
+        frame.iloc[
+            :, [index for index in range(len(frame.columns)) if index not in objects]
+        ]
+    ).to_arrow()
+    typed_columns = iter(typed.columns)
+    return pa.table(
+        [
+            objects[index] if index in objects else next(typed_columns)
+            for index in range(len(frame.columns))
+        ],
+        names=[str(label) for label in frame.columns],
+    )
+
+
 class DataFrameSource(RootSource):
     """A source backed by a data frame.
 
@@ -102,6 +241,10 @@ class DataFrameSource(RootSource):
     are refused with a ``TypeError`` when the source is built. Python values go to
     ``DictSource`` or ``ListSource``, which type them by Orcapod's rules; a caller who
     wants Polars to infer the types passes ``pl.DataFrame(data)``.
+
+    A pandas ``object`` column requires a field in ``schema``. Its values must fit
+    the declared Arrow type exactly. Convert pandas categoricals with object
+    categories and Polars ``Object`` columns to typed columns before building.
 
     Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
@@ -141,12 +284,20 @@ class DataFrameSource(RootSource):
     ) -> None:
         # Before anything is built: only a data frame is accepted (ITL-1330).
         _require_data_frame(data)
-        super().__init__(source_id=source_id, **kwargs)
-
         arrow_input_schema = None
-        # Keep pandas and Polars on their native paths even if they export Arrow.
-        # For Arrow inputs, materialize once before Polars drops field metadata.
-        if not isinstance(data, (pd.DataFrame, pl.DataFrame)):
+        if isinstance(data, pd.DataFrame):
+            arrow_table = _pandas_to_arrow(data, schema)
+        elif isinstance(data, pl.DataFrame):
+            for name, dtype in data.schema.items():
+                if dtype == pl.Object:
+                    raise InputValidationError(
+                        f"Polars column {name!r} has dtype Object. Convert it to a typed "
+                        "dtype before building a DataFrameSource, or use DictSource "
+                        "for Python values."
+                    )
+            arrow_table = data.to_arrow()
+        else:
+            # Materialize once before Polars drops Arrow field metadata.
             # Like Polars, prefer the array export when both are available.
             if hasattr(data, "__arrow_c_array__"):
                 batch = pa.record_batch(cast("ArrowArrayExportable", data))
@@ -156,43 +307,30 @@ class DataFrameSource(RootSource):
             require_custom_system_tags(arrow_input, system_tag_columns)
             arrow_input_schema = arrow_input.schema
             # Polars rechunks native tables but preserves chunks on exporter inputs.
-            df = cast(
+            arrow_table = cast(
                 pl.DataFrame,
                 pl.from_arrow(arrow_input, rechunk=isinstance(data, pa.Table)),
-            )
-        else:
-            df = pl.DataFrame(data)
-
-        # Convert any Object-dtype columns to Arrow-compatible types.
-        object_columns = [c for c in df.columns if df[c].dtype == pl.Object]
-        for name in object_columns:
-            if name in system_tag_columns:
-                raise InputValidationError(
-                    f"Custom system-tag column {name!r} has type {pl.Object}. "
-                    "Declare a non-nullable string column with no null values "
-                    "and convert its values to text first."
-                )
-        if object_columns:
-            logger.info(
-                f"Converting {len(object_columns)} object column(s) to Arrow format"
-            )
-            sub_table = self.data_context.type_converter.python_dicts_to_arrow_table(
-                df.select(object_columns).to_dicts()
-            )
-            df = df.with_columns([pl.from_arrow(c) for c in sub_table])
+            ).to_arrow()
 
         tag_columns = _normalize_column_list(tag_columns)
 
         require_supported_nullable_types(
-            polars_data_utils.get_system_columns(df).to_arrow().schema
+            pa.schema(
+                [
+                    field
+                    for field in arrow_table.schema
+                    if field.name.startswith(
+                        (constants.META_PREFIX, constants.DATAGRAM_PREFIX)
+                    )
+                ]
+            )
         )
-        df = polars_data_utils.drop_system_columns(df)
+        arrow_table = arrow_utils.drop_system_columns(arrow_table)
 
-        missing = set(tag_columns) - set(df.columns)
+        missing = set(tag_columns) - set(arrow_table.column_names)
         if missing:
             raise ValueError(f"TagProtocol column(s) not found in data: {missing}")
 
-        arrow_table = df.to_arrow()
         if schema is not None:
             require_supported_nullable_types(schema)
             require_custom_system_tags_values(arrow_table, system_tag_columns)
@@ -213,6 +351,7 @@ class DataFrameSource(RootSource):
             )
             arrow_table = arrow_utils.restore_schema_nullability(arrow_table, inferred)
 
+        super().__init__(source_id=source_id, **kwargs)
         self._key_columns = normalize_record_id_columns(record_id_columns) or ()
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
         result = builder.build(

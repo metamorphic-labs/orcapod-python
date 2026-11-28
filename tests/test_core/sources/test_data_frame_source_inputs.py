@@ -19,7 +19,11 @@ import pyarrow as pa
 import pytest
 
 from orcapod.core.sources import DataFrameSource, DictSource
-from orcapod.errors import NaiveDatetimeError, SubMicrosecondDatetimeError
+from orcapod.errors import (
+    InputValidationError,
+    NaiveDatetimeError,
+    SubMicrosecondDatetimeError,
+)
 
 # ---------------------------------------------------------------------------
 # Refused inputs
@@ -258,7 +262,11 @@ ROLES: dict[str, dict[str, Any]] = {
 
 
 def _arrow(layout: str) -> pa.Table:
-    return pa.table({name: _COLUMNS[name] for name in LAYOUTS[layout]})
+    names = LAYOUTS[layout]
+    return pa.table(
+        {name: _COLUMNS[name] for name in names},
+        schema=pa.schema([_SCHEMA.field(name) for name in names]),
+    )
 
 
 def _batch(layout: str) -> pa.RecordBatch:
@@ -271,7 +279,10 @@ SUPPORTED: dict[str, Callable[[str], Any]] = {
     ),
     "pandas": lambda layout: pd.DataFrame(
         {name: _COLUMNS[name] for name in LAYOUTS[layout]}
-    ),
+    ).astype({"g": "string", "y": "string"}),
+    "pandas_arrow": lambda layout: pd.DataFrame(
+        {name: _COLUMNS[name] for name in LAYOUTS[layout]}
+    ).convert_dtypes(dtype_backend="pyarrow"),
     "arrow_table": _arrow,
     "arrow_record_batch": _batch,
     "arrow_reader": lambda layout: _arrow(layout).to_reader(),
@@ -280,7 +291,7 @@ SUPPORTED: dict[str, Callable[[str], Any]] = {
     "c_array_exporter": lambda layout: _ArrowArrayExporter(_batch(layout)),
 }
 
-# The default source id, measured before ITL-1330: one value for all eight supported
+# The default source id, measured before ITL-1330: one value for all supported
 # inputs, both layouts and every role (the id hashes the source's table, in no column
 # order, and no role enters it), so it pins what each input builds.
 DEFAULT_SOURCE_ID = (
@@ -345,3 +356,137 @@ def test_a_supported_input_with_keys_and_a_schema_builds(kind: str, role: str) -
 
 def _json_entry(name: str, value: object) -> str:
     return f'"{name}":"{value}"' if isinstance(value, str) else f'"{name}":{value}'
+
+
+def _frame_with_object_column(name: str, layout: str) -> tuple[pd.DataFrame, pa.Schema]:
+    columns = (*LAYOUTS[layout], "origin", "key")
+    fields = [
+        *_SCHEMA,
+        pa.field("origin", pa.large_string(), nullable=False),
+        pa.field("key", pa.int64(), nullable=False),
+    ]
+    schema = pa.schema(fields)
+    frame = pd.DataFrame(
+        {**_COLUMNS, "origin": ["left", "right"], "key": [91, 92]}
+    ).astype({"g": "string", "y": "string", "origin": "string"})
+    return frame.loc[:, list(columns)].astype({name: object}), pa.schema(
+        [schema.field(column) for column in columns]
+    )
+
+
+@pytest.mark.parametrize("layout", list(LAYOUTS))
+@pytest.mark.parametrize("name", ["g", "k", "x", "y", "origin", "key"])
+def test_pandas_object_column_requires_its_own_schema_field(
+    layout: str, name: str
+) -> None:
+    """Every column role needs a declaration, even if other fields are declared."""
+    frame, schema = _frame_with_object_column(name, layout)
+    options: dict[str, Any] = {
+        "tag_columns": ["g", "k"],
+        "tag_only_columns": ["g"],
+        "system_tag_columns": ["origin"],
+        "record_id_columns": ["key"],
+    }
+    for declaration in (None, schema.remove(schema.get_field_index(name))):
+        with pytest.raises(
+            InputValidationError, match=rf"'{name}'.*dtype object"
+        ) as info:
+            DataFrameSource(frame, schema=declaration, **options)
+        for remedy in ("schema=", "astype('string')", "pd.to_datetime", "DictSource"):
+            assert remedy in str(info.value)
+
+    actual = DataFrameSource(frame, schema=schema, **options)
+    typed = frame.astype({"g": "string", "y": "string", "origin": "string"})
+    for numeric in ("k", "x", "key"):
+        typed[numeric] = typed[numeric].astype("float64" if numeric == "x" else "int64")
+    expected = DataFrameSource(typed, schema=schema, **options)
+    assert actual.as_table(all_info=True).equals(
+        expected.as_table(all_info=True), check_metadata=True
+    )
+    assert actual.source_id == expected.source_id
+
+
+@pytest.mark.parametrize("with_schema", [False, True])
+@pytest.mark.parametrize("values", [["a", "b"], [1, 2]])
+def test_pandas_categorical_with_object_categories_is_refused(
+    with_schema: bool, values: list[Any]
+) -> None:
+    frame = pd.DataFrame(
+        {"kind": pd.Categorical(values, categories=pd.Index(values, dtype=object))}
+    )
+    schema = pa.schema([("kind", pa.large_string())]) if with_schema else None
+    with pytest.raises(InputValidationError, match=r"'kind'.*object-dtype categories"):
+        DataFrameSource(frame, schema=schema)
+
+
+@pytest.mark.parametrize("with_schema", [False, True])
+def test_polars_object_column_is_refused(with_schema: bool) -> None:
+    frame = pl.DataFrame({"origin": pl.Series(["left", "right"], dtype=pl.Object)})
+    schema = (
+        pa.schema([pa.field("origin", pa.large_string(), nullable=False)])
+        if with_schema
+        else None
+    )
+    with pytest.raises(
+        InputValidationError, match=r"'origin'.*dtype Object.*DictSource"
+    ):
+        DataFrameSource(frame, schema=schema, system_tag_columns=["origin"])
+
+
+def test_pandas_all_none_object_column_requires_a_nullable_type() -> None:
+    frame = pd.DataFrame({"missing": pd.Series([None, None], dtype=object)})
+    with pytest.raises(InputValidationError, match=r"'missing'.*dtype object"):
+        DataFrameSource(frame)
+    with pytest.raises(
+        InputValidationError, match=r"'missing'.*None.*row 0.*non-nullable"
+    ):
+        DataFrameSource(
+            frame, schema=pa.schema([pa.field("missing", pa.int64(), nullable=False)])
+        )
+    source = DataFrameSource(frame, schema=pa.schema([("missing", pa.int64())]))
+    assert (
+        source.as_table()
+        .column("missing")
+        .equals(pa.chunked_array([[None, None]], type=pa.int64()))
+    )
+
+
+@pytest.mark.parametrize("zone", [None, "UTC"])
+def test_declared_pandas_object_timestamps_keep_nanoseconds(zone: Any) -> None:
+    first = pd.Timestamp("2026-01-02T03:04:05.123456000", tz=zone)
+    second = pd.Timestamp("2026-01-02T03:04:05.123456789", tz=zone)
+    frame = pd.DataFrame({"when": pd.Series([first, second], dtype=object)})
+    schema = pa.schema([("when", pa.timestamp("ns", tz=zone))])
+    column = DataFrameSource(frame, schema=schema).as_table().column("when")
+    assert column.type == schema.field("when").type
+    assert column.cast(pa.int64()).to_pylist() == [first.value, second.value]
+
+    with pytest.raises(
+        InputValidationError, match=r"'when'.*123456789.*row 1.*timestamp"
+    ):
+        DataFrameSource(
+            frame, schema=pa.schema([("when", pa.timestamp("us", tz=zone))])
+        )
+
+
+@pytest.mark.parametrize(
+    ("values", "arrow_type", "first_invalid"),
+    [
+        ([1, 2.5, "also invalid"], pa.int64(), "2.5"),
+        ([1, 2**53 + 1], pa.float64(), "9007199254740993"),
+        ([["a"], ["b", 2]], pa.list_(pa.string()), r"\['b', 2\]"),
+        (
+            [[1], [None]],
+            pa.list_(pa.field("item", pa.int64(), nullable=False)),
+            r"\[None\]",
+        ),
+    ],
+)
+def test_declared_pandas_object_column_reports_first_inexact_value(
+    values: list[Any], arrow_type: pa.DataType, first_invalid: str
+) -> None:
+    frame = pd.DataFrame({"payload": pd.Series(values, dtype=object)})
+    with pytest.raises(
+        InputValidationError, match=rf"'payload'.*{first_invalid}.*row 1"
+    ):
+        DataFrameSource(frame, schema=pa.schema([("payload", arrow_type)]))

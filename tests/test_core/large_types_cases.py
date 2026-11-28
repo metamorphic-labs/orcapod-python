@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import deltalake
+import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.csv as pa_csv
@@ -210,10 +211,8 @@ def _data_frame_source_polars(n_rows: int, tmp: Path) -> StreamProtocol:
 
 
 def _data_frame_source_pandas(n_rows: int, tmp: Path) -> StreamProtocol:
-    # No bytes column: an empty pandas object column has no values to tell bytes
-    # from str, so a zero-row frame could not give the populated frame's type.
     return DataFrameSource(
-        _table(n_rows, ["t", "k", "s", "u"]).to_pandas(),
+        _table(n_rows, ["t", "k", "s", "u"]).to_pandas(types_mapper=pd.ArrowDtype),
         tag_columns=TAGS,
         tag_only_columns=True,
         source_id="pandas",

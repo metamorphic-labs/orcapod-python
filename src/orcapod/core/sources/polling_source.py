@@ -893,7 +893,7 @@ class PollingSource(RootSource, Generic[T]):
         skipped so that a spurious all-non-nullable schema is never recorded.
         """
 
-        # Handle Object-dtype columns (same pattern as DataFrameSource)
+        # Handle Object-dtype columns in fetched frames.
         object_columns = [c for c in df.columns if df[c].dtype == pl.Object]
         if object_columns:
             sub_table = self.data_context.type_converter.python_dicts_to_arrow_table(
