@@ -53,6 +53,10 @@ from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 from orcapod.types import DataType, DataValue
 from orcapod.utils.arrow_utils import normalize_schema_to_large_types
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 TAG = "tg"
 TAG8 = "tg8"
 TAGS = (TAG, TAG8)

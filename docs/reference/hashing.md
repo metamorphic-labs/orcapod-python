@@ -6,7 +6,7 @@ orcapod-python framework. For conceptual background on the two identity chains
 Every hash listed here that Orcapod stores or embeds in a name is pinned as a golden value;
 how released values are protected is described in [Golden Hashes](golden-hashes.md). A
 release freezes every golden value except those of the provisional operators
-(`orcapod.operators.PROVISIONAL_OPERATORS`, such as `PolarsFilter` and `Filter`) and of every step downstream
+(`orcapod.operators.PROVISIONAL_OPERATORS`, such as `Filter` and `GroupBy`) and of every step downstream
 of one: their identity may still change in a later release (see
 [Provisional operators](../concepts/operators.md#provisional-operators)).
 
@@ -323,7 +323,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | tensor value hash | element digest, flags, strides, class | SHA-256, `torch_tensor_v1` | `torch.Tensor` value hash | `logical_types/torch_type.py:tensor_digest` |
 | pandas value hash | descriptor, `\0`, `b"arrow_ordered_v1:" + D` | SHA-256, `pandas_dataframe_v1` / `pandas_series_v1` | pandas value hash | `hashing/pandas_value_hash.py:pandas_frame_content_hash`, `hashing/pandas_value_hash.py:pandas_series_content_hash`, `hashing/labelled_hash.py:labelled_content_hash`, `hashing/semantic_hashing/builtin_handlers.py:PandasDataFrameHandler.digest`, `hashing/semantic_hashing/builtin_handlers.py:PandasSeriesHandler.digest` |
 | Polars value hash | descriptor, `\0`, starfix digest called directly (a step of this algorithm) | SHA-256, `polars_dataframe_v1` / `polars_series_v1` | Polars value hash | `logical_types/polars_type.py:_digest`, `logical_types/polars_type.py:_values_digest` |
-| Polars expression hash | the expression's canonical tree | SHA-256 of canonical JSON, `polars_expr_v1` | `PolarsFilter` identity | `hashing/semantic_hashing/polars_expr.py:polars_expr_content_hash` |
+| Polars expression hash | the expression's canonical tree | SHA-256 of canonical JSON, `polars_expr_v1` | `PolarsFilter` identity (an operator that is not recommended) | `hashing/semantic_hashing/polars_expr.py:polars_expr_content_hash` |
 | value handlers with an ignore list | wrap the value digests above | the type's label | top level, nested, Arrow cell | `logical_types/ignore_list.py:IgnoreListHandler.handle`, `logical_types/ignore_list.py:IgnoreListHandler.hash_ignoring` |
 | parse a stored hash | `"<label>:<hex>"` or `b"<label>:" + digest` | the stored label | saved jobs and pipelines, proxies, a node's saved run hash, a cached output hash | `types/__init__.py:ContentHash.from_string`, `types/__init__.py:ContentHash.from_prefixed_digest` |
 | folds of `Batch` / `GroupBy` | the canonical JSON list of a group's member values, for each system tag | SHA-256 hex after the operation's label: `batch_v1` (`batch.py`), `group_v1` (`group_by.py`); one helper | folded source id and record id | `utils/arrow_utils.py:fold_system_tag_values` |
@@ -331,6 +331,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | user-class identity | a class's identity record | SHA-256 hex prefix | extension name `name@<fingerprint>` (a name) | `logical_types/user_class_identity.py:identity_string` |
 | database registry key | a database config, canonical JSON | SHA-256 hex, 8 digits | `db_<hex>` key in a saved job (a name) | `pipeline/serialization.py:DatabaseRegistry._make_key` |
 | SpiralDB schema table digest | the scope and the rows of a dataset's schema table, canonical JSON with the stored schema bytes | SHA-256 hex | completion marker of the schema table (a checksum of stored rows) | `databases/spiraldb_schema_table.py:rows_digest` |
+| Connector store table name | the full store path, as a compact UTF-8 JSON array of path components | SHA-256 hex, `spiral_table_name_v1` (`SPIRAL_TABLE_NAME_LABEL`) | the bare hexadecimal suffix in a table name, with a length set by the backend | `databases/store_table_names.py:store_table_digest` |
 | synthesized struct class name | the field signature | MD5 hex, 8 digits | a Python class name (a name) | (not reached by a traced test) `semantic_types/universal_converter.py` |
 | random ids | nothing | `uuid4`, `uuid7` | run ids, datagram and record uuids, observer ids, correlation keys | (not hashes) |
 | unused code | Arrow tables | SHA-256, SHA3, BLAKE2b | no caller; removal is ITL-1156 | (not reached) `hashing/arrow_utils.py`, `hashing/arrow_serialization.py` |
@@ -738,11 +739,16 @@ The pipeline hash uses the same `SemanticAwarePythonHasher` with the **`pipeline
 
 ### 1c. Polars expression predicates
 
-**Provisional.** `PolarsFilter` is a provisional operator (ITL-1266): its identity, and the
+**Not recommended.** `PolarsFilter` can change the values it passes through and warns every
+time one is built; use `Filter` (see [PolarsFilter](../concepts/operators.md#polarsfilter)).
+This section describes its identity only.
+
+**Provisional.** `PolarsFilter` (not recommended, above) is a provisional operator (ITL-1266): its identity, and the
 `polars_expr_v1` hashes that only it feeds, are not frozen with data context v1. Their golden
 values are in the provisional golden files ([Golden Hashes](golden-hashes.md#provisional-files)).
 
-`PolarsFilter.identity_structure()` is `("PolarsFilter", predicates, constraints)`, with
+The identity of the operator (not recommended, above),
+`PolarsFilter.identity_structure()`, is `("PolarsFilter", predicates, constraints)`, with
 `predicates` always a tuple. Keyword constraints hash as plain values. A `pl.Expr` predicate
 hashes through `PolarsExprHandler` to the leaf `polars_expr_v1:<hex>`.
 
@@ -1732,6 +1738,15 @@ The same walker gives the form of every other place a schema is compared or save
   live: it stays in the storage form, and the slot, a source of the same table and the
   slot made from that source have one Python schema, one Arrow schema and one pipeline
   hash.
+
+Python declarations produce implicitly nullable nested fields in data context v1.
+For example, `list[int]` and `list[int | None]` convert to the same Arrow type
+and yield the same Arrow schema hash for that column. An explicit Arrow field
+flag is preserved and hashed at every depth, including in a list item or struct
+child. A column's top-level nullable flag also enters the hash. Function output
+validation uses each declared output type independently of these storage flags.
+The type comes from the explicit `output_schema` for that output, or from the
+return annotation when the schema supplies no type for it.
 
 What a schema must therefore agree on to be one identity:
 

@@ -38,7 +38,7 @@ from orcapod.core.executors import LocalPythonFunctionExecutor
 from orcapod.core.executors.ray import RayExecutor
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.data_function_types import snapshot_path
-from orcapod.core.result_cache import COMMON_RESULT_COLUMNS
+from orcapod.core.result_cache import COMMON_RESULT_COLUMNS, RESULT_TOKEN_COLUMN
 from orcapod.core.sources import DictSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
@@ -120,7 +120,7 @@ def _expected_result_columns(
         ),
         *((f.name, str(f.type), f.nullable) for f in output_types),
         *(
-            (f"{constants.SOURCE_PREFIX}{f.name}", "large_string", True)
+            entry(f"{constants.SOURCE_PREFIX}{f.name}", RESULT_TOKEN_COLUMN)
             for f in output_types
         ),
         entry(constants.POD_TIMESTAMP, common[constants.POD_TIMESTAMP]),
@@ -486,7 +486,7 @@ def test_the_reference_page_lists_the_declared_record() -> None:
 def test_the_reference_page_lists_the_common_columns() -> None:
     rows = _page_rows("## The common columns, `rdb_v1`", 4)
     fixed = {row[0]: row for row in rows}
-    for column in COMMON_RESULT_COLUMNS:
+    for column in (*COMMON_RESULT_COLUMNS, RESULT_TOKEN_COLUMN):
         row = fixed[column.name]
         assert row[1] == column.arrow_type
         assert (row[2] == "yes") == column.nullable

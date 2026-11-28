@@ -34,6 +34,10 @@ from orcapod.streams import ViewStatus, StreamView
 from orcapod.side_effects import SideEffectPod
 from orcapod.types import ColumnConfig, Cursor, Schema
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 ALL_COLUMNS = ColumnConfig(
     meta=True, context=True, source=True, system_tags=True, content_hash=True
 )

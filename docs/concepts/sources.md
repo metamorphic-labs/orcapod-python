@@ -132,6 +132,14 @@ your own, refuses a column whose type is or holds one, naming it (a stream's ide
 Arrow schema hash, which cannot hold them). Cast a list view to the large list of the same
 items, and expand a run-end-encoded column with `pyarrow.compute.run_end_decode`.
 
+Top-level `T` and `T | None` describe different column fields. Python declarations
+leave nested Arrow fields nullable in data context v1, so `list[int]` and
+`list[int | None]` use one Arrow type. A source can carry null items in either case
+for supported types. If you supply an Arrow schema, Orcapod keeps its nested flags.
+For example, `pa.large_list(pa.field("item", pa.int64(), nullable=False))` declares
+required items. That field has a different Arrow schema identity from the default
+nullable item. Use matching nested flags when joining sources or binding a slot.
+
 Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
 column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,
 a struct with a dictionary field), is refused with `InputValidationError` when the source or
@@ -485,7 +493,7 @@ applied the same condition. `where` refuses float ranges for now (ITL-1477).
 
 A restriction is not an operator:
 
-- An operator (`Filter`, `SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
+- An operator (`Filter`, `SemiJoin`) is a step of the pipeline. It is a node of the
   graph and part of the pipeline's identity: a pipeline with a filter computes something
   else than one without, and its nodes have other hashes and other stored tables.
 - A restriction is attached to the source. It chooses which of the source's rows flow and
@@ -625,7 +633,7 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   revisiting the float refusals. SpiralDB cannot compare a `float16` column, so Orcapod reads the rows the
   other conditions select and compares them itself, by the same rule and before `limit`. To
   select rows by such values as Orcapod matches them, filter
-  inside the pipeline (`PolarsFilter`). An infinite value is saved as `{"float": "inf"}` or
+  inside the pipeline (`Filter`). An infinite value is saved as `{"float": "inf"}` or
   `{"float": "-inf"}`, since JSON has no such number.
 - **One restriction per source identity in a pipeline.** Restrictions are equal by statement.
   On an integer column, `t >= 3` and `t > 2` select the same rows but count as two
