@@ -267,6 +267,116 @@ def test_partition_paths_do_not_count_as_separate_tables(base: Path, name: str) 
     assert db.list_table_paths((*path, "tag1=a")) == []
 
 
+@pytest.mark.parametrize("write", [False, True], ids=["read", "flush"])
+def test_missing_log_with_non_hive_data_path(
+    base: Path, monkeypatch: pytest.MonkeyPatch, write: bool
+) -> None:
+    """A valid AddFile path can contain arbitrary directory components."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    directory = table_dir(base)
+    data = pa.table({DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"], "x": [1]})
+    deltalake.write_deltalake(directory, data)
+    log = next((directory / "_delta_log").glob("*.json"))
+    original = next(directory.glob("*.parquet"))
+    moved = directory / "files" / "bucket" / original.name
+    moved.parent.mkdir(parents=True)
+    original.rename(moved)
+    actions = [json.loads(line) for line in log.read_text().splitlines()]
+    for action in actions:
+        if "add" in action:
+            action["add"]["path"] = moved.relative_to(directory).as_posix()
+    log.write_text("".join(json.dumps(action) + "\n" for action in actions))
+
+    db = DeltaTableDatabase(base_path=base)
+    original_rows = db.get_all_records(PATH)
+    assert original_rows is not None and original_rows.column("x").to_pylist() == [1]
+    shutil.rmtree(directory / "_delta_log")
+    before = snapshot(directory)
+    fresh = DeltaTableDatabase(base_path=base)
+
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+        if write:
+            fresh.add_record(PATH, b"b", pa.table({"x": [2]}), flush=True)
+        else:
+            fresh.get_all_records(PATH)
+    assert info.value.record_path == PATH
+    assert snapshot(directory) == before
+
+
+@pytest.mark.parametrize("listing", ["list_table_paths", "list_sources"])
+def test_discovers_damaged_hive_named_child_of_healthy_table(
+    base: Path, monkeypatch: pytest.MonkeyPatch, listing: str
+) -> None:
+    """The healthy parent's log does not own the separate Hive-named child."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    child = (*PATH, "tag=child")
+    data = pa.table({"tag1": ["a"], "x": [1]})
+    deltalake.write_deltalake(table_dir(base), data, partition_by=["tag1"])
+    deltalake.write_deltalake(base.joinpath(*child), data)
+    shutil.rmtree(base.joinpath(*child, "_delta_log"))
+    db = DeltaTableDatabase(base_path=base)
+
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+        getattr(db, listing)()
+    assert info.value.record_path == child
+
+
+def test_discovery_names_ambiguous_hive_child(
+    base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a log, both possible table locations appear in the error."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    child = ("group", "tag=child")
+    deltalake.write_deltalake(base.joinpath(*child), pa.table({"x": [1]}))
+    shutil.rmtree(base.joinpath(*child, "_delta_log"))
+    db = DeltaTableDatabase(base_path=base)
+
+    for listing in (db.list_table_paths, db.list_sources):
+        with pytest.raises(OrcapodDatabaseReadError, match="tag=child") as info:
+            listing()
+        assert info.value.record_path == child[:-1]
+
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as scoped_info:
+        db.list_table_paths(child)
+    assert scoped_info.value.record_path == child
+
+
+def test_scoped_partition_listing_only_walks_its_subtree(
+    base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoping a handle inside a partition does not turn it into a table."""
+    scope = (*PATH, "tag1=a")
+    data = pa.table({"tag1": ["a"], "tag2": ["b"], "x": [1]})
+    deltalake.write_deltalake(table_dir(base), data, partition_by=["tag1", "tag2"])
+    db = DeltaTableDatabase(base_path=base).at(*scope)
+    original = delta_lake_databases._list_local_directory  # pyright: ignore[reportPrivateUsage]
+
+    def list_scoped(directory: str):
+        assert Path(directory).is_relative_to(base.joinpath(*scope))
+        return original(directory)
+
+    monkeypatch.setattr(delta_lake_databases, "_list_local_directory", list_scoped)
+    assert db.list_table_paths() == []
+
+
+@pytest.mark.parametrize("listing", ["list_table_paths", "list_sources"])
+def test_discovery_refuses_empty_initial_log(
+    base: Path, monkeypatch: pytest.MonkeyPatch, listing: str
+) -> None:
+    """A log directory alone cannot publish a table whose data are visible."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    data = pa.table({"tag1": ["a"], "x": [1]})
+    deltalake.write_deltalake(table_dir(base), data, partition_by=["tag1"])
+    log = table_dir(base) / "_delta_log"
+    shutil.rmtree(log)
+    log.mkdir()
+    db = DeltaTableDatabase(base_path=base)
+
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+        getattr(db, listing)()
+    assert info.value.record_path == PATH
+
+
 def test_flush_can_load_a_log_published_during_the_retry(
     base: Path, stored: DeltaTableDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:

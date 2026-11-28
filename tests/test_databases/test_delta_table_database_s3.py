@@ -13,6 +13,8 @@ tests ERROR with the reason.
 Run with:  uv run pytest tests/test_databases/test_delta_table_database_s3.py -v
 """
 
+import json
+
 import deltalake
 import pyarrow as pa
 import pytest
@@ -116,6 +118,53 @@ def test_s3_table_with_missing_log_is_refused(
         with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
             _ = operation()
         assert info.value.table == uri
+        assert info.value.record_path == path
+    assert {name: fs.cat_file(name) for name in fs.find(uri)} == before
+
+
+def test_s3_non_hive_orphan_is_refused_by_fresh_and_cached_misses(
+    s3_base_uri: str,
+    s3_storage_options: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Delta storage backend finds data at arbitrary depth after a miss."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    path = ("table",)
+    uri = f"{s3_base_uri}/table"
+    cached = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    assert cached.get_all_records(path) is None
+    writer = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    writer.add_record(path, b"a", pa.table({"x": [1]}), flush=True)
+
+    fs = s3fs.S3FileSystem(
+        key=s3_storage_options["AWS_ACCESS_KEY_ID"],
+        secret=s3_storage_options["AWS_SECRET_ACCESS_KEY"],
+        client_kwargs={"endpoint_url": s3_storage_options["AWS_ENDPOINT_URL"]},
+        use_listings_cache=False,
+    )
+    log = f"{uri}/_delta_log/00000000000000000000.json"
+    actions = [json.loads(line) for line in fs.cat_file(log).splitlines()]
+    for action in actions:
+        if "add" in action:
+            original = action["add"]["path"]
+            moved = f"files/bucket/{original}"
+            fs.mv(f"{uri}/{original}", f"{uri}/{moved}")
+            action["add"]["path"] = moved
+    fs.pipe_file(log, "".join(json.dumps(action) + "\n" for action in actions).encode())
+    fresh = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    assert fresh.list_table_paths() == [path]
+    assert fresh.at(*path, "files").list_table_paths() == []
+    fs.rm(f"{uri}/_delta_log", recursive=True)
+    before = {name: fs.cat_file(name) for name in fs.find(uri)}
+    assert len(before) == 1
+
+    for operation in (
+        lambda: fresh.get_all_records(path),
+        lambda: cached.get_all_records(path),
+        lambda: fresh.add_record(path, b"b", pa.table({"x": [2]}), flush=True),
+    ):
+        with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+            operation()
         assert info.value.record_path == path
     assert {name: fs.cat_file(name) for name in fs.find(uri)} == before
 

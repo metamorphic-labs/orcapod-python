@@ -2,16 +2,18 @@
 
 Until a table exists, a job's per-row lookups would each try to open it again. The family
 of a database (every handle from ``at()``) keeps the record keys it found absent and
-answers lookups for them without opening the table, until any flush of the family (a
-commit) or a flush of that table. ``table_exists`` always checks again. A table another
-process creates is therefore seen after this database's next flush, as rows another
-process appends to an already-loaded table are; a flush to a table believed absent
-loads it first and never replaces it.
+answers lookups without opening the table while no data files are visible. The
+cached miss lasts until any flush of the family (a commit) or a flush of that table.
+``table_exists`` always checks again. A healthy table another process creates is
+therefore seen after this database's next flush, as rows another process appends to
+an already-loaded table are. A flush to a table believed absent loads it first and
+keeps its existing rows.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import cast
 
 import deltalake
@@ -19,6 +21,8 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
+from orcapod.databases import delta_lake_databases
+from orcapod.errors import OrcapodDatabaseReadError
 
 PATH = ("table",)
 
@@ -127,6 +131,21 @@ def test_table_exists_checks_again(tmp_path: Path) -> None:
 
     assert ours.table_exists(PATH)
     assert _values(ours.get_all_records(PATH)) == [10]
+
+
+def test_cached_miss_refuses_new_orphaned_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prior miss still sees evidence of a damaged table from another writer."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    ours = DeltaTableDatabase(tmp_path)
+    assert ours.get_all_records(PATH) is None
+    DeltaTableDatabase(tmp_path).add_records(PATH, _rows(["x"], [10]), flush=True)
+    shutil.rmtree(tmp_path.joinpath(*PATH, "_delta_log"))
+
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+        ours.get_all_records(PATH)
+    assert info.value.record_path == PATH
 
 
 def test_flush_to_a_table_believed_absent_keeps_the_other_rows(
