@@ -327,10 +327,9 @@ What runs where (developer, November 16, 2026; ITL-1181):
   Python 3.11, 3.12 and 3.13, the others on 3.11. It applies only while the repository is
   private (ITL-1193).
 - `lint.yml` (job `Ruff and basedpyright`) runs the first three on every pull request and
-  push to `main`, on both repositories. `run-tests.yml` runs pytest with coverage: on a pull
-  request one job, `Tests (3.13)`, whose coverage is the one reported to Codecov; on a push
-  to `main`, Python 3.11, 3.12 and 3.13. Once the required CI no longer applies, a pull
-  request is tested on Python 3.13 only, and a failure only 3.11 or 3.12 shows is first
+  push to `main`. The main, PostgreSQL and specification test suites run with coverage on
+  Python 3.13 on pull requests and on Python 3.11, 3.12 and 3.13 on pushes to `main`
+  (ITL-1566). For all three suites, a failure specific to Python 3.11 or 3.12 is first
   seen on `main`.
 - Each test job names its suite, so no two checks share a name (ITL-1212): `Tests (3.x)`
   (`run-tests.yml`), `Specification tests (3.x)` (`run-specification-tests.yml`, `test-specification/`)
@@ -339,8 +338,8 @@ What runs where (developer, November 16, 2026; ITL-1181):
 - In CI the tests run in parallel, one worker per logical CPU (pytest-xdist, `-n logical`;
   `-n auto` counts physical cores, one on a GitHub runner). One place turns it on,
   `tests/conftest.py`, when `CI` is `true` and no `-n` is given; `-n 0` keeps a run serial
-  (the PostgreSQL and SpiralDB integration jobs). Coverage on Python 3.12 and later uses
-  `COVERAGE_CORE=sysmon`.
+  (the PostgreSQL and SpiralDB integration jobs). In `run-tests.yml`, coverage on Python
+  3.12 and later uses `COVERAGE_CORE=sysmon`.
 - Locally the tests run serially. `uv run pytest -n 4 tests/` runs them on four workers;
   each worker holds its own copy of the suite's memory, so do it only on a machine with
   cores and memory to spare, never beside another heavy process.
@@ -838,15 +837,15 @@ convenient call and `pod.process(a, b)` the exact primitive:
   must equal those of a pipeline with that select written by hand (the stream's
   `select_data_columns` method builds the same operator, and `a.join(b)` the same `Join`).
   Nothing to drop means no step. One info log names the dropped columns; it is not a warning.
-- `pod(a, b, strict=True)` and `pod.process(a, b)` reject an extra column. `strict` is part of
-  no identity. `process` never takes a `strict` argument and never drops a column.
+- `pod(a, b, strict_columns=True)` and `pod.process(a, b)` reject an extra column.
+  `strict_columns` is part of no identity. `process` always uses the exact column contract.
 - A missing required column is an error in every form. Tags are never dropped. A data column
   shared by two inputs fails at the join, used or not: no special handling.
 - No select is added when the data function's `accepts_arbitrary_keywords` is true (no kind
   today; `PythonDataFunction` rejects `**kwargs`).
 - Function pods only. An operator's and a `SideEffectPod`'s `__call__` stay aliases of
-  `process` with no `strict` argument. There is no global setting.
-- A test of the exact input contract uses `process` or `strict=True`.
+  `process` with no `strict_columns` argument. There is no global setting.
+- A test of the exact input contract uses `process` or `strict_columns=True`.
 
 **Operator** (`core/operators/`) — structural pod transforming streams without adding or
 synthesizing data; it may add a tag (`AddTags`). All subclass `StaticOutputPod`:

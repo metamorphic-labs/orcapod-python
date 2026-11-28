@@ -426,7 +426,7 @@ example a copy in the source's data under another name, or
 
 ## Errors that name a data-tag
 
-- `pod.process(stream)` and `pod(stream, strict=True)` are exact: they hand every data
+- `pod.process(stream)` and `pod(stream, strict_columns=True)` are exact: they hand every data
   column to the function, so a data-tag the function does not read is refused like
   any extra column. The error names the data-tags and the two ways out: call the
   pod, `pod(stream)`, which for a plain `FunctionPod` lets them pass through as
