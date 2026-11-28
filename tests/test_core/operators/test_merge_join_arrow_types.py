@@ -46,6 +46,10 @@ from orcapod.utils.arrow_utils import (
 
 from .several_items import async_rows
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 SCHEMA_CONFIGS: tuple[dict[str, bool], ...] = ({}, {"system_tags": True})
 STRUCT = pa.struct([("a", pa.int8()), ("b", pa.string())])
 LARGE_STRUCT = pa.struct([("a", pa.int8()), ("b", pa.large_string())])
