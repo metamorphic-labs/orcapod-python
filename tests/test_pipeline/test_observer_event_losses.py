@@ -424,3 +424,26 @@ def test_the_warning_can_be_turned_into_an_error_after_the_run_is_kept(
     assert job.last_run is not None
     assert job.last_run.lost_observer_events["status"].count == 2 * N_ROWS
     assert _rows(job) == EXPECTED_ROWS
+
+
+def test_a_recontextualized_status_observer_keeps_its_run() -> None:
+    """A copy contextualized twice writes its run's id and reports under it."""
+    from orcapod.core.datagrams import Tag
+    from orcapod.pipeline.observer_losses import collecting_lost_events
+
+    stored = StatusObserver(InMemoryArrowDatabase())
+    stored.on_run_start("run-1", pipeline_uri="p@1")
+    tag: Any = Tag({"t1": "a", "t2": 1})
+    stored.contextualize("a").contextualize("b").on_data_start("n", tag, None)  # pyright: ignore[reportArgumentType]  # the status observer does not read the data
+    table = stored.get_status()
+    assert table is not None
+    assert table.column("_status_run_id").to_pylist() == ["run-1"]
+    assert table.column("_status_pipeline_uri").to_pylist() == ["p@1"]
+
+    refusing = StatusObserver(_database())
+    refusing.on_run_start("run-2")
+    with collecting_lost_events("run-2") as losses:
+        refusing.contextualize("a").contextualize("b").on_data_start("n", tag, None)  # pyright: ignore[reportArgumentType]  # as above
+    assert losses.by_kind() == {
+        "status": LostObserverEvents("status", 1, "OSError: store refuses writes")
+    }
