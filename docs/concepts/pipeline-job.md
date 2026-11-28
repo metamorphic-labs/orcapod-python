@@ -243,8 +243,10 @@ A non-null column is created `NOT NULL` and reads back non-null. SQLite refuses 
 `double` column holding a NaN or `-0.0`, which it would read back as NULL and `0.0`. Any
 other type (lists,
 structs, dates or timestamps on SQLite, narrower integers and floats, logical types) is
-refused. PostgreSQL also refuses a column name or a table name longer than
-63 bytes, which it would truncate (`UnstorableTableNameError` for a table). A database on
+refused. PostgreSQL also refuses column names and explicit table identifiers longer than
+63 bytes, which it would truncate (`UnstorableTableNameError` for a table).
+SQLite and PostgreSQL stores generate table names within 63 bytes from the node's
+path, using a readable hint and a digest of the full path. A database on
 `SpiralDBConnector` refuses every write for now (`SpiralDBWriteNotSupportedError`): Orcapod
 reads SpiralDB only. The full list,
 type by type, is [Data types per database](../reference/database-types.md).
@@ -265,11 +267,10 @@ is attached to them, before anything runs:
 An operator cache or cached source on a SQL connector is also refused when it is written, before
 anything is stored, if one of its own columns has a type or name the connector does not store. On
 PostgreSQL that is every operator cache with caching on: its system-tag column names
-(`_tag_source_id::` and a 64-character hash) are longer than 63 bytes.
-A table's name is its Orcapod path joined by `__`, and every node table and cached source path
-holds a 64-character hash, so on PostgreSQL only tables you write through `ConnectorArrowDatabase`
-yourself under short paths fit; reading an existing table with `PostgreSQLTableSource` is
-unaffected. Use
+(`_tag_source_id::` and a 64-character hash) are longer than 63 bytes. Connector store table names
+use a readable path hint and a digest of the full path, so long paths fit the SQLite and PostgreSQL
+table-name limits. These generated names do not change the separate column-name restrictions.
+Reading an existing table with `PostgreSQLTableSource` is unaffected. Use
 `InMemoryArrowDatabase` or `DeltaTableDatabase` for such jobs. Storing these columns on
 connector databases is planned for a later release.
 
