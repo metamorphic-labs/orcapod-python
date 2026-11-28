@@ -30,6 +30,7 @@ from typing import Any, cast, get_args, get_origin
 import numpy as np
 
 from orcapod.errors import ValueConversionWarning, type_text
+from orcapod.types import DataType
 from orcapod.utils.warning_utils import (
     error_filter_active,
     outside_orcapod_stacklevel,
@@ -74,8 +75,50 @@ def narrows_float(value: object, declared_width: int) -> bool:
         that is not a float.
     """
     if isinstance(value, np.floating):
-        return value.dtype.itemsize > declared_width
+        return np.dtype(type(value)).itemsize > declared_width
     return isinstance(value, float) and _PYTHON_FLOAT_WIDTH > declared_width
+
+
+def keep_float32_declaration(storage: DataType, declared: DataType) -> DataType:
+    """Restore declared float32 leaves in an Arrow-derived conversion type.
+
+    The Arrow-derived type controls every other conversion, including the
+    container shape, nullability and conversion of booleans to integers.
+    Registered classes already use their own field declarations.
+    """
+    if storage is float and declared is np.float32:
+        return np.float32
+    if storage == declared:
+        return storage
+
+    declared_origin = get_origin(declared)
+    declared_args = cast(tuple[DataType, ...], get_args(declared))
+    if declared_origin in (typing.Union, types.UnionType) and len(declared_args) == 2:  # pyright: ignore[reportDeprecated]  # detects Optional[T]
+        if type(None) in declared_args:
+            inner = next(arg for arg in declared_args if arg is not type(None))
+            return keep_float32_declaration(storage, inner)
+
+    storage_origin = get_origin(storage)
+    storage_args = cast(tuple[DataType, ...], get_args(storage))
+    if storage_origin in (typing.Union, types.UnionType) and len(storage_args) == 2:  # pyright: ignore[reportDeprecated]  # detects Optional[T]
+        if type(None) in storage_args:
+            inner = next(arg for arg in storage_args if arg is not type(None))
+            return keep_float32_declaration(inner, declared) | None
+
+    if (
+        storage_origin is declared_origin
+        and storage_origin in (dict, list, set, tuple)
+        and len(storage_args) == len(declared_args)
+    ):
+        args = tuple(
+            keep_float32_declaration(base, annotation)
+            for base, annotation in zip(storage_args, declared_args)
+        )
+        if args != storage_args:
+            return cast(
+                DataType, cast(object, types.GenericAlias(storage_origin, args))
+            )
+    return storage
 
 
 def narrower_float_width(python_type: object) -> int | None:

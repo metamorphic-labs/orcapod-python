@@ -136,13 +136,14 @@ A Python `float` given for a column declared `numpy.float32` (in a `data_schema`
 types, or the `python_schema` of a datagram built from values) is converted as Arrow converts
 it, with no check of the value: one that `float32` cannot hold exactly is stored changed
 (`0.1` as `0.10000000149011612`, `1e-50` as `0.0`, `1e300` as `inf`). Orcapod issues one
-`ValueConversionWarning` per process the first time this happens, not one per column, row or
-source; whether it happens is decided from the types, never from the values. Pass
-`numpy.float32` values, or declare the column `float`, to avoid it. `numpy.float32` values and
+`ValueConversionWarning` per process and declared type. The warning depends on the value's
+type and the declaration. Pass `numpy.float32` values, or declare the column `float`, to
+avoid it. `numpy.float32` values and
 an Arrow column that is already `float32` never warn. The same holds at every depth: a list
-element, a dict key or value, a set element, a field of a class. The warning is issued where
-the values are converted to Arrow: when a source is built, when a datagram built from
-values gives its table or hash, or when that datagram is updated after materialization.
+element, a dict key or value, a set element, a field of a class. For a dict-backed
+datagram the warning can occur when dict keys are put in canonical order, including at
+construction, or when the Arrow table is built for `as_table()` or a hash. Updates and
+additions that use an already materialized table convert the affected columns immediately.
 One case is refused, because data would be lost: dict keys, or
 set elements, that differ as Python floats and are one `float32` value (`1e-50` and `2e-50`
 are both `0.0`) raise `CanonicalOrderError`, naming the column and both. A function's output

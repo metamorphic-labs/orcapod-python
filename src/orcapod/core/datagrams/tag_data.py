@@ -905,6 +905,17 @@ class Data(Datagram):
                 **self._ensure_python_schema(),
             }
         )
+        if isinstance(other, Datagram):
+            new_p._declared_data_types = Schema(
+                {
+                    **{
+                        name: other._declared_data_types[name]
+                        for name in names
+                        if name in other._declared_data_types
+                    },
+                    **self._declared_data_types,
+                }
+            )
         new_p._data_arrow_schema = None
         # The added columns' source info is ``other``'s; an entry this data holds for
         # one of them (it does not hold the column) does not override it.
