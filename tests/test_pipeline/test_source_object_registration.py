@@ -12,6 +12,7 @@ from orcapod import Pipeline, PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InconsistentSourceError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.sources import CSVSource, DictSource
 
 Orchestrator = type[AsyncPipelineOrchestrator] | type[SyncPipelineOrchestrator]
@@ -91,6 +92,14 @@ def _job(tmp_path: Path, slots: tuple[str, ...] = ("a", "b")) -> PipelineJob:
         for slot, compute in zip(slots, (total, difference, product)):
             compute.pod(_source(tmp_path, "dict", slot), label=f"result_{slot}")
     return job
+
+
+def _rebind(job: PipelineJob, sources: dict[str, StreamProtocol], setter: bool) -> None:
+    if setter:
+        for name, source in sources.items():
+            job.nodes[name].bound_source = source
+    else:
+        job.bind(sources=sources)
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -317,19 +326,22 @@ def test_slot_setter_refuses_duplicates_and_preserves_bindings(
     assert job.nodes["b"].bound_source is original
 
 
-def test_slot_setter_same_hash_replacement_survives_capture(tmp_path: Path) -> None:
+def test_slot_setter_same_hash_replacement_blocks_capture_but_runs(
+    tmp_path: Path,
+) -> None:
     first = _source(tmp_path, "dict", "a")
     replacement = _source(tmp_path, "dict", "a", change=True)
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
         total.pod(first, label="first")
     job.nodes["a"].bound_source = replacement
     with job:
-        difference.pod(replacement, label="second")
+        with pytest.raises(InconsistentSourceError, match="not as captured"):
+            difference.pod(replacement, label="second")
+    assert "second" not in job.nodes
     assert job.sources["a"] is replacement
     assert job.nodes["a"].bound_source is replacement
     job.run()
     assert sorted(job.first.as_table()["out"].to_pylist()) == [3, 43]
-    assert sorted(job.second.as_table()["out"].to_pylist()) == [-37, -1]
 
 
 def test_slot_setter_can_unbind_and_recompile(tmp_path: Path) -> None:
@@ -462,46 +474,36 @@ def test_source_slot_run_checks_roots_changed_after_binding(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
-@pytest.mark.parametrize("bound_first", [False, True])
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
-def test_capture_after_rebind_requires_the_current_source_object(
-    tmp_path: Path, setter: bool, bound_first: bool, orchestrator: Orchestrator
+def test_binding_back_the_captured_object_restores_capture_and_rows(
+    tmp_path: Path, setter: bool, orchestrator: Orchestrator
 ) -> None:
     original = _source(tmp_path, "dict", "a")
-    same_original_hash = _source(tmp_path, "dict", "a", reverse=True, change=True)
+    another_object = _source(tmp_path, "dict", "a", reverse=True, change=True)
     replacement = _source(tmp_path, "dict", "b", change=True)
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
         total.pod(original, label="before")
-    if setter:
-        job.nodes["a"].bound_source = replacement
-    else:
-        job.bind(sources={"a": replacement})
-    job.compile()
 
+    # Bind inside an open capture context so the check must run when recording.
     with job:
-        if bound_first:
-            difference.pod(replacement, label="after")
-        for retired in (original, same_original_hash):
-            with pytest.raises(InconsistentSourceError, match="slot 'a'") as error:
-                product.pod(retired, label="refused")
-            assert "Pass the source bound there" in str(error.value)
-            assert "bind" in str(error.value)
-        if not bound_first:
-            difference.pod(replacement, label="after")
-
-    assert set(job.sources) == {"a"}
-    assert set(job.nodes) == {"a", "before", "after"}
+        _rebind(job, {"a": replacement}, setter)
+        for candidate in (replacement, original, another_object):
+            with pytest.raises(
+                InconsistentSourceError, match="not as captured"
+            ) as error:
+                difference.pod(candidate, label="refused")
+            assert "'a'" in str(error.value)
+            assert "ITL-1559" in str(error.value)
+            assert "Bind" in str(error.value) and "new job" in str(error.value)
     job.run(orchestrator=orchestrator())
     assert sorted(job.before.as_table()["out"].to_pylist()) == [3, 43]
-    assert sorted(job.after.as_table()["out"].to_pylist()) == [-37, -1]
 
-    # Both steps still read the same slot if it is rebound again.
-    job.bind(sources={"a": original})
+    _rebind(job, {"a": original}, setter)
     job.compile()
     with job:
-        with pytest.raises(InconsistentSourceError, match="slot 'a'"):
-            product.pod(replacement, label="also_refused")
+        difference.pod(original, label="after")
     job.run(orchestrator=orchestrator())
+    assert set(job.nodes) == {"a", "before", "after"}
     assert sorted(job.before.as_table()["out"].to_pylist()) == [3, 7]
     assert sorted(job.after.as_table()["out"].to_pylist()) == [-1, -1]
 
@@ -590,7 +592,7 @@ def double(out: int) -> int:
 @pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
 @pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning")
-def test_prebuilt_stream_checks_for_a_retired_root_after_recompile(
+def test_rebound_job_refuses_prebuilt_streams_after_recompile(
     tmp_path: Path, kind: str, setter: bool, orchestrator: Orchestrator
 ) -> None:
     from orcapod.operators import SemiJoin
@@ -629,9 +631,9 @@ def test_prebuilt_stream_checks_for_a_retired_root_after_recompile(
         prebuilt is not recorded and prebuilt.content_hash() == recorded.content_hash()
     )
     with job:
-        with pytest.raises(InconsistentSourceError, match="slot 'a'") as error:
+        with pytest.raises(InconsistentSourceError, match="not as captured") as error:
             consumer.pod(prebuilt, label="refused")
-        assert "Pass the source bound there" in str(error.value)
+        assert "'a'" in str(error.value)
     job.run(orchestrator=orchestrator())
     assert "refused" not in job.nodes
     column, expected = (
@@ -643,9 +645,10 @@ def test_prebuilt_stream_checks_for_a_retired_root_after_recompile(
 @pytest.mark.parametrize(
     "names", [("a", "b"), ("b", "a"), ("a", "b", "c"), ("c", "b", "a")]
 )
+@pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
-def test_capture_uses_current_source_object_after_swapping_or_rotating_slots(
-    names: tuple[str, ...], orchestrator: Orchestrator
+def test_swapping_or_rotating_slots_blocks_capture_but_preserves_rows(
+    names: tuple[str, ...], setter: bool, orchestrator: Orchestrator
 ) -> None:
     sources = {
         name: _shifted_source(name, 10 * index) for index, name in enumerate(names)
@@ -654,22 +657,41 @@ def test_capture_uses_current_source_object_after_swapping_or_rotating_slots(
         for name, source in sources.items():
             total.pod(source, label=f"original_{name}")
     rotated = names[1:] + names[:1]
-    job.bind(
-        sources={slot: sources[name] for slot, name in zip(names, rotated, strict=True)}
+    _rebind(
+        job,
+        {slot: sources[name] for slot, name in zip(names, rotated, strict=True)},
+        setter,
     )
     job.compile()
     with job:
-        for name, source in reversed(sources.items()):
-            difference.pod(source, label=f"added_{name}")
+        for source in reversed(sources.values()):
+            with pytest.raises(
+                InconsistentSourceError, match="not as captured"
+            ) as error:
+                difference.pod(source, label="added")
+            assert all(repr(name) in str(error.value) for name in names)
     job.run(orchestrator=orchestrator())
 
+    assert "added" not in job.nodes
     assert set(job.sources) == set(names)
     for index, name in enumerate(names):
         before = job.nodes[f"original_{name}"]
-        after = job.nodes[f"added_{name}"]
-        assert sorted(after.as_table()["out"].to_pylist()) == [10 * index - 1] * 2
         offset = 10 * ((index + 1) % len(names))
         assert sorted(before.as_table()["out"].to_pylist()) == [offset + 3, offset + 7]
+
+    restored, *still_changed = names
+    _rebind(job, {restored: sources[restored]}, setter)
+    with job:
+        with pytest.raises(InconsistentSourceError, match="not as captured") as error:
+            difference.pod(sources[restored], label="added")
+        assert repr(restored) not in str(error.value)
+        assert all(repr(name) in str(error.value) for name in still_changed)
+
+    _rebind(job, {name: sources[name] for name in still_changed}, setter)
+    with job:
+        difference.pod(sources[restored], label="added")
+    job.run(orchestrator=orchestrator())
+    assert sorted(job.added.as_table()["out"].to_pylist()) == [-1, -1]
 
 
 def test_cached_derived_collision_only_suggests_reusing_the_object(
@@ -715,7 +737,7 @@ def test_recompiling_a_loaded_job_preserves_its_sources_mapping(
 @pytest.mark.parametrize("prebuilt", [False, True], ids=["same-pod", "prebuilt"])
 @pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
-def test_capture_refuses_to_reuse_an_invocation_on_different_slots(
+def test_rebound_job_refuses_same_pod_or_prebuilt_recapture(
     tmp_path: Path, prebuilt: bool, setter: bool, orchestrator: Orchestrator
 ) -> None:
     first = _source(tmp_path, "dict", "a")
@@ -735,19 +757,109 @@ def test_capture_refuses_to_reuse_an_invocation_on_different_slots(
 
     outside = first.select_data_columns(["x"]) if prebuilt else first
     with job:
-        with pytest.raises(InconsistentSourceError, match="ITL-1559") as error:
+        with pytest.raises(InconsistentSourceError, match="not as captured") as error:
             if prebuilt:
                 outside.map_data({"x": "selected"}, label="refused")
             else:
                 total.pod(outside, label="refused")
-        assert "slot 'a'" in str(error.value) and "slot 'b'" in str(error.value)
-        assert "currently bound" in str(error.value)
-        assert "bind back" in str(error.value)
-        difference.pod(first, label="accepted")
+        assert "'a'" in str(error.value) and "'b'" in str(error.value)
 
     job.run(orchestrator=orchestrator())
     assert "refused" not in job.nodes
     assert sorted(job.original_a.as_table()["out"].to_pylist()) == (
         [12, 14] if prebuilt else [13, 17]
     )
-    assert sorted(job.accepted.as_table()["out"].to_pylist()) == [-1, -1]
+
+
+@pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_unbound_slot_blocks_prebuilt_capture_and_later_binding_still_runs(
+    setter: bool, orchestrator: Orchestrator
+) -> None:
+    original, replacement, later = (
+        _shifted_source(name, offset)
+        for name, offset in (("a", 0), ("b", 10), ("c", 20))
+    )
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        recorded = increment.pod(original, label="before")
+    _rebind(job, {"a": replacement}, setter)
+    job.nodes["a"].bound_source = None
+    job.compile()
+
+    prebuilt = increment.pod(original)
+    assert prebuilt.content_hash() == recorded.content_hash()
+    with job:
+        with pytest.raises(InconsistentSourceError, match="not as captured") as error:
+            double.pod(prebuilt, label="refused")
+        assert "'a'" in str(error.value)
+    _rebind(job, {"a": later}, setter)
+    job.compile()
+    job.run(orchestrator=orchestrator())
+    assert "refused" not in job.nodes
+    assert sorted(job.before.as_table()["out"].to_pylist()) == [22, 24]
+
+
+@pytest.mark.parametrize("use_slot", [False, True], ids=["composite", "slot"])
+@pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_current_composite_binding_blocks_capture_but_preserves_rows(
+    use_slot: bool, setter: bool, orchestrator: Orchestrator
+) -> None:
+    first, second, replacement = (
+        _shifted_source(name, offset)
+        for name, offset in (("a", 0), ("b", 10), ("c", 20))
+    )
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        total.pod(first, label="first")
+        difference.pod(second, label="second")
+    composite = first.select_data_columns(["x", "y"])
+    _rebind(job, {"a": replacement, "b": composite}, setter)
+    job.compile()
+
+    assert job.sources["b"] is composite
+    with job:
+        with pytest.raises(InconsistentSourceError, match="not as captured") as error:
+            product.pod(job.nodes["b"] if use_slot else composite, label="refused")
+        assert "'a'" in str(error.value) and "'b'" in str(error.value)
+    job.run(orchestrator=orchestrator())
+    assert "refused" not in job.nodes
+    assert sorted(job.first.as_table()["out"].to_pylist()) == [23, 27]
+    assert sorted(job.second.as_table()["out"].to_pylist()) == [-1, -1]
+
+
+@pytest.mark.parametrize(
+    "wrapped_slot", [False, True], ids=["prebuilt", "source-job-node"]
+)
+@pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
+def test_capture_uses_the_binding_of_the_first_compiled_slot(
+    wrapped_slot: bool, setter: bool
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    source = _shifted_source("a", 0)
+    original = source.select_data_columns(["x", "y"])
+    recorded = (
+        SourceJobNode.from_stream(original, name="slot") if wrapped_slot else original
+    )
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        total.pod(recorded, label="before")
+    (name,) = job.sources
+    assert job.sources[name] is original
+
+    replacement = source.select_data_columns(["x", "y"])
+    assert (
+        replacement is not original
+        and replacement.content_hash() == original.content_hash()
+    )
+    _rebind(job, {name: replacement}, setter)
+    job.compile()
+    with job:
+        with pytest.raises(InconsistentSourceError, match="not as captured") as error:
+            difference.pod(replacement, label="refused")
+        assert repr(name) in str(error.value)
+
+    _rebind(job, {name: original}, setter)
+    with job:
+        difference.pod(original, label="after")
+    job.run()
+    assert sorted(job.after.as_table()["out"].to_pylist()) == [-1, -1]

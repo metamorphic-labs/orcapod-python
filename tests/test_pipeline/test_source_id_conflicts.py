@@ -376,7 +376,7 @@ def test_run_checks_slots_changed_outside_job_bind(orchestrator: type) -> None:
     assert not job.fb.as_table().num_rows
 
 
-def test_additive_recording_uses_the_current_binding() -> None:
+def test_additive_recording_resumes_when_original_binding_is_restored() -> None:
     original = _dict(1)
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
         increment.pod(original, label="fa")
@@ -384,16 +384,18 @@ def test_additive_recording_uses_the_current_binding() -> None:
     replacement = _dict(100)
     job.bind(sources={"shared": replacement})
     with job:
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            increment.pod(original, label="conflict")
-        increment_again.pod(replacement, label="replacement")
-        consume_output.pod(job.fa, label="next")
-
-    assert job.nodes["shared"].bound_source is replacement
+        with pytest.raises(InconsistentSourceError, match="not as captured"):
+            consume_output.pod(job.fa, label="conflict")
     job.run()
     assert job.fa.as_table()["out"].to_pylist() == [101]
-    assert job.replacement.as_table()["out"].to_pylist() == [102]
-    assert job.next.as_table()["next"].to_pylist() == [202]
+
+    job.bind(sources={"shared": original})
+    with job:
+        consume_output.pod(job.fa, label="next")
+    job.run()
+    assert "conflict" not in job.nodes
+    assert job.fa.as_table()["out"].to_pylist() == [2]
+    assert job.next.as_table()["next"].to_pylist() == [4]
 
 
 def test_load_checks_schema_of_reconstructed_sources(tmp_path: Path) -> None:

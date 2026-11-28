@@ -1513,9 +1513,12 @@ data. The rules:
   Each source content hash belongs to one source object per pipeline or job
   (ITL-1469). Capture, compile, binding through either API, loading and running
   check the sources the graph reads. A slot binding replaces its former source.
-  Pass the currently bound source when adding a step to a job. A capture of an
-  older source for the slot is refused while a different object is bound there
-  (ITL-1559 tracks whether a captured source should refer to the object or the slot).
+  A job accepts new steps only while every slot holds the exact source object
+  it held when that slot was first compiled. A slot originally compiled unbound
+  must be unbound. Rebinding or unbinding a slot blocks recording until all
+  original bindings are restored. InconsistentSourceError names the changed
+  slots. Restore the original bindings or build a new job. A job can compile
+  and run with its replacement bindings. ITL-1559 tracks capture after rebinding.
   Call where() once and reuse the resulting object. A source object conflict
   raises InconsistentSourceError before the separate restriction check, which
   can see restrictions beneath wrappers.

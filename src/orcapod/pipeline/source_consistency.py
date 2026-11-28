@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, cast
 
 from orcapod.errors import InconsistentSourceError
 from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
-    from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
     from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.restrictions import Rebinding
@@ -34,33 +33,20 @@ def invocation_source_uses(invocation: PodInvocation) -> Iterable[SourceUse]:
 def root_source_uses(
     uses: Iterable[SourceUse],
     rebinding: Rebinding = (),
-    *,
-    bound_leaves: Mapping[str, SourceJobNode] | None = None,
 ) -> Iterable[tuple[str, RootSource]]:
-    """Walk to each source object, using live bindings for replaced graph leaves."""
+    """Walk to each source object, using prospective bindings for replaced slots."""
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
 
     replacements = {id(slot): source for slot, source in rebinding}
-    resolved_slots = (
-        {id(slot) for slot in bound_leaves.values()} if bound_leaves else set()
-    )
-    visited: set[tuple[int, bool]] = set()
-    pending = [
-        (location, stream, bool(bound_leaves))
-        for location, stream in reversed(list(uses))
-    ]
+    visited: set[int] = set()
+    pending = list(uses)
+    pending.reverse()
     while pending:
-        location, stream, recorded = pending.pop()
-        key = (id(stream), recorded)
-        if key in visited:
+        location, stream = pending.pop()
+        if id(stream) in visited:
             continue
-        visited.add(key)
-        if recorded and bound_leaves is not None and id(stream) not in resolved_slots:
-            slot = bound_leaves.get(stream.content_hash().to_string())
-            if slot is not None:
-                pending.append((location, slot, False))
-                continue
+        visited.add(id(stream))
         if isinstance(stream, RootSource):
             yield location, stream
         elif isinstance(stream, SourceJobNode):
@@ -69,7 +55,7 @@ def root_source_uses(
                 slot_use = f"slot {stream.name!r}"
                 if location != f"node {stream.label!r}":
                     slot_use = f"{location} via {slot_use}"
-                pending.append((slot_use, bound, False))
+                pending.append((slot_use, bound))
         else:
             # Loaded nodes can have inputs that could not be reconstructed.
             upstreams = cast("tuple[StreamProtocol | None, ...]", stream.upstreams)
@@ -79,7 +65,7 @@ def root_source_uses(
                     upstream_location = location
                     if len(upstreams) > 1:
                         upstream_location += f", {stream.label!r} input {index + 1}"
-                    pending.append((upstream_location, upstream, recorded))
+                    pending.append((upstream_location, upstream))
 
 
 def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:

@@ -87,18 +87,15 @@ rows later. Capture, binding, loading and execution all check for conflicts.
 Rebinding replaces a slot's source. On load, slots with identical saved source
 configurations share one reconstructed object.
 
-When adding a step to a job after rebinding a slot, pass the source object currently
-bound there. This also applies to sources read through a stream built before
-capture. A capture uses the slot that currently holds the supplied source object.
-If the object has been replaced and is no longer bound in the job, capturing it
-raises `InconsistentSourceError`. Bind it again to use it. ITL-1559 tracks whether a
-captured source should refer to the object or to the slot.
+A job accepts new steps only while every slot holds the exact source object
+it held when that slot was first compiled. A slot originally compiled unbound
+must be unbound. Rebinding or unbinding a slot blocks recording until all
+original bindings are restored. InconsistentSourceError names the changed
+slots. Restore the original bindings or build a new job. A job can compile
+and run with its replacement bindings. ITL-1559 tracks capture after rebinding.
 
-The temporary rule also refuses to reuse a recorded step when its recorded inputs
-and the incoming stream point to different slots. This applies when you call the
-same pod again and when a stream built before capture has the same hash as a recorded
-step. Build a distinct step from the currently bound sources or restore the
-recorded bindings.
+Capturing into a loaded job or recompiling it can lose its restored graph
+(ITL-1560). Recompilation preserves the loaded job's public `sources` mapping.
 
 The same rule applies to wrappers. Each of these pairs raises
 `InconsistentSourceError` when the objects share one content hash.
