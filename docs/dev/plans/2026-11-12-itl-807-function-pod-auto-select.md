@@ -1,5 +1,7 @@
 # Function pod `__call__` drops unused data columns (ITL-807, ITL-193) Implementation Plan
 
+ITL-1585 renamed the function pod call keyword to `strict_columns`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `pod(a, b)` on a function pod drops the data columns the function does not take, by
