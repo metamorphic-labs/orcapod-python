@@ -31,10 +31,12 @@ import numbers
 import types
 import typing
 from collections.abc import Callable
+from contextvars import ContextVar
 from decimal import Decimal
 from itertools import islice, pairwise
 from typing import Any, TypeVar, cast, get_args, get_origin
 
+import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 
@@ -44,6 +46,10 @@ _T = TypeVar("_T")
 
 # A sort key: ``(0,)`` for None, ``(1, value)`` otherwise.
 _Rank = tuple[Any, ...]
+
+# Field converters also serve standalone primitive containers. Only an enclosing
+# user-class set requires canonicalizing those fields against their Arrow storage.
+_in_logical_set: ContextVar[bool] = ContextVar("_in_logical_set", default=False)
 
 
 def _key_rank(key: object) -> _Rank:
@@ -144,6 +150,24 @@ def _list_sort_column(
 ) -> pa.Array[Any]:
     """Use one lexicographic key per stored list, comparing only its own children."""
     children = _sort_columns(array.flatten())
+    lengths = pc.list_value_length(array)
+    if len(children) == 1 and (
+        pa.types.is_integer(children[0].type)
+        or pa.types.is_floating(children[0].type)
+        or pa.types.is_boolean(children[0].type)
+    ):
+        # Dense rank compares list items lexicographically, with null items first
+        # and equal lists sharing a rank. List validity stays separate from length.
+        # Rebuild offsets over the flattened children, which omit null parent lists.
+        offsets = pc.cumulative_sum(
+            pa.concat_arrays(
+                [pa.array([0], type=pa.int64()), lengths.cast(pa.int64()).fill_null(0)]
+            )
+        )
+        lists = pa.LargeListArray.from_arrays(
+            cast(pa.Int64Array, offsets), children[0], mask=pc.is_null(array)
+        )
+        return pl.Series(lists).rank("dense").to_arrow()
     # All child columns hold built-in scalars. Tag nulls to put them first, including
     # inside nested lists. The tuple comparison gives a proper prefix precedence.
     child_keys = zip(
@@ -155,7 +179,7 @@ def _list_sort_column(
     )
     keys = [
         None if length is None else tuple(islice(child_keys, length))
-        for length in pc.list_value_length(array).to_pylist()
+        for length in lengths.to_pylist()
     ]
     return _ordinal_column(keys)
 
@@ -245,33 +269,71 @@ def ordered_set_storage(
     try:
         array = pa.array(elements, type=storage_type)
         columns = _sort_columns(array)
-        if len(array) < 2:
-            return array
-        names = [str(i) for i in range(len(columns))]
-        indices = pc.sort_indices(
-            pa.Table.from_arrays(columns, names=names),
-            sort_keys=[(name, "ascending") for name in names],
-            null_placement="at_start",
-        )
-
-        # Intersect adjacent-equality masks until no possible duplicate remains.
-        duplicates = None
-        for column in columns:
-            equal = _adjacent_equal(column.take(indices))
-            duplicates = equal if duplicates is None else pc.and_(duplicates, equal)
-            if not pc.any(duplicates).as_py():
-                try:
-                    return array.take(indices)
-                except pa.ArrowNotImplementedError:
-                    # View types lack a take kernel, including inside structs.
-                    return pa.concat_arrays(
-                        [
-                            array.slice(i, 1)
-                            for i in cast(list[int], indices.to_pylist())
-                        ]
-                    )
+        return _sort_set_array(array, columns) if len(array) > 1 else array
     except (TypeError, pa.ArrowException) as exc:
         raise LogicalSetCanonicalOrderError("values cannot be ordered") from exc
+
+
+def _ordered_dict_storage(
+    entries: list[dict[str, Any]], entry_type: pa.DataType
+) -> pa.Array[Any]:
+    """Order typed dict entries by their keys and reject equal stored keys."""
+    try:
+        array = cast(pa.StructArray, pa.array(entries, type=entry_type))
+        columns = _sort_columns(array.field("key"))
+        return _sort_set_array(array, columns) if len(array) > 1 else array
+    except (TypeError, pa.ArrowException) as exc:
+        raise LogicalSetCanonicalOrderError("values cannot be ordered") from exc
+
+
+def _ordered_set_column(
+    rows: list[list[Any] | None], storage_type: pa.LargeListType[Any]
+) -> pa.LargeListArray[Any]:
+    """Encode and sort the elements of a column, keeping each set in its row."""
+    try:
+        storage = cast("pa.LargeListArray[Any]", pa.array(rows, type=storage_type))
+        elements = storage.values
+        if len(elements) == 0:
+            return storage
+        columns = _sort_columns(elements)
+        if pc.max(pc.list_value_length(storage)).as_py() <= 1:
+            return storage
+        sorted_elements = _sort_set_array(
+            elements, [pc.list_parent_indices(storage), *columns]
+        )
+        return pa.LargeListArray.from_arrays(
+            storage.offsets,
+            sorted_elements,
+            type=storage_type,
+            mask=pc.is_null(storage),
+        )
+    except (TypeError, pa.ArrowException) as exc:
+        raise LogicalSetCanonicalOrderError("values cannot be ordered") from exc
+
+
+def _sort_set_array(
+    array: pa.Array[Any], columns: list[pa.Array[Any]]
+) -> pa.Array[Any]:
+    """Sort stored values by the comparison columns and refuse equal neighbors."""
+    names = [str(i) for i in range(len(columns))]
+    indices = pc.sort_indices(
+        pa.Table.from_arrays(columns, names=names),
+        sort_keys=[(name, "ascending") for name in names],
+        null_placement="at_start",
+    )
+    # Intersect adjacent equality masks until no possible duplicate remains.
+    duplicates = None
+    for column in columns:
+        equal = _adjacent_equal(column.take(indices))
+        duplicates = equal if duplicates is None else pc.and_(duplicates, equal)
+        if not pc.any(duplicates).as_py():
+            try:
+                return array.take(indices)
+            except pa.ArrowNotImplementedError:
+                # View types lack a take kernel, including inside structs.
+                return pa.concat_arrays(
+                    [array.slice(i, 1) for i in cast(list[int], indices.to_pylist())]
+                )
     raise LogicalSetCanonicalOrderError("duplicate key or set element")
 
 

@@ -1266,3 +1266,18 @@ def test_primitive_unordered_output_keeps_output_type_error(
         f"which is declared {declared}: CanonicalOrderError. "
         "The output does not conform; convert the value in the function."
     )
+
+
+@dataclass(frozen=True, eq=False)
+class WithDict:
+    d: dict[float, int]
+
+
+def test_logical_set_output_reports_nested_dict_nan() -> None:
+    """Keep the column-qualified canonical order error from a logical set output."""
+
+    stream = make_pod(
+        set[WithDict], {WithDict({float("nan"): 1})}, name="nested_nan"
+    ).pod(make_source())
+    with pytest.raises(errors.CanonicalOrderError, match=r"Column 'y': .*NaN"):
+        list(stream.iter_data())

@@ -12,9 +12,11 @@ storage values.
 
 **Fix:** Apply canonical order after coercion to the declared Arrow element type.
 Sort the struct fields in declared order and use a lexicographic key for each
-list field. Check adjacent sorted values for duplicates. The five built-in
-scalar-stored types keep their native sort. The order is independent of any
-class comparison method, so the same rule applies to classes rebuilt from
-metadata. Reject NaNs at any depth, incomparable values and duplicate storage
-values. The conversion boundary supplies the column name. Rebuilding sets of
-user classes can change affected row hashes.
+list field. Sort nested dict keys and set items in their own declared storage
+types before comparing the enclosing elements. Check adjacent sorted values
+for duplicates within each set. Multi-row table conversion encodes and sorts
+each set column in one pass. The five built-in scalar-stored types keep their
+native sort for standalone sets. The same order applies to classes rebuilt
+from metadata. Reject NaNs at any depth, incomparable values and duplicate
+storage values. The conversion boundary supplies the column name. Rebuilding
+sets of user classes can change affected row hashes.

@@ -38,18 +38,24 @@ def make_empty_table(
 
 
 def table_from_storage(
-    rows: list[dict[str, Any]], schema: pa.Schema | None
+    rows: list[dict[str, Any]],
+    schema: pa.Schema | None,
+    *,
+    encoded_columns: dict[int, pa.Array[Any]] | None = None,
 ) -> pa.Table:
     """Build a table, reusing the encoded elements of top-level logical sets.
 
     Rows otherwise follow Arrow's ``Table.from_pylist`` conventions. Building a
     large-list column from offsets avoids passing each encoded element back
-    through a Python scalar when Arrow appends a list value.
+    through a Python scalar when Arrow appends a list value. Columns supplied in
+    ``encoded_columns`` are already assembled and keyed by schema position.
     """
     if schema is None:
         return pa.Table.from_pylist(rows)
-    encoded_columns: dict[int, pa.Array[Any]] = {}
+    encoded_columns = dict(encoded_columns) if encoded_columns else {}
     for index, field in enumerate(schema):
+        if index in encoded_columns:
+            continue
         kind = field.type
         if not isinstance(kind, pa.ExtensionType) or not kind.extension_name.startswith(
             "set["

@@ -62,6 +62,12 @@ from orcapod.logical_types.registry import (
     make_arrow_extension_type,
     make_polars_extension_type,
 )
+from orcapod.semantic_types.canonical_order import (
+    _in_logical_set,
+    _ordered_set_column,
+    ordered_set_storage,
+    sort_set_elements,
+)
 
 if TYPE_CHECKING:
     from orcapod.logical_types.protocols import (
@@ -161,6 +167,11 @@ class ListLogicalType(BaseLogicalType):
         self._uses_native_sort = (
             not isinstance(element_logical_type, ArrowElement)
             and element_logical_type.logical_type_name in self._NATIVE_SORT_TYPES
+        )
+        self._orders_stored_sets = (
+            is_set
+            and not self._uses_native_sort
+            and not isinstance(element_logical_type, ArrowElement)
         )
         self._arrow_ext: pa.ExtensionType | None = None
         self._polars_ext: pl.BaseExtension | None = None
@@ -377,6 +388,14 @@ class ListLogicalType(BaseLogicalType):
         """
         if value is None:
             return []
+        if self._orders_stored_sets:
+            token = _in_logical_set.set(True)
+            try:
+                elements = self._encode_elements(value, converter)
+            finally:
+                _in_logical_set.reset(token)
+            return ordered_set_storage(elements, self._storage_type.value_type)
+
         if converter is None:
             elements = list(value)
         else:
@@ -386,16 +405,37 @@ class ListLogicalType(BaseLogicalType):
             ]
         if not self._is_set:
             return elements
+        if _in_logical_set.get():
+            return ordered_set_storage(elements, self._storage_type.value_type)
         if self._uses_native_sort:
             return sorted(elements)
-        if self._element_logical_type is None:
-            from orcapod.semantic_types.canonical_order import sort_set_elements
 
-            return sort_set_elements(elements)
+        return sort_set_elements(elements)
 
-        from orcapod.semantic_types.canonical_order import ordered_set_storage
+    def _encode_elements(
+        self, value: Any, converter: TypeConverterProtocol | None
+    ) -> list[Any]:
+        """Convert elements using their declared logical type."""
+        if converter is None:
+            return list(value)
+        return [
+            converter.python_to_storage(item, self._element_python_type)
+            for item in value
+        ]
 
-        return ordered_set_storage(elements, self._storage_type.value_type)
+    def _python_sets_to_storage(
+        self, values: list[Any], converter: TypeConverterProtocol
+    ) -> pa.LargeListArray[Any]:
+        """Encode and order a column of sets in one Arrow pass."""
+        token = _in_logical_set.set(True)
+        try:
+            rows = [
+                None if value is None else self._encode_elements(value, converter)
+                for value in values
+            ]
+        finally:
+            _in_logical_set.reset(token)
+        return _ordered_set_column(rows, self._storage_type)
 
     def storage_to_python(
         self, storage_value: Any, converter: TypeConverterProtocol | None

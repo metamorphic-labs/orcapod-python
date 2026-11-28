@@ -13,6 +13,7 @@ from collections.abc import Callable
 import pyarrow as pa
 
 
+from orcapod.errors import LogicalSetCanonicalOrderError
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 from orcapod.utils.arrow_utils import table_from_storage
 
@@ -86,7 +87,12 @@ class SemanticSchemaConverter:
                     converted_record[field_name] = None
                 else:
                     # Convert using the pre-computed converter
-                    converted_record[field_name] = converter(value)
+                    try:
+                        converted_record[field_name] = converter(value)
+                    except LogicalSetCanonicalOrderError as exc:
+                        raise LogicalSetCanonicalOrderError(
+                            f"Column {field_name!r}: {exc}"
+                        ) from exc
             converted_data.append(converted_record)
 
         return converted_data

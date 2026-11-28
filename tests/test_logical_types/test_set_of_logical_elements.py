@@ -50,6 +50,7 @@ from orcapod.semantic_types.canonical_order import (
 )
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 from orcapod.sources import DictSource
+from orcapod.types import Schema
 
 # ── user-registered logical types ────────────────────────────────────────────
 
@@ -810,3 +811,103 @@ def test_encoded_struct_set_column_keeps_null_and_empty_rows() -> None:
         [{"a": 3, "b": "b"}],
     ]
     assert table["i"].to_pylist() == [0, 1, 2, 3]
+
+
+def test_nested_dict_order_ignores_user_comparators() -> None:
+    """Canonicalize dict keys from storage before comparing the enclosing set."""
+
+    class ReverseText(str):
+        @override
+        def __lt__(self, other: str) -> bool:
+            pytest.fail("dict key comparator called")
+
+    @op.dataclass(frozen=True, eq=False)
+    class WithDict:
+        d: dict[str, int]
+
+    plain = WithDict({"a": 1, "z": 2})
+    custom = WithDict({ReverseText("a"): 1, ReverseText("z"): 2})
+    first = _source([{plain}], WithDict)
+    second = _source([{custom}], WithDict)
+    assert _stored(first) == _stored(second)
+    assert _row_hashes(first) == _row_hashes(second)
+    with pytest.raises(CanonicalOrderError, match=r"Column 's': .*duplicate"):
+        _source([{plain, custom}], WithDict).as_table()
+
+
+@pytest.mark.parametrize("mapping", [False, True])
+def test_nested_unordered_storage_collision_is_refused(mapping: bool) -> None:
+    """A set element cannot contain entries that would collapse on read."""
+
+    @op.dataclass(frozen=True, eq=False)
+    class DictField:
+        values: dict[date, int]
+
+    @op.dataclass(frozen=True, eq=False)
+    class SetField:
+        values: set[date]
+
+    first, second = datetime(2026, 1, 1, 1), datetime(2026, 1, 1, 2)
+    element = DictField({first: 1, second: 2}) if mapping else SetField({first, second})
+    with pytest.raises(CanonicalOrderError, match=r"Column 's': .*duplicate"):
+        _source([{element}], type(element)).as_table()
+
+
+def test_precomputed_converter_names_logical_set_column() -> None:
+    """The precomputed table writer also supplies the failing column."""
+    from orcapod.semantic_types.precomputed_converters import SemanticSchemaConverter
+
+    @op.dataclass(frozen=True, eq=False)
+    class WithDict:
+        d: dict[float, int]
+
+    converter = get_default_context().type_converter
+    assert isinstance(converter, UniversalTypeConverter)
+    schema: dict[str, Any] = {"bad": set[WithDict]}
+    converter.ensure_types_registered_for_schemas(Schema(schema))
+    writer = SemanticSchemaConverter(converter, python_schema=schema)
+    with pytest.raises(CanonicalOrderError, match=r"Column 'bad': .*NaN"):
+        writer.python_dicts_to_arrow_table([{"bad": {WithDict({float("nan"): 1})}}])
+
+
+def test_numeric_list_keys_skip_python_ranking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rank variable-width nullable numeric list keys without decoding Python values."""
+    from orcapod.semantic_types import canonical_order
+
+    def unexpected(_keys: object) -> Never:
+        pytest.fail("numeric list keys entered Python ranking")
+
+    monkeypatch.setattr(canonical_order, "_ordinal_column", unexpected)
+    shape = pa.struct([("items", pa.large_list(pa.float64())), ("value", pa.int64())])
+    rows = [
+        {"items": [0.0, 1.0], "value": 0},
+        {"items": [None], "value": 0},
+        {"items": None, "value": 0},
+        {"items": [-0.0], "value": 2},
+        {"items": [], "value": 0},
+        {"items": [0.0], "value": 1},
+        {"items": [None, -2.0], "value": 0},
+    ]
+    result = ordered_set_storage(rows, shape)
+    assert result.equals(pa.array([rows[i] for i in (2, 4, 1, 6, 5, 3, 0)], type=shape))
+
+
+def test_small_logical_sets_share_one_sort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sort all rows of a flat set column in one pass without mixing their values."""
+    from orcapod.semantic_types import canonical_order
+
+    sort_indices = canonical_order.pc.sort_indices
+    sizes: list[int] = []
+
+    def record_size(table: pa.Table, *args: Any, **kwargs: Any) -> Any:
+        sizes.append(table.num_rows)
+        return sort_indices(table, *args, **kwargs)
+
+    monkeypatch.setattr(canonical_order.pc, "sort_indices", record_size)
+    small = ExactPoint(2, "x")
+    large = ExactPoint(10, "y")
+    table = get_default_context().type_converter.python_dicts_to_arrow_table(
+        [{"s": {small, large}} for _ in range(32)], python_schema={"s": set[ExactPoint]}
+    )
+    assert sizes == [64]
+    assert table["s"].to_pylist() == [[{"a": 2, "b": "x"}, {"a": 10, "b": "y"}]] * 32
