@@ -117,12 +117,16 @@ def _require_matching_nested_flags(
 
 
 def explain_nested_join_conflict(
-    operator: str, *streams: StreamProtocol, include_data: bool = False
+    operator: str,
+    *streams: StreamProtocol,
+    include_data: bool = False,
+    column: str | None = None,
 ) -> None:
     """Diagnose nested flags when Python schema validation already failed.
 
     Synthesized struct classes can differ even when their Python annotations
     look alike. Only examine typed Arrow schemas on the error path.
+    When validation has identified the conflicting column, examine only it.
     """
     from orcapod.core.streams.base import typed_arrow_schemas
 
@@ -133,7 +137,10 @@ def explain_nested_join_conflict(
     roles = 2 if include_data else 1
     for a, b in combinations(schemas, 2):
         for left, right in zip(a[:roles], b[:roles], strict=True):
-            for name in sorted(set(left.names) & set(right.names)):
+            shared = set(left.names) & set(right.names)
+            if column is not None:
+                shared &= {column}
+            for name in sorted(shared):
                 _require_matching_nested_flags(
                     operator, name, left.field(name).type, right.field(name).type
                 )

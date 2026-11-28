@@ -288,6 +288,7 @@ class Join(NonZeroInputOperator):
         tag_schema, data_schema = stream.output_schema()
         data_schema = without_meta_fields(data_schema)
         data_tags = set(data_tag_names(tag_schema, data_schema))
+        data_tag_sources = dict.fromkeys(data_tags, stream)
         for other_stream in ordered_streams[1:]:
             other_tag_schema, other_data_schema = other_stream.output_schema()
             other_data_schema = without_meta_fields(other_data_schema)
@@ -322,7 +323,11 @@ class Join(NonZeroInputOperator):
             for name in sorted(merged):
                 if data_schema[name] != other_data_schema[name]:
                     explain_nested_join_conflict(
-                        "Join", stream, other_stream, include_data=True
+                        "Join",
+                        data_tag_sources[name],
+                        other_stream,
+                        include_data=True,
+                        column=name,
                     )
                     raise InputValidationError(
                         f"{type(self).__name__}: data-tag {name!r} has type "
@@ -331,6 +336,8 @@ class Join(NonZeroInputOperator):
                     )
             tag_schema = schema_utils.union_schemas(tag_schema, other_tag_schema)
             data_schema = schema_utils.union_schemas(data_schema, other_data_schema)
+            for name in other_data_tags:
+                data_tag_sources.setdefault(name, other_stream)
             data_tags |= other_data_tags
             check_namespaces(tag_schema, data_schema, data_tags)
         return tag_schema, data_schema

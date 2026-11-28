@@ -20,5 +20,6 @@ is a future opt-in under ITL-1584.
 **Fix:** Documented the input, output and storage rules. The shared function
 output checker now rejects null items in a required set element position.
 Joins and slot binding identify a nested flag mismatch and describe how to
-match the two declarations. Existing schemas, hash labels and golden values
-stay the same.
+match the two declarations. For a shared data-tag in a multi-input Join, the
+diagnostic compares the two inputs that supplied its conflicting types.
+Existing schemas, hash labels and golden values stay the same.

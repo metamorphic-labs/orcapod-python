@@ -1,7 +1,9 @@
 """Shared Arrow columns with different child flags need an actionable error."""
 
 import asyncio
+from itertools import combinations
 from typing import Any
+from unittest.mock import Mock
 
 import pyarrow as pa
 import pytest
@@ -10,6 +12,7 @@ from orcapod import PipelineJob, SourceNode
 from orcapod.channels import Channel
 from orcapod.errors import InputValidationError, SourceSpecMismatchError
 from orcapod.operators import Join, MapData, MergeJoin, SemiJoin
+from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.sources import ArrowTableSource
 from orcapod.utils.arrow_utils import nested_nullability_differences
 
@@ -66,23 +69,25 @@ def _source(
     )
 
 
-async def _execute(operator, left, right):
+async def _execute(
+    operator: Join | MergeJoin | SemiJoin, *streams: ArrowTableSource
+) -> None:
     """Feed the async row path with the same explicit Arrow schemas."""
-    operator.validate_inputs(left, right)
-    inputs = [Channel(buffer_size=4), Channel(buffer_size=4)]
-    output = Channel(buffer_size=4)
-    for stream, channel in zip((left, right), inputs, strict=True):
+    operator.validate_inputs(*streams)
+    inputs = [Channel[tuple[TagProtocol, DataProtocol]](buffer_size=4) for _ in streams]
+    output = Channel[tuple[TagProtocol, DataProtocol]](buffer_size=4)
+    for stream, channel in zip(streams, inputs, strict=True):
         for row in stream.iter_data():
             await channel.writer.send(row)
         await channel.writer.close()
     await operator.async_execute(
         [channel.reader for channel in inputs],
         output.writer,
-        input_pipeline_hashes=[left.pipeline_hash(), right.pipeline_hash()],
+        input_pipeline_hashes=[stream.pipeline_hash() for stream in streams],
     )
 
 
-def _assert_remedy(message, field):
+def _assert_remedy(message: str, field: str) -> None:
     """Both repairs must be available in the error."""
     assert f"nullability of nested field {field!r}" in message
     assert "declare the same nested flags" in message.lower()
@@ -124,6 +129,65 @@ def test_join_names_nested_flag_in_shared_data_tag():
     right = _source("b", "w", nullable=False, shape="struct-item", data_tag=True)
     with pytest.raises(InputValidationError) as error:
         Join()(left, right).as_table()
+    _assert_remedy(str(error.value), "k.item.code")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reverse_inputs", [False, True], ids=["forward", "reverse"])
+@pytest.mark.parametrize(
+    ("arity", "pair"),
+    [(arity, pair) for arity in (3, 4) for pair in combinations(range(arity), 2)],
+)
+def test_join_names_nested_flag_in_any_data_tag_pair(
+    monkeypatch: pytest.MonkeyPatch,
+    arity: int,
+    pair: tuple[int, int],
+    reverse_inputs: bool,
+    asynchronous: bool,
+) -> None:
+    """Join diagnoses the conflicting data-tag at any two canonical positions."""
+    streams: list[ArrowTableSource] = []
+    for position in range(arity):
+        columns: dict[str, pa.Array[Any]] = {
+            "batch": pa.array([1]),
+            "group": pa.array([2]),
+            f"value_{position}": pa.array([3]),
+        }
+        tags = ["batch", "group"]
+        if position in pair:
+            item = pa.struct(
+                [pa.field("code", pa.int64(), nullable=position == pair[0])]
+            )
+            columns["k"] = pa.array([[{"code": 1}]], type=pa.large_list(item))
+            tags.append("k")
+        if reverse_inputs:
+            columns = dict(reversed(list(columns.items())))
+            tags.reverse()
+        streams.append(
+            ArrowTableSource(
+                pa.Table.from_arrays(list(columns.values()), names=list(columns)),
+                tag_columns=tags,
+                tag_only_columns=["batch"],
+                source_id=f"input_{position}",
+            )
+        )
+
+    # Assign the real hashes by rank so the pair occupies the specified
+    # positions while Join still sorts the inputs itself.
+    hashes = sorted(
+        (stream.pipeline_hash() for stream in streams), key=lambda h: h.to_hex()
+    )
+    for stream, pipeline_hash in zip(streams, hashes, strict=True):
+        monkeypatch.setattr(stream, "pipeline_hash", Mock(return_value=pipeline_hash))
+    if reverse_inputs:
+        streams.reverse()
+
+    operator = Join()
+    with pytest.raises(InputValidationError) as error:
+        if asynchronous:
+            asyncio.run(_execute(operator, *streams))
+        else:
+            _ = operator(*streams).as_table()
     _assert_remedy(str(error.value), "k.item.code")
 
 
