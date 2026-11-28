@@ -255,7 +255,9 @@ class TestSourceJobNode:
     @pytest.mark.parametrize(
         "length", [1, 2, 3], ids=["direct", "two_slots", "three_slots"]
     )
-    def test_slot_binding_refuses_cycles(self, tag_schema, data_schema, length):
+    def test_slot_binding_refuses_cycles(
+        self, tag_schema: Schema, data_schema: Schema, length: int
+    ) -> None:
         from orcapod.core.sources.dict_source import DictSource
 
         source = DictSource(
@@ -278,7 +280,9 @@ class TestSourceJobNode:
         assert target.bound_source is source
         assert (target.last_modified, upstream.last_modified) == previous_modified
 
-    def test_slot_binding_accepts_acyclic_chain(self, tag_schema, data_schema):
+    def test_slot_binding_accepts_acyclic_chain(
+        self, tag_schema: Schema, data_schema: Schema
+    ) -> None:
         from orcapod.core.sources.dict_source import DictSource
 
         source = DictSource(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -358,8 +358,11 @@ def test_slot_setter_can_unbind_and_recompile(tmp_path: Path) -> None:
 def test_job_binding_refuses_slot_cycles_atomically(
     tmp_path: Path, setter: bool
 ) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+
     job = _job(tmp_path)
-    slot_a, slot_b = job.nodes["a"], job.nodes["b"]
+    slot_a = cast(SourceJobNode, job.nodes["a"])
+    slot_b = cast(SourceJobNode, job.nodes["b"])
     original_a, original_b = slot_a.bound_source, slot_b.bound_source
     previous_modified = slot_a.last_modified, slot_b.last_modified
     original_database = job.database
