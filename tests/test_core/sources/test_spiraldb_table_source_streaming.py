@@ -718,7 +718,8 @@ class TestNotebookPreview:
         unsorted_head = source.head()
         sorted_head = source.head(columns={"sort_by_tags": True})
 
-        assert self._scan_limits() == [10, 10]
+        # One read: the sorted head is the kept rows of the first, sorted (ITL-1485).
+        assert self._scan_limits() == [10]
         read = cast(list[int], unsorted_head.table.column("timestamp").to_pylist())
         assert read == [10, 20, 30, 40, 50, 1, 2, 3, 4, 5]
         assert sorted_head.table.column("timestamp").to_pylist() == sorted(read)
