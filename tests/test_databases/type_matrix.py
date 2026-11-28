@@ -1129,6 +1129,17 @@ table as it is then, by exact name and type (a column with field metadata stays 
 queued order at a flush). A table keeps the column order of its first write. An append that also
 adds, omits or retypes a column keeps each database's own rule. The order of a struct's
 fields is not covered: a struct whose fields are in another order is another type here.
+
+When two connector database handles write the same record key, the last flush to
+commit that key wins. Use `skip_duplicates=True` to keep an already stored key.
+
+SQLite and PostgreSQL roll back a failed bulk upsert. If a flush fails for a
+table, its attempted batch leaves the queue along with records guarded by results
+in that batch. The error names the affected tables, every removed key, and the
+reason for the failure. Independent tables can still commit during the same
+flush. Submit a new batch to try those rows again. A known violation of a stored
+`NOT NULL` constraint is refused at enqueue. PostgreSQL also refuses text
+containing NUL at enqueue.
 """
 
 

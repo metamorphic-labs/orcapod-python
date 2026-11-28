@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import socket
+from collections.abc import Iterable, Iterator
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -12,13 +14,129 @@ import psycopg
 import pyarrow as pa
 import pytest
 
+from orcapod.databases import ConnectorArrowDatabase
 from orcapod.databases.postgresql_connector import (
     PostgreSQLConnector,
     _arrow_type_to_pg_sql,
     _coerce_pg_value,
     _pg_type_to_arrow,
 )
+from orcapod.errors import OrcapodDatabaseWriteError
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
+from orcapod.types import ColumnInfo
+
+
+class _PostgreSQLTransaction:
+    """Track PostgreSQL's aborted transaction and durable writes."""
+
+    def __init__(self) -> None:
+        self.committed = {b"seed": 1}
+        self.pending = self.committed.copy()
+        self.aborted = False
+        self.commands: list[str] = []
+
+    def execute(self, sql: str, row: tuple[bytes, int] | None = None) -> None:
+        assert not self.aborted
+        if sql.startswith("INSERT "):
+            assert row is not None
+            key, value = row
+            if value < 0:
+                self.aborted = True
+                raise psycopg.errors.CheckViolation("value must be positive")
+            self.pending[key] = value
+        else:
+            assert sql.startswith("CREATE TABLE IF NOT EXISTS")
+        self.commands.append(sql)
+
+    def executemany(self, sql: str, rows: Iterable[tuple[bytes, int]]) -> None:
+        for row in rows:
+            self.execute(sql, row)
+
+    def commit(self) -> None:
+        assert not self.aborted
+        self.committed = self.pending.copy()
+        self.commands.append("COMMIT")
+
+    def rollback(self) -> None:
+        self.aborted = False
+        self.pending = self.committed.copy()
+        self.commands.append("ROLLBACK")
+
+    def read(self) -> Iterator[pa.RecordBatch]:
+        yield pa.RecordBatch.from_arrays(
+            [
+                pa.array(list(self.committed), pa.large_binary()),
+                pa.array(list(self.committed.values()), pa.int64()),
+            ],
+            names=["__record_id", "v"],
+        )
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("on_event_loop", [False, True])
+def test_postgresql_check_refusal_rolls_back_and_names_the_whole_batch(
+    bad_first: bool, on_event_loop: bool
+) -> None:
+    transaction = _PostgreSQLTransaction()
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.side_effect = transaction.execute
+    cursor.executemany.side_effect = transaction.executemany
+    connection.commit.side_effect = transaction.commit
+    connection.rollback.side_effect = transaction.rollback
+    with patch("psycopg.connect", return_value=connection):
+        connector = PostgreSQLConnector("dbname=test")
+
+    with (
+        connector,
+        patch.object(connector, "get_table_names", return_value=["t"]),
+        patch.object(
+            connector,
+            "get_column_info",
+            return_value=[
+                ColumnInfo("__record_id", pa.large_binary(), nullable=False),
+                ColumnInfo("v", pa.int64(), nullable=True),
+            ],
+        ),
+        patch.object(
+            connector, "iter_batches", side_effect=lambda *args: transaction.read()
+        ),
+    ):
+        writer = ConnectorArrowDatabase(connector)
+        reader = ConnectorArrowDatabase(connector)
+
+        def check() -> None:
+            left = pa.table({"id": [b"bad-1", b"good-1"], "v": [-1, 11]})
+            right = pa.table({"id": [b"good-2", b"bad-2"], "v": [12, -2]})
+            for batch in (left, right) if bad_first else (right, left):
+                writer.add_records(("t",), batch, record_id_column="id")
+            with pytest.raises(
+                OrcapodDatabaseWriteError, match="must be positive"
+            ) as refused:
+                writer.flush()
+            for handle in (reader, writer):
+                rows = handle.get_all_records(("t",), record_id_column="id")
+                assert rows is not None
+                assert rows.to_pylist() == [{"id": b"seed", "v": 1}]
+            assert "'t'" in str(refused.value)
+            assert all(
+                repr(key) in str(refused.value)
+                for key in (b"bad-1", b"bad-2", b"good-1", b"good-2")
+            )
+            assert transaction.commands.count("ROLLBACK") == 1
+            assert transaction.commands[-1] == "ROLLBACK"
+            cursor.executemany.assert_called_once()
+            before = transaction.commands.copy()
+            writer.flush()
+            assert transaction.commands == before
+
+        async def on_loop() -> None:
+            check()
+
+        if on_event_loop:
+            asyncio.run(on_loop())
+        else:
+            check()
 
 
 class TestPgTypeToArrow:

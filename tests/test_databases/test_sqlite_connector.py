@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -31,6 +33,13 @@ def connector() -> Iterator[SQLiteConnector]:
         c.close()
     except Exception:
         pass
+
+
+def _execute(connector: SQLiteConnector, sql: str) -> sqlite3.Cursor:
+    """Run SQL on the connector's own connection, as a test needs to."""
+    conn = connector._conn  # pyright: ignore[reportPrivateUsage]
+    assert conn is not None
+    return conn.execute(sql)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +111,26 @@ class TestArrowTypeToSqliteSql:
         ):
             with pytest.raises(ValueError, match="no column type"):
                 _arrow_type_to_sqlite_sql(arrow_type)
+
+
+class TestSqliteVersion:
+    @pytest.mark.parametrize("version", [(3, 23, 1), (2, 99, 0)])
+    def test_an_sqlite_library_without_upsert_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, version: tuple[int, int, int]
+    ) -> None:
+        text = ".".join(map(str, version))
+        monkeypatch.setattr(sqlite3, "sqlite_version_info", version)
+        monkeypatch.setattr(sqlite3, "sqlite_version", text)
+        with pytest.raises(RuntimeError, match=rf"3\.24\.0.*{re.escape(text)}"):
+            SQLiteConnector(":memory:")
+
+    @pytest.mark.parametrize("version", [(3, 24, 0), (3, 45, 1)])
+    def test_an_sqlite_library_with_upsert_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, version: tuple[int, int, int]
+    ) -> None:
+        monkeypatch.setattr(sqlite3, "sqlite_version_info", version)
+        monkeypatch.setattr(sqlite3, "sqlite_version", ".".join(map(str, version)))
+        SQLiteConnector(":memory:").close()
 
 
 class TestSQLiteConnectorScaffold:
@@ -365,6 +394,167 @@ class TestUpsertRecords:
             'SELECT value FROM "t" WHERE "__record_id" = \'a\''
         )
         assert cursor.fetchone()[0] == 1.0
+
+    @pytest.mark.parametrize("bad_first", [False, True])
+    def test_failed_upsert_rolls_back_the_whole_batch(
+        self, tmp_path: Path, bad_first: bool
+    ) -> None:
+        db_path = str(tmp_path / "store.db")
+        with SQLiteConnector(db_path) as writer, SQLiteConnector(db_path) as reader:
+            writer.create_table_if_not_exists(
+                "t",
+                [
+                    ColumnInfo("__record_id", pa.large_string(), nullable=False),
+                    ColumnInfo("value", pa.float64(), nullable=False),
+                ],
+                "__record_id",
+            )
+            seed = self._make_table(["changed"], [1.0])
+            writer.upsert_records("t", seed, "__record_id")
+            ids = (
+                ["bad", "changed", "later"]
+                if bad_first
+                else ["changed", "bad", "later"]
+            )
+            values = {"changed": 2.0, "bad": None, "later": 3.0}
+            with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+                writer.upsert_records(
+                    "t",
+                    self._make_table(ids, [values[row_id] for row_id in ids]),
+                    "__record_id",
+                )
+            committed = pa.Table.from_batches(
+                list(reader.iter_batches('SELECT * FROM "t"'))
+            )
+            assert committed.to_pylist() == seed.to_pylist()
+            reader.upsert_records(
+                "t", self._make_table(["changed"], [77.0]), "__record_id"
+            )
+            committed = pa.Table.from_batches(
+                list(writer.iter_batches('SELECT * FROM "t"'))
+            )
+            assert committed["value"].to_pylist() == [77.0]
+
+    @staticmethod
+    def _constrained_table(connector: SQLiteConnector) -> None:
+        """A table with a CHECK and a UNIQUE constraint besides the id (ITL-1490)."""
+        _execute(
+            connector,
+            'CREATE TABLE "c" ("__record_id" TEXT PRIMARY KEY, '
+            '"value" REAL NOT NULL CHECK ("value" >= 0), "name" TEXT UNIQUE)',
+        )
+
+    @staticmethod
+    def _constrained_rows(
+        ids: list[str], values: list[float], names: list[str]
+    ) -> pa.Table:
+        return pa.table(
+            {
+                "__record_id": pa.array(ids, type=pa.large_string()),
+                "value": pa.array(values, type=pa.float64()),
+                "name": pa.array(names, type=pa.large_string()),
+            }
+        )
+
+    def _stored(self, connector: SQLiteConnector) -> list[tuple[object, ...]]:
+        rows = _execute(
+            connector,
+            'SELECT "__record_id", "value", "name" FROM "c" ORDER BY "__record_id"',
+        ).fetchall()
+        return [tuple(row) for row in rows]
+
+    @pytest.mark.parametrize("skip_existing", [False, True])
+    @pytest.mark.parametrize("bad_first", [False, True])
+    def test_check_violation_raises_whatever_the_conflict_policy(
+        self, connector: SQLiteConnector, skip_existing: bool, bad_first: bool
+    ) -> None:
+        """Conflict handling covers the id only: a CHECK violation is never
+        swallowed, and its valid sibling is not committed (ITL-1490)."""
+        self._constrained_table(connector)
+        ids, values, names = ["bad", "good"], [-1.0, 1.0], ["x", "y"]
+        if not bad_first:
+            ids, values, names = ids[::-1], values[::-1], names[::-1]
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            connector.upsert_records(
+                "c",
+                self._constrained_rows(ids, values, names),
+                "__record_id",
+                skip_existing=skip_existing,
+            )
+        assert self._stored(connector) == []
+
+    @pytest.mark.parametrize("skip_existing", [False, True])
+    def test_unique_collision_on_another_column_raises_and_deletes_nothing(
+        self, connector: SQLiteConnector, skip_existing: bool
+    ) -> None:
+        """A new id colliding on a non-id UNIQUE column raises; the stored row
+        it collides with is kept (ITL-1490)."""
+        self._constrained_table(connector)
+        connector.upsert_records(
+            "c",
+            self._constrained_rows(["a", "b"], [1.0, 2.0], ["x", "y"]),
+            "__record_id",
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            connector.upsert_records(
+                "c",
+                self._constrained_rows(["new", "b"], [3.0, 5.0], ["x", "z"]),
+                "__record_id",
+                skip_existing=skip_existing,
+            )
+        assert self._stored(connector) == [("a", 1.0, "x"), ("b", 2.0, "y")]
+
+    @pytest.mark.parametrize("skip_existing", [False, True])
+    def test_id_conflicts_follow_the_policy_in_place(
+        self, connector: SQLiteConnector, skip_existing: bool
+    ) -> None:
+        """An id conflict updates the row in place, or keeps it with
+        skip_existing, and leaves the other rows alone (ITL-1490)."""
+        self._constrained_table(connector)
+        connector.upsert_records(
+            "c",
+            self._constrained_rows(["a", "b"], [1.0, 2.0], ["x", "y"]),
+            "__record_id",
+        )
+        connector.upsert_records(
+            "c",
+            self._constrained_rows(["b", "c"], [9.0, 3.0], ["w", "z"]),
+            "__record_id",
+            skip_existing=skip_existing,
+        )
+        updated = ("b", 2.0, "y") if skip_existing else ("b", 9.0, "w")
+        assert self._stored(connector) == [("a", 1.0, "x"), updated, ("c", 3.0, "z")]
+
+    @pytest.mark.parametrize("skip_existing", [False, True])
+    def test_a_row_colliding_on_its_id_and_another_unique_column(
+        self, connector: SQLiteConnector, skip_existing: bool
+    ) -> None:
+        """With skip_existing, a row whose id exists is skipped, whatever else it
+        collides on; updated in place, its other UNIQUE value raises. Nothing is
+        deleted either way (ITL-1490)."""
+        self._constrained_table(connector)
+        connector.upsert_records(
+            "c",
+            self._constrained_rows(["a", "b"], [1.0, 2.0], ["x", "y"]),
+            "__record_id",
+        )
+        colliding = self._constrained_rows(["b"], [9.0], ["x"])
+        if skip_existing:
+            connector.upsert_records("c", colliding, "__record_id", skip_existing=True)
+        else:
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+                connector.upsert_records("c", colliding, "__record_id")
+        assert self._stored(connector) == [("a", 1.0, "x"), ("b", 2.0, "y")]
+
+    def test_a_table_holding_only_the_id_skips_conflicts(
+        self, connector: SQLiteConnector
+    ) -> None:
+        _execute(connector, 'CREATE TABLE "o" ("__record_id" TEXT PRIMARY KEY)')
+        rows = pa.table({"__record_id": pa.array(["a"], type=pa.large_string())})
+        connector.upsert_records("o", rows, "__record_id")
+        connector.upsert_records("o", rows, "__record_id")
+        stored = _execute(connector, 'SELECT * FROM "o"').fetchall()
+        assert [tuple(row) for row in stored] == [("a",)]
 
     def test_raises_on_invalid_table_name(self, connector: SQLiteConnector) -> None:
         records = self._make_table(["a"], [1.0])

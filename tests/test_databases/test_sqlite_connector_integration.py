@@ -7,6 +7,7 @@ from collections.abc import Iterator
 import pyarrow as pa
 import pytest
 
+from orcapod.errors import OrcapodDatabaseWriteError
 from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
 
 
@@ -105,7 +106,7 @@ class TestConnectorArrowDatabaseWithSQLite:
         # Incompatible schema: different column type for 'x'
         r2 = pa.table({"x": pa.array([2.0], type=pa.float64())})
         db.add_record(("fn", "test"), record_id="r2", record=r2)
-        with pytest.raises(ValueError, match="Schema mismatch"):
+        with pytest.raises(OrcapodDatabaseWriteError, match="Schema mismatch"):
             db.flush()
 
     def test_get_records_by_ids(self, db: ConnectorArrowDatabase) -> None:

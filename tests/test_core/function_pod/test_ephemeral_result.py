@@ -729,7 +729,7 @@ class TestPersistentMissWarning:
 
         # Wipe the result DB to simulate data loss
         result_db._tables.clear()
-        result_db._pending_batches.clear()
+        result_db._pending_commits.clear()
 
         # Recreate node with same pipeline_db (tag entry still there) but empty result_db
         node2, _ = _make_node(
@@ -775,7 +775,7 @@ class TestPersistentMissWarning:
 
         # Simulate data loss
         result_db._tables.clear()
-        result_db._pending_batches.clear()
+        result_db._pending_commits.clear()
 
         # Session 2: miss → recompute → appends new record to pipeline_db
         pf2 = PythonDataFunction(counting_double, output_keys="result")

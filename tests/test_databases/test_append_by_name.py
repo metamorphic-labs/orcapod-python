@@ -14,11 +14,12 @@ exactly, keep the database's own rule.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import uuid
-from collections.abc import Iterator
-from contextlib import ExitStack
+from collections.abc import Iterator, Sequence
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -33,11 +34,15 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     SQLiteConnector,
 )
-from orcapod.databases.utils import in_held_column_order
+from orcapod.databases.utils import declared_null_path, in_held_column_order
 from orcapod.errors import (
     InputValidationError,
+    NullInNonNullableColumnError,
+    OrcapodDatabaseWriteError,
     UnstorableColumnError,
+    UnsupportedValueError,
 )
+from tests.test_databases.test_connector_arrow_database import MockDBConnector
 from tests.test_databases.type_matrix import open_database
 
 PATH = ("t",)
@@ -682,7 +687,7 @@ def test_a_table_changed_between_queue_and_flush_is_refused_as_on_main(
         with sqlite3.connect(path) as other:
             CHANGES[change](other)
     before = _sqlite(path).get_all_records(PATH, record_id_column="rid")
-    with pytest.raises(ValueError, match="Schema mismatch"):
+    with pytest.raises(OrcapodDatabaseWriteError, match="Schema mismatch"):
         db.flush()
     after = _sqlite(path).get_all_records(PATH, record_id_column="rid")
     assert before is not None and after is not None
@@ -1025,6 +1030,624 @@ def test_queued_rows_combine_with_a_stored_key_read_back_not_null(
     _check(
         db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3, 4]
     )
+
+
+def _declared(order: list[str], ns: list[int], *, not_null: bool) -> pa.Table:
+    """Rows ``ns`` with the id and ``a`` declared ``NOT NULL``, or nullable."""
+    table = _rows(order, ns)
+    schema = pa.schema(
+        f.with_nullable(not (not_null and f.name in (ID, "a"))) for f in table.schema
+    )
+    return pa.Table.from_arrays(table.columns, schema=schema)
+
+
+def _check_lookups(db: Any, ns: list[int]) -> None:
+    """The rows ``ns`` by one id, by several ids and by column values."""
+    several = db.get_records_by_ids(
+        PATH, [_row(n)[ID] for n in reversed(ns)], record_id_column=ID
+    )
+    assert sorted(several[ID].to_pylist()) == [_row(n)[ID] for n in ns]
+    for n in ns:
+        one = db.get_record_by_id(PATH, _row(n)[ID], record_id_column=ID)
+        valued = db.get_records_with_column_value(
+            PATH, {"a": n, "c": 100 + n}, record_id_column=ID
+        )
+        assert one.to_pylist() == valued.to_pylist() == [_row(n)]
+
+
+@contextmanager
+def _connector_database(kind: str, tmp_path: Path) -> Iterator[Any]:
+    if kind == "SQLite, key read NOT NULL":
+        yield ConnectorArrowDatabase(_KeyNotNullSQLite(str(tmp_path / "store.db")))
+    elif kind == "writable mock":
+        yield ConnectorArrowDatabase(MockDBConnector())
+    else:
+        with open_database(kind, tmp_path) as db:
+            yield db
+
+
+CONNECTOR_DATABASES = ("SQLite", "SQLite, key read NOT NULL")
+
+
+@pytest.mark.parametrize("kind", CONNECTOR_DATABASES)
+@pytest.mark.parametrize("order", [["id", "a", "c", "b"], ["b", "c", "id", "a"]])
+@pytest.mark.parametrize("stored", [True, False])
+@pytest.mark.parametrize("queued", [True, False])
+def test_lookups_before_a_flush_combine_rows_of_differing_nullability(
+    tmp_path: Path, kind: str, order: list[str], stored: bool, queued: bool
+) -> None:
+    """Stored and queued rows that declare the key and a data column ``NOT NULL`` or
+    nullable read together, whole and by id and by value (ITL-1381)."""
+    with _connector_database(kind, tmp_path) as db:
+        _add(db, _declared([ID, "a", "c", "b"], [1, 2], not_null=stored), flush=True)
+        _add(db, _declared(order, [3, 4], not_null=queued))
+        rows = db.get_all_records(PATH, record_id_column=ID)
+        _check(rows, _given_order(kind, [ID, "a", "c", "b"]), [1, 2, 3, 4])
+        _check_lookups(db, [1, 2, 3, 4])
+
+
+@pytest.mark.parametrize("kind", CONNECTOR_DATABASES)
+@pytest.mark.parametrize("order", [["id", "a", "c", "b"], ["b", "c", "id", "a"]])
+@pytest.mark.parametrize("not_null", [(True, False, True), (False, True, False)])
+def test_queued_batches_of_differing_nullability_are_one_batch(
+    tmp_path: Path, kind: str, order: list[str], not_null: tuple[bool, ...]
+) -> None:
+    """Batches queued by several calls that declare the key and a data column
+    ``NOT NULL`` and nullable are one nullable batch, before and after the flush
+    (ITL-1381): the second call raised ``ArrowInvalid``."""
+    with _connector_database(kind, tmp_path) as db:
+        first = [ID, "a", "c", "b"]
+        for n, flag in enumerate(not_null, start=1):
+            _add(db, _declared(order if n > 1 else first, [n], not_null=flag))
+        _check(db.get_all_records(PATH, record_id_column=ID), first, [1, 2, 3])
+        _check_lookups(db, [1, 2, 3])
+        assert db.get_all_records(PATH, record_id_column=ID).schema.field("a").nullable
+        db.flush()
+        _check(
+            db.get_all_records(PATH, record_id_column=ID),
+            _given_order(kind, first),
+            [1, 2, 3],
+        )
+        _check_lookups(db, [1, 2, 3])
+
+
+@pytest.mark.parametrize("stored", [True, False])
+@pytest.mark.parametrize("first", [True, False])
+@pytest.mark.parametrize("skip", [True, False])
+def test_a_refused_batch_leaves_the_queued_rows_to_be_flushed(
+    tmp_path: Path, stored: bool, first: bool, skip: bool
+) -> None:
+    """Queued batches of differing nullability are combined unless the stored column is
+    ``NOT NULL`` (CodeRabbit on PR 539): the second is then refused when it is queued,
+    in either order, so a flush never drops rows of a valid batch with it."""
+    order = [ID, "a", "c", "b"]
+    with _connector_database("SQLite", tmp_path) as db:
+        _add(db, _declared(order, [1], not_null=stored), flush=True)
+        _add(db, _declared(order, [2], not_null=first))
+        second = _declared(["c", ID, "b", "a"], [3], not_null=not first)
+        if stored:
+            with pytest.raises(InputValidationError, match="stored NOT NULL"):
+                db.add_records(PATH, second, record_id_column=ID, skip_duplicates=skip)
+            # The refused batch changed neither the rows nor the duplicate policy.
+            assert not any(db._pending_skip_existing.values())
+            # A batch whose rows are all queued already has nothing to combine.
+            again = _declared(order, [2], not_null=not first)
+            db.add_records(PATH, again, record_id_column=ID, skip_duplicates=True)
+            ns = [1, 2]
+        else:
+            db.add_records(PATH, second, record_id_column=ID, skip_duplicates=skip)
+            ns = [1, 2, 3]
+        _check(db.get_all_records(PATH, record_id_column=ID), order, ns)
+        db.flush()
+        _check(db.get_all_records(PATH, record_id_column=ID), order, ns)
+
+
+def _nullable_values(
+    rows: Sequence[tuple[bytes, int | None]], *, nullable: bool = True
+) -> pa.Table:
+    return pa.Table.from_arrays(
+        [
+            pa.array([key for key, _ in rows], pa.large_binary()),
+            pa.array([value for _, value in rows], pa.int64()),
+        ],
+        schema=pa.schema(
+            [
+                pa.field(ID, pa.large_binary()),
+                pa.field("v", pa.int64(), nullable=nullable),
+            ]
+        ),
+    )
+
+
+def _read_values(
+    database: ConnectorArrowDatabase, path: tuple[str, ...] = PATH
+) -> pa.Table:
+    rows = database.get_all_records(path, record_id_column=ID)
+    assert rows is not None
+    return rows.sort_by(ID)
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("stored_at_enqueue", [False, True])
+def test_stored_not_null_refusal_preserves_other_rows_and_tables(
+    tmp_path: Path, bad_first: bool, stored_at_enqueue: bool
+) -> None:
+    """Refuse a known violation at add time and a concurrent schema change at flush."""
+    db_file = str(tmp_path / "store.db")
+    with (
+        SQLiteConnector(db_file) as connector,
+        SQLiteConnector(db_file) as reader_connector,
+    ):
+        writer = ConnectorArrowDatabase(connector)
+        reader = ConnectorArrowDatabase(reader_connector)
+        seed = _nullable_values([(b"changed", 1)], nullable=False)
+        good = _nullable_values([(b"valid", 2), (b"later", 3)])
+        bad_rows: list[tuple[bytes, int | None]] = [(b"bad", None), (b"also-bad", None)]
+        if stored_at_enqueue:
+            _add(reader, seed, flush=True)
+            bad_rows.insert(0, (b"changed", 2))
+        bad = _nullable_values(bad_rows).select(["v", ID])
+        for batch in (bad, good) if bad_first else (good, bad):
+            if batch is bad and stored_at_enqueue:
+                with pytest.raises(NullInNonNullableColumnError, match="'v'"):
+                    _add(writer, batch)
+            else:
+                _add(writer, batch)
+        if stored_at_enqueue:
+            _add(reader, _nullable_values([(b"changed", 77)]), flush=True)
+        else:
+            _add(reader, seed, flush=True)
+            with pytest.raises(OrcapodDatabaseWriteError, match="'v'") as raised:
+                writer.flush()
+            assert all(
+                repr(key) in str(raised.value)
+                for key in (b"bad", b"also-bad", b"valid", b"later")
+            )
+        expected = [{ID: b"changed", "v": 1}]
+        if stored_at_enqueue:
+            expected = [
+                {ID: b"changed", "v": 77},
+                {ID: b"later", "v": 3},
+                {ID: b"valid", "v": 2},
+            ]
+        assert _read_values(writer).to_pylist() == expected
+        independent = _nullable_values([(b"ok", 5), (b"also-ok", 6)])
+        writer.add_records(
+            ("independent",), independent, record_id_column=ID, flush=True
+        )
+        assert _read_values(reader, ("independent",)).equals(independent.sort_by(ID))
+        writer.flush()
+        assert _read_values(reader).to_pylist() == expected
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("shared_first", [False, True])
+def test_connector_writes_to_the_same_key_follow_flush_order(
+    tmp_path: Path, bad_first: bool, shared_first: bool
+) -> None:
+    db_file = str(tmp_path / "store.db")
+    with closing(sqlite3.connect(db_file)) as sql:
+        sql.execute(
+            'CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER CHECK (v > 0))'
+        )
+    with (
+        SQLiteConnector(db_file) as connector_a,
+        SQLiteConnector(db_file) as connector_b,
+    ):
+        writer_a = ConnectorArrowDatabase(connector_a)
+        writer_b = ConnectorArrowDatabase(connector_b)
+        _add(writer_b, _nullable_values([(b"shared", 1)]), flush=True)
+        good = [(b"shared", 10), (b"also-good", 20)]
+        valid = _nullable_values(good if shared_first else good[::-1])
+        refused = _nullable_values([(b"bad", -1)])
+        for batch in (refused, valid) if bad_first else (valid, refused):
+            _add(writer_a, batch)
+        with pytest.raises(OrcapodDatabaseWriteError, match="CHECK"):
+            writer_a.flush()
+        assert _read_values(writer_b).to_pylist() == [{ID: b"shared", "v": 1}]
+
+        _add(writer_b, _nullable_values([(b"shared", 99)]), flush=True)
+        assert _read_values(writer_b).to_pylist() == [{ID: b"shared", "v": 99}]
+        writer_a.flush()
+        assert _read_values(writer_b).to_pylist() == [{ID: b"shared", "v": 99}]
+        _add(writer_a, valid, flush=True)
+        assert _read_values(writer_b).to_pylist() == [
+            {ID: b"also-good", "v": 20},
+            {ID: b"shared", "v": 10},
+        ]
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("on_event_loop", [False, True])
+@pytest.mark.parametrize("refusal", ["ABORT", "ROLLBACK", "deferred foreign key"])
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+def test_sqlite_refusal_drops_and_names_the_whole_batch(
+    tmp_path: Path,
+    bad_first: bool,
+    on_event_loop: bool,
+    refusal: str,
+    skip_duplicates: bool,
+) -> None:
+    db_file = str(tmp_path / "store.db")
+    with closing(sqlite3.connect(db_file)) as sql:
+        if refusal == "deferred foreign key":
+            sql.executescript(
+                """
+                CREATE TABLE parents (v INTEGER PRIMARY KEY);
+                INSERT INTO parents VALUES (1), (2), (3);
+                CREATE TABLE t ("__record_id" BLOB PRIMARY KEY,
+                    v INTEGER REFERENCES parents(v) DEFERRABLE INITIALLY DEFERRED);
+                """
+            )
+        else:
+            sql.execute('CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER)')
+            sql.execute(
+                f"""CREATE TRIGGER positive BEFORE INSERT ON t WHEN NEW.v < 0
+                    BEGIN SELECT RAISE({refusal}, 'must be positive'); END"""
+            )
+    with (
+        SQLiteConnector(db_file) as writer_connector,
+        SQLiteConnector(db_file) as reader_connector,
+    ):
+        writer = ConnectorArrowDatabase(writer_connector)
+        reader = ConnectorArrowDatabase(reader_connector)
+
+        def check() -> None:
+            message = "must be positive"
+            if refusal == "deferred foreign key":
+                list(writer_connector.iter_batches("PRAGMA foreign_keys=ON"))
+                message = "FOREIGN KEY constraint failed"
+            _add(reader, _nullable_values([(b"seed", 1)]), flush=True)
+            left = _nullable_values([(b"bad-1", -1), (b"good-1", 2)])
+            right = _nullable_values([(b"good-2", 3), (b"bad-2", -2)]).select(["v", ID])
+            independent = ("independent",)
+            independent_rows = _nullable_values([(b"other-1", 4), (b"other-2", 5)])
+            if not bad_first:
+                writer.add_records(independent, independent_rows, record_id_column=ID)
+            for batch in (left, right) if bad_first else (right, left):
+                writer.add_records(
+                    PATH, batch, record_id_column=ID, skip_duplicates=skip_duplicates
+                )
+            if bad_first:
+                writer.add_records(independent, independent_rows, record_id_column=ID)
+            with pytest.raises(OrcapodDatabaseWriteError, match=message) as raised:
+                writer.flush()
+            expected = [{ID: b"seed", "v": 1}]
+            assert _read_values(reader).to_pylist() == expected
+            assert "'t'" in str(raised.value)
+            assert all(
+                repr(key) in str(raised.value)
+                for key in (b"bad-1", b"bad-2", b"good-1", b"good-2")
+            )
+            assert _read_values(writer).to_pylist() == expected
+            assert _read_values(reader, independent).equals(
+                independent_rows.sort_by(ID)
+            )
+            writer.flush()
+            assert _read_values(reader).to_pylist() == expected
+
+        async def on_loop() -> None:
+            check()
+
+        if on_event_loop:
+            asyncio.run(on_loop())
+        else:
+            check()
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_refused_result_batch_drops_and_names_its_guarded_records(
+    tmp_path: Path, bad_first: bool
+) -> None:
+    db_file = str(tmp_path / "store.db")
+    with closing(sqlite3.connect(db_file)) as sql:
+        sql.executescript(
+            """
+            CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER);
+            CREATE TRIGGER positive BEFORE INSERT ON t WHEN NEW.v < 0
+                BEGIN SELECT RAISE(ABORT, 'must be positive'); END;
+            """
+        )
+    with (
+        SQLiteConnector(db_file) as result_connector,
+        SQLiteConnector(db_file) as record_connector,
+    ):
+        results = ConnectorArrowDatabase(result_connector)
+        records = ConnectorArrowDatabase(record_connector)
+        dependent_path = ("dependents",)
+        downstream_path = ("downstream",)
+        accepted = [(b"good-1", 1), (b"good-2", 2)]
+        refused = [(b"bad-1", -1), (b"bad-2", -2)]
+        for batch in (refused, accepted) if bad_first else (accepted, refused):
+            _add(results, _nullable_values(batch))
+            for result_id, value in batch:
+                dependency = results.pending_result(PATH, result_id)
+                assert dependency is not None
+                record_id = b"record-" + result_id
+                with records.guard_record(dependent_path, record_id, dependency):
+                    records.add_records(
+                        dependent_path,
+                        _nullable_values([(record_id, value)]),
+                        record_id_column=ID,
+                    )
+                downstream_guard = records.pending_result(dependent_path, record_id)
+                assert downstream_guard is not None
+                downstream_id = b"downstream-" + result_id
+                with records.guard_record(
+                    downstream_path, downstream_id, downstream_guard
+                ):
+                    records.add_records(
+                        downstream_path,
+                        _nullable_values([(downstream_id, value)]),
+                        record_id_column=ID,
+                    )
+        records.flush()
+        assert results.get_all_records(dependent_path, record_id_column=ID) is None
+
+        with pytest.raises(
+            OrcapodDatabaseWriteError, match="must be positive"
+        ) as raised:
+            results.flush_result_batch(PATH, publish_records=True)
+        results.fail_pending_result(PATH)
+        assert results.get_all_records(PATH, record_id_column=ID) is None
+        assert records.get_all_records(dependent_path, record_id_column=ID) is None
+        assert records.get_all_records(downstream_path, record_id_column=ID) is None
+        assert all(
+            repr(table) in str(raised.value)
+            for table in ("t", "dependents", "downstream")
+        )
+        for key, _ in accepted + refused:
+            assert repr(key) in str(raised.value)
+            assert repr(b"record-" + key) in str(raised.value)
+            assert repr(b"downstream-" + key) in str(raised.value)
+        records.flush()
+        assert results.get_all_records(dependent_path, record_id_column=ID) is None
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_postgresql_refuses_nul_text_at_enqueue(
+    tmp_path: Path, bad_first: bool
+) -> None:
+    good = pa.table(
+        {
+            ID: [b"first", b"second"],
+            "description": ["a", None],
+            "payload": [b"\x00", b"data"],
+        }
+    )
+    bad = pa.table(
+        {
+            ID: [b"bad-1", b"bad-2"],
+            "description": ["a\x00b", "other"],
+            "payload": [b"data", b"\x00"],
+        }
+    ).select(["payload", ID, "description"])
+    with open_database("PostgreSQL", tmp_path) as database:
+        for batch in (bad, good) if bad_first else (good, bad):
+            if batch is bad:
+                with pytest.raises(UnsupportedValueError, match="'description'.*NUL"):
+                    _add(database, batch)
+            else:
+                _add(database, batch)
+        assert _read_values(database).to_pylist() == good.to_pylist()
+
+
+def _int_list(values: list[int | None], *, declared: bool) -> Any:
+    item = pa.field("item", pa.int64(), nullable=not declared)
+    offsets = pa.array(range(len(values) + 1), pa.int64())
+    return pa.LargeListArray.from_arrays(
+        offsets, pa.array(values, pa.int64()), type=pa.large_list(item)
+    )
+
+
+def _null_case(place: str, n: int, *, null: bool, not_null: bool) -> pa.Table:
+    """Row ``n`` whose value at ``place`` (declared ``NOT NULL`` there, at the top level
+    only with ``not_null``) is null with ``null``; built without Arrow checking it."""
+    value = [None if null else n]
+    other = pa.array([n], pa.int64())
+    nullable = not not_null
+    if place == "column":
+        column = pa.array(value, pa.int64())
+    elif place == "struct":
+        column = pa.StructArray.from_arrays(
+            [other, pa.array(value, pa.int64())],
+            fields=[pa.field("o", pa.int64()), pa.field("x", pa.int64(), False)],
+        )
+    elif place == "list":
+        column = _int_list(value, declared=True)
+    else:
+        column = pa.StructArray.from_arrays(
+            [other, _int_list(value, declared=True)],
+            fields=[
+                pa.field("o", pa.int64()),
+                pa.field("xs", pa.large_list(pa.field("item", pa.int64(), False))),
+            ],
+        )
+    ids = pa.array([f"r{n}".encode()], pa.large_binary())
+    return pa.Table.from_arrays(
+        [ids, column, other],
+        schema=pa.schema(
+            [
+                pa.field(ID, pa.large_binary()),
+                pa.field("v", column.type, nullable=nullable),
+                pa.field("w", pa.int64()),
+            ]
+        ),
+    )
+
+
+NULL_PATHS = {
+    "column": "v",
+    "struct": "v.x",
+    "list": "v[]",
+    "list in struct": "v.xs[]",
+}
+NULL_CASES = [
+    *[(kind, "column") for kind in CONNECTOR_DATABASES],
+    *[("writable mock", place) for place in NULL_PATHS if place != "column"],
+]
+
+
+@pytest.mark.parametrize(("kind", "place"), NULL_CASES)
+@pytest.mark.parametrize("violating_first", [True, False])
+@pytest.mark.parametrize("existing", [True, False])
+@pytest.mark.parametrize("skip", [True, False])
+@pytest.mark.parametrize("run_async", [True, False])
+def test_rows_are_checked_against_their_own_declaration_before_they_are_queued(
+    tmp_path: Path,
+    kind: str,
+    place: str,
+    violating_first: bool,
+    existing: bool,
+    skip: bool,
+    run_async: bool,
+) -> None:
+    """Review of PR 539: a null declared ``NOT NULL``, combined with a valid nullable
+    batch, was stored. It is refused when queued, whichever batch comes first, and the
+    valid batch is stored alone. Queued from this thread or from an event loop's tasks
+    (a connector database has no async path of its own)."""
+
+    def queue(db: Any, violating: bool) -> None:
+        rows = _null_case(
+            place, 3 if violating else 2, null=violating, not_null=violating
+        )
+        if violating:
+            with pytest.raises(NullInNonNullableColumnError) as refused:
+                db.add_records(PATH, rows, record_id_column=ID, skip_duplicates=skip)
+            assert refused.value.column == NULL_PATHS[place]
+        else:
+            db.add_records(PATH, rows, record_id_column=ID, skip_duplicates=skip)
+
+    async def queue_async(db: Any) -> None:
+        for violating in (violating_first, not violating_first):
+            await asyncio.create_task(asyncio.to_thread(queue, db, violating))
+
+    with _connector_database(kind, tmp_path) as db:
+        if existing:
+            _add(db, _null_case(place, 1, null=False, not_null=False), flush=True)
+        if run_async and not kind.startswith("SQLite"):
+            asyncio.run(queue_async(db))
+        elif run_async:
+
+            async def on_loop() -> None:
+                # A SQLite connection stays on its own thread.
+                for violating in (violating_first, not violating_first):
+                    queue(db, violating)
+
+            asyncio.run(on_loop())
+        else:
+            for violating in (violating_first, not violating_first):
+                queue(db, violating)
+        ids = [b"r1", b"r2"] if existing else [b"r2"]
+        for flush in (False, True):
+            if flush:
+                db.flush()
+            rows = db.get_all_records(PATH, record_id_column=ID)
+            assert sorted(rows.column(ID).to_pylist()) == ids
+            assert rows.column("v").null_count == 0
+
+
+@pytest.mark.parametrize("violating_first", [True, False])
+def test_a_postgresql_database_checks_the_declaration_before_anything_is_sent(
+    tmp_path: Path, violating_first: bool
+) -> None:
+    with open_database("PostgreSQL", tmp_path) as db:
+        valid = _null_case("column", 2, null=False, not_null=False)
+        violating = _null_case("column", 3, null=True, not_null=True)
+        if not violating_first:
+            _add(db, valid)
+        with pytest.raises(NullInNonNullableColumnError, match="'v'"):
+            _add(db, violating)
+        if violating_first:
+            _add(db, valid)
+        rows = db.get_all_records(PATH, record_id_column=ID)
+        assert rows is not None
+        assert rows[ID].to_pylist() == [b"r2"]
+
+
+@pytest.mark.parametrize("kind", [*CONNECTOR_DATABASES, "PostgreSQL"])
+@pytest.mark.parametrize("id_type", [pa.binary(), pa.large_binary()])
+@pytest.mark.parametrize("null_in", ["v", "the id"])
+@pytest.mark.parametrize("queued", [True, False])
+def test_each_record_id_type_gets_the_declared_null_error(
+    tmp_path: Path, kind: str, id_type: Any, null_in: str, queued: bool
+) -> None:
+    """Review of PR 539: with a ``binary`` record id the rows are normalized, and the
+    normalization raised a plain ``ValueError`` first."""
+
+    def rows(n: int, *, null: bool) -> pa.Table:
+        table = _null_case("column", n, null=null and null_in == "v", not_null=null)
+        ids = pa.array([None if null and null_in == "the id" else b"r%d" % n], id_type)
+        field = pa.field(ID, id_type, nullable=not null)
+        return pa.Table.from_arrays(
+            [ids, *table.columns[1:]], schema=table.schema.set(0, field)
+        )
+
+    with _connector_database(kind, tmp_path) as db:
+        if queued:
+            _add(db, rows(2, null=False))
+        with pytest.raises(NullInNonNullableColumnError) as refused:
+            _add(db, rows(3, null=True))
+        assert refused.value.column == ("v" if null_in == "v" else "__record_id")
+        rows_read = db.get_all_records(PATH, record_id_column=ID)
+        held = [] if rows_read is None else rows_read[ID].to_pylist()
+        assert held == ([b"r2"] if queued else [])
+
+
+def test_the_declared_null_rule_reads_only_the_values_of_the_rows() -> None:
+    """A value under a null struct, outside a slice, or at a nullable place never
+    counts; a map's values do."""
+
+    def path(array: Any, nullable: bool = True) -> str | None:
+        field = pa.field("c", array.type, nullable=nullable)
+        return declared_null_path(
+            pa.Table.from_arrays([array], schema=pa.schema([field]))
+        )
+
+    ints = pa.array([1, None, 3])
+    x = pa.field("x", pa.int64(), nullable=False)
+    assert (path(ints), path(ints, False)) == (None, "c")
+    assert path(pa.StructArray.from_arrays([ints], fields=[x])) == "c.x"
+    hidden = pa.array([False, True, False])
+    masked = pa.StructArray.from_arrays([ints], fields=[x], mask=hidden)
+    assert (path(masked), path(masked, False)) == (None, "c")
+    lists = _int_list([1, None], declared=True)
+    assert (path(lists), path(lists.slice(0, 1)), path(lists.slice(1))) == (
+        "c[]",
+        None,
+        "c[]",
+    )
+    assert path(_int_list([1, None], declared=False)) is None
+    # The pyarrow stubs do not know the ``type`` argument of ``from_arrays``.
+    arrow: Any = pa
+    fixed = arrow.FixedSizeListArray.from_arrays(
+        pa.array([1, None, 3, 4]), type=pa.list_(pa.field("item", pa.int64(), False), 2)
+    )
+    assert (path(fixed), path(fixed.slice(1))) == ("c[]", None)
+    maps = arrow.MapArray.from_arrays(
+        pa.array([0, 1, 2], pa.int32()),
+        pa.array(["a", "b"]),
+        pa.array([1, None]),
+        type=arrow.map_(pa.string(), x),
+    )
+    assert (path(maps), path(maps.slice(0, 1)), path(maps.slice(1))) == (
+        "c{}",
+        None,
+        "c{}",
+    )
+    # A key is never null, but a field nested in it can be (CodeRabbit on PR 539).
+    for declared in (True, False):
+        child = pa.field("x", pa.int64(), nullable=not declared)
+        keys = pa.StructArray.from_arrays([pa.array([1, None])], fields=[child])
+        keyed = arrow.MapArray.from_arrays(
+            pa.array([0, 1, 2], pa.int32()),
+            keys,
+            pa.array([1, 2]),
+            type=arrow.map_(pa.field("key", keys.type, nullable=False), pa.int64()),
+        )
+        found = "c{key}.x" if declared else None
+        assert path(keyed) == path(keyed.slice(1)) == found
+        assert path(keyed.slice(0, 1)) is None
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────

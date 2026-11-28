@@ -19,8 +19,7 @@ Example::
 from __future__ import annotations
 
 import re
-from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Set
 from contextlib import AbstractContextManager
 from typing import Any, cast
 
@@ -30,14 +29,17 @@ import pyarrow.compute as pc
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases.utils import (
     coerce_record_id,
+    declared_null_path,
     first_changed_column,
     first_logical_identity_change,
     in_held_column_order,
 )
 from orcapod.errors import (
     InputValidationError,
+    NullInNonNullableColumnError,
     OrcapodDatabaseError,
     OrcapodDatabaseReadError,
+    OrcapodDatabaseWriteError,
     UnstorableColumnError,
     UnstorableTableNameError,
 )
@@ -60,9 +62,20 @@ def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
     ]
 
 
+def _stored_null_columns(records: pa.Table, stored: list[pa.Field[Any]]) -> list[str]:
+    """Find stored NOT NULL columns containing a null in incoming rows."""
+    return [
+        field.name
+        for field in stored
+        if not field.nullable
+        and field.name in records.column_names
+        and records[field.name].null_count
+    ]
+
+
 def _alike(parts: list[pa.Table]) -> list[pa.Table]:
-    """Stored and queued rows under one schema when they differ only in a column's
-    nullability: a store may read a column back ``NOT NULL`` (PostgreSQL's primary
+    """Rows of one table (stored and queued, or queued by two calls) under one schema
+    when they differ only in a column's nullability: a store may read a column back ``NOT NULL`` (PostgreSQL's primary
     key) that the queued rows declare nullable. Each such field is nullable when
     either side's is, and the arrays are re-wrapped under it, never cast. Any other
     difference is left for ``pa.concat_tables`` to refuse, as before."""
@@ -97,6 +110,11 @@ class ConnectorArrowDatabase:
     on ``flush()``. The ``record_path`` tuple is mapped to a sanitized SQL table
     name using ``"__".join(sanitized_parts)``.
 
+    If two handles write the same key, the last flush to commit that key wins.
+    With ``skip_duplicates=True``, an existing durable key is kept. A refused
+    flush drops the attempted batch and reports its keys and any removed
+    dependent records.
+
     Args:
         connector: A ``DBConnectorProtocol`` implementation providing the
             underlying DB access (connection, type mapping, queries, writes).
@@ -114,9 +132,7 @@ class ConnectorArrowDatabase:
         connector: DBConnectorProtocol,
         max_hierarchy_depth: int = 10,
         _path_prefix: tuple[str, ...] = (),
-        _shared_pending_batches: dict[str, pa.Table] | None = None,
-        _shared_pending_record_ids: dict[str, set[bytes]] | None = None,
-        _shared_pending_skip_existing: dict[str, bool] | None = None,
+        _shared_pending_skip_existing: dict[str, set[bytes]] | None = None,
         _root: ConnectorArrowDatabase | None = None,
         _scoped_path: tuple[str, ...] = (),
     ) -> None:
@@ -125,21 +141,15 @@ class ConnectorArrowDatabase:
         self._path_prefix = _path_prefix
         self._root = _root
         self._scoped_path = _scoped_path
-        self._pending_batches: dict[str, pa.Table] = (
-            _shared_pending_batches if _shared_pending_batches is not None else {}
-        )
-        self._pending_record_ids: dict[str, set[bytes]] = (
-            _shared_pending_record_ids
-            if _shared_pending_record_ids is not None
-            else defaultdict(set)
-        )
         # The schema each stored table was read with, for the append check
         # (``_refuse_changed_columns``).
         self._stored_schemas: dict[str, pa.Schema] = {}
-        # Per-batch flag: True when the batch was added with skip_duplicates=True,
-        # so flush() can pass skip_existing=True to the connector and let it use
-        # native INSERT-OR-IGNORE semantics rather than Python-side prefiltering.
-        self._pending_skip_existing: dict[str, bool] = (
+        # The ids of the queued rows added with skip_duplicates=True, per table:
+        # flush() writes them with skip_existing=True (the connector's
+        # ``ON CONFLICT (<id>) DO NOTHING``) and the other queued rows of the
+        # table as a separate batch, so one write policy never leaks to rows
+        # queued with the other (ITL-1381).
+        self._pending_skip_existing: dict[str, set[bytes]] = (
             _shared_pending_skip_existing
             if _shared_pending_skip_existing is not None
             else {}
@@ -150,11 +160,13 @@ class ConnectorArrowDatabase:
             if _root is not None
             else PendingCommits(
                 self.RECORD_ID_COLUMN,
-                self._pending_batches,
-                self._pending_record_ids,
                 on_empty=self._discard_pending_duplicate_policy,
             )
         )
+        # Read-only views of the queue, shared by every view of the database. Each
+        # table's rows and ids change together, in one step (ITL-1381).
+        self._pending_batches = self._pending_commits.batches
+        self._pending_record_ids = self._pending_commits.ids
 
     def _discard_pending_duplicate_policy(self, key: str) -> None:
         """Forget the duplicate policy when an entire queued batch is discarded."""
@@ -474,9 +486,16 @@ class ConnectorArrowDatabase:
         self.require_storable(
             normalize_schema_to_large_types(records.schema, keep_null=True)
         )
-        self._require_table_name(
-            self._path_to_table_name(self._path_prefix + record_path)
-        )
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        self._require_table_name(table_name)
+        # Against the schema these rows were given with: combined with queued rows
+        # that declare the column nullable, the null would be stored (ITL-1381).
+        # Before the normalization, which refuses some such rows with another error.
+        null_path = declared_null_path(records)
+        if null_path is not None:
+            raise NullInNonNullableColumnError(
+                null_path, table="/".join(self._path_prefix + record_path)
+            )
         records = normalize_table_to_large_types(records, keep_null=True)
         self._connector.validate_records(records)
 
@@ -498,9 +517,11 @@ class ConnectorArrowDatabase:
         if skip_duplicates:
             # Only filter records that conflict with the in-flight pending batch.
             # Committed duplicates are handled at flush time via
-            # upsert_records(skip_existing=True), which lets the connector use
-            # native INSERT-OR-IGNORE semantics — no full-table read needed here.
-            pending_conflicts = input_ids & self._pending_record_ids[record_key]
+            # upsert_records(skip_existing=True), which lets the connector skip
+            # stored ids natively — no full-table read needed here.
+            pending_conflicts = input_ids & self._pending_record_ids.get(
+                record_key, frozenset()
+            )
             if pending_conflicts:
                 mask = pc.invert(
                     pc.is_in(
@@ -511,26 +532,47 @@ class ConnectorArrowDatabase:
                 records = records.filter(mask)
             if records.num_rows == 0:
                 return
-            # Mark this pending slot so flush() uses skip_existing=True.
-            self._pending_skip_existing[record_key] = True
         else:
-            conflicts = input_ids & self._pending_record_ids[record_key]
+            conflicts = input_ids & self._pending_record_ids.get(
+                record_key, frozenset()
+            )
             if conflicts:
                 raise ValueError(
                     f"Records with IDs {conflicts} already exist in the pending batch. "
                     "Use skip_duplicates=True to skip them."
                 )
 
+        # A nullable input can still violate a constraint of the durable table.
+        # Only rows that actually contain nulls require this lookup.
+        if any(column.null_count for column in records.columns):
+            null_columns = _stored_null_columns(
+                records, self._stored_columns(table_name) or []
+            )
+            if null_columns:
+                raise NullInNonNullableColumnError(null_columns[0], table=record_key)
+
         # Buffer in pending batch
         existing_pending = self._pending_batches.get(record_key)
         if existing_pending is None:
-            self._pending_batches[record_key] = records
+            queued = records
         else:
-            self._pending_batches[record_key] = pa.concat_tables(
-                [existing_pending, records]
-            )
-        self._pending_record_ids[record_key].update(
-            cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
+            # Two queued batches may declare a column's nullability differently, as
+            # stored and queued rows may (ITL-1381).
+            self._refuse_loosened_columns(record_path, existing_pending, records)
+            queued = pa.concat_tables(_alike([existing_pending, records]))
+        queued_ids = cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
+        # Each row keeps the write policy it was queued with: flush() writes the
+        # rows of each policy as their own batch (ITL-1381). A policy recorded for
+        # an id not (yet) queued is never read.
+        skipped = self._pending_skip_existing.setdefault(record_key, set())
+        if skip_duplicates:
+            skipped.update(queued_ids)
+        else:
+            skipped.difference_update(queued_ids)
+        self._pending_commits.queue(
+            record_key,
+            queued,
+            self._pending_record_ids.get(record_key, frozenset()).union(queued_ids),
         )
 
         if flush:
@@ -627,6 +669,36 @@ class ConnectorArrowDatabase:
                 f"{changed[0]!r}: {changed[1]}. Nothing was written."
             )
 
+    def _refuse_loosened_columns(
+        self, record_path: tuple[str, ...], pending: pa.Table, records: pa.Table
+    ) -> None:
+        """Refuse a batch that differs from the queued one in the nullability of a
+        column the stored table holds ``NOT NULL`` (ITL-1381).
+
+        Combined, the column would be nullable and a flush could refuse it, taking the
+        rows of the valid batch with it. The stored table is looked up only when the
+        two batches differ.
+
+        Raises:
+            InputValidationError: Naming the first such column and the path.
+        """
+        differing = {
+            field.name
+            for field, other in zip(pending.schema, records.schema)
+            if field.name == other.name and field.nullable != other.nullable
+        }
+        if not differing:
+            return
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        for field in self._stored_columns(table_name) or []:
+            if field.name in differing and not field.nullable:
+                raise InputValidationError(
+                    f"Cannot append to the table at {record_path!r}: column "
+                    f"{field.name!r} is stored NOT NULL, and these rows and the rows "
+                    "queued before them declare its nullability differently. Declare "
+                    "it NOT NULL in both. Nothing was queued."
+                )
+
     def _read_stored_schema(self, table_name: str) -> pa.Schema | None:
         """The schema a read of the stored table gives, its field metadata included.
 
@@ -651,8 +723,8 @@ class ConnectorArrowDatabase:
     def at(self, *path_components: str) -> "ConnectorArrowDatabase":
         """Return a new ConnectorArrowDatabase scoped to the given sub-path.
 
-        The returned instance shares the connector and all three pending dicts
-        (_pending_batches, _pending_record_ids, _pending_skip_existing) by reference.
+        The returned instance shares the connector, the pending queue
+        (``_pending_commits``) and the write policies (``_pending_skip_existing``).
         Calling flush() on any view drains the entire shared pending queue.
 
         Raises:
@@ -676,8 +748,6 @@ class ConnectorArrowDatabase:
             connector=self._connector,
             max_hierarchy_depth=self.max_hierarchy_depth,
             _path_prefix=self._path_prefix + path_components,
-            _shared_pending_batches=self._pending_batches,
-            _shared_pending_record_ids=self._pending_record_ids,
             _shared_pending_skip_existing=self._pending_skip_existing,
             _root=new_root,
             _scoped_path=new_scoped_path,
@@ -691,7 +761,7 @@ class ConnectorArrowDatabase:
         """Return a commit dependency for a buffered result, or verify it is stored."""
         key = self._get_record_key(record_path)
         if record_id in self._pending_record_ids.get(key, ()):
-            return self._pending_commits.attempt(key)
+            return self._pending_commits.attempt(key, record_id)
         if self.get_record_by_id(record_path, record_id) is None:
             raise ValueError("The referenced result is neither stored nor pending.")
         return None
@@ -720,9 +790,20 @@ class ConnectorArrowDatabase:
         )
 
     def flush(self) -> None:
-        """Commit all pending batches to the connector via upsert."""
+        """Try each table's pending batch and raise the first failure afterwards."""
+        first_error: Exception | None = None
         for record_key in list(self._pending_batches):
-            self._flush_by_key(record_key)
+            try:
+                self._flush_by_key(record_key)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+                else:
+                    first_error.add_note(
+                        f"Flush of {record_key!r} also failed: {error}"
+                    )
+        if first_error is not None:
+            raise first_error
 
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         """Nothing to refresh: every read queries the connector's backend (ITL-1408)."""
@@ -738,18 +819,71 @@ class ConnectorArrowDatabase:
         self._flush_by_key(self._get_record_key(record_path))
 
     def _flush_by_key(self, record_key: str) -> None:
-        """Commit the ready records at a key shared by all views."""
-        ready = self._pending_commits.take_ready(record_key)
-        if ready is None:
-            return
-        pending, ids = ready
+        """Commit the ready records at a key shared by all views.
+
+        Rows queued with ``skip_duplicates`` and rows queued without it are written
+        as two batches, each with its own write policy, never as one (ITL-1381).
+        Each batch leaves the queue, in one step, just before its write is tried
+        (``_commit_batch``): a batch not yet taken stays queued, with the table's
+        schema guard, whatever interrupts the flush, and a batch taken is never
+        written again. Each batch commits or leaves
+        the queue on its own; the first failure is raised after both were tried.
+        """
+        first_error: Exception | None = None
+        try:
+            for skip_existing in (False, True):
+                skipped = self._pending_skip_existing.get(record_key, set())
+                queued = self._pending_record_ids.get(record_key, frozenset[bytes]())
+                among = queued & skipped if skip_existing else queued - skipped
+                try:
+                    self._commit_batch(record_key, among, skip_existing)
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+                    else:
+                        first_error.add_note(f"The second batch also failed: {error}")
+        finally:
+            remaining = self._pending_record_ids.get(record_key)
+            skipped = self._pending_skip_existing.get(record_key)
+            if not remaining:
+                self._pending_skip_existing.pop(record_key, None)
+            elif skipped is not None:
+                skipped.intersection_update(remaining)
+        if first_error is not None:
+            raise first_error
+
+    def _commit_batch(
+        self,
+        record_key: str,
+        among: Set[bytes],
+        skip_existing: bool,
+    ) -> None:
+        """Take one write policy's ready rows out of the queue and write them.
+
+        The rows leave the queue before their write is tried, so no interruption
+        can make them be written twice; the worst case is a batch removed (and
+        reported) but not written (N32, N49). Their ids are recorded as attempted
+        before the queue changes, so a failure or ``BaseException`` (a
+        ``KeyboardInterrupt``) at any later point reports them, and the records
+        guarded by them, as removed: a failure raises ``OrcapodDatabaseWriteError``;
+        a ``BaseException`` gets a note naming them and propagates.
+
+        Args:
+            record_key: The table's key.
+            among: The ids of the queued rows of this write policy.
+            skip_existing: Whether these rows were queued with ``skip_duplicates``.
+        """
+        attempted: set[bytes] = set()
         record_path = tuple(record_key.split("/"))
         table_name = self._path_to_table_name(record_path)
-        skip_existing = self._pending_skip_existing.get(record_key, False)
-        if record_key not in self._pending_batches:
-            self._pending_skip_existing.pop(record_key, None)
-
         try:
+            ready = self._pending_commits.peek_ready(record_key, among)
+            if ready is None:
+                return
+            pending, ids = ready
+            attempted.update(ids)
+            # Out of the queue before the write is tried: never written twice.
+            self._pending_commits.remove(record_key, ids)
             self._require_table_name(table_name)
             columns = _arrow_schema_to_column_infos(pending.schema)
 
@@ -787,6 +921,12 @@ class ConnectorArrowDatabase:
                         "Schema evolution is not supported."
                     )
 
+                null_columns = _stored_null_columns(pending, existing)
+                if null_columns:
+                    raise NullInNonNullableColumnError(
+                        null_columns[0], table=record_key
+                    )
+
                 # Checked by exact name and type above: only then are the rows put
                 # in the stored order, by name (ITL-1367).
                 pending = in_held_column_order(pending, existing)
@@ -800,13 +940,44 @@ class ConnectorArrowDatabase:
                 id_column=self.RECORD_ID_COLUMN,
                 skip_existing=skip_existing,
             )
-        except BaseException:
-            self._pending_commits.finish(record_key, committed=False)
+        except Exception as error:
+            if not attempted:
+                raise
+            discarded = self._discard_attempted(record_key, attempted)
+            raise OrcapodDatabaseWriteError(
+                record_path, flush=True, table_flush=True, discarded_records=discarded
+            ) from error
+        except BaseException as error:
+            if not attempted:
+                raise  # Nothing was taken from the queue.
+            discarded = self._discard_attempted(record_key, attempted)
+            error.add_note(
+                f"Interrupted while committing pending writes to table {record_key!r}: "
+                "the write may have committed, so it is not tried again."
+                + "".join(
+                    f"\nRemoved queued records from table {table!r} with keys "
+                    + ", ".join(map(repr, sorted(keys)))
+                    for table, keys in discarded.items()
+                )
+            )
             raise
         else:
-            self._pending_commits.finish(record_key, committed=True)
-        finally:
-            self._pending_commits.forget(record_key, ids)
+            self._pending_commits.finish_rows(record_key, attempted, committed=True)
+            self._pending_commits.forget(record_key, attempted)
+
+    def _discard_attempted(
+        self, record_key: str, ids: set[bytes]
+    ) -> dict[str, set[bytes]]:
+        """Withdraw an attempted batch's keys and the records they guard; return
+        every removed key, by table. The keys may still be queued only when an
+        interruption came between recording and removing them."""
+        self._pending_commits.remove(record_key, ids)
+        discarded = {record_key: ids.copy()}
+        self._pending_commits.finish_rows(
+            record_key, ids, committed=False, discarded=discarded
+        )
+        self._pending_commits.forget(record_key, ids)
+        return discarded
 
     # ── Read methods ──────────────────────────────────────────────────────────
 

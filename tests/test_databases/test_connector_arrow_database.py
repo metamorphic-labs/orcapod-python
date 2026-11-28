@@ -23,9 +23,10 @@ Test sections:
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -35,10 +36,12 @@ import pytest
 # Imports under test — all of these will fail until the modules are created
 # ---------------------------------------------------------------------------
 
+from orcapod.errors import OrcapodDatabaseWriteError, UnsupportedValueError
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.types import ColumnInfo
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.databases import ConnectorArrowDatabase
+from orcapod.databases.sqlite_connector import SQLiteConnector
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +753,67 @@ class TestPathToTableName:
         assert db._path_to_table_name(path) == db._path_to_table_name(path)
 
 
+@pytest.mark.parametrize("invalid_first", [False, True])
+@pytest.mark.parametrize("order", [["id", "s", "y"], ["y", "id", "s"]])
+@pytest.mark.parametrize("run_async", [False, True])
+def test_validate_records_refuses_null_structs_without_discarding_valid_rows(
+    invalid_first: bool, order: list[str], run_async: bool
+) -> None:
+    class RejectsNullStructs(MockDBConnector):
+        def validate_records(self, records: pa.Table) -> None:
+            super().validate_records(records)
+            if records["s"].null_count:
+                raise UnsupportedValueError("column 's' holds a null struct")
+
+    path = ("t",)
+    valid_rows = [
+        {"id": b"valid-1", "s": {"val": 10}, "y": 100},
+        {"id": b"valid-2", "s": {"val": 20}, "y": 200},
+    ]
+    invalid_rows = [
+        {"id": b"bad-1", "s": {"val": 30}, "y": 300},
+        {"id": b"bad-2", "s": None, "y": 400},
+    ]
+    fields = {
+        "id": pa.field("id", pa.large_binary()),
+        "s": pa.field("s", pa.struct([("val", pa.int64())])),
+        "y": pa.field("y", pa.int64(), nullable=False),
+    }
+    valid = pa.Table.from_pylist(valid_rows, schema=pa.schema(fields.values()))
+    fields["y"] = fields["y"].with_nullable(True)
+    invalid = pa.Table.from_pylist(
+        invalid_rows, schema=pa.schema([fields[name] for name in order])
+    )
+
+    connector = RejectsNullStructs()
+
+    def check() -> None:
+        db = ConnectorArrowDatabase(connector)
+        for table in (invalid, valid) if invalid_first else (valid, invalid):
+            if table is invalid:
+                with pytest.raises(UnsupportedValueError, match="'s'.*null struct"):
+                    db.add_records(path, table, record_id_column="id")
+            else:
+                db.add_records(path, table, record_id_column="id")
+        queued = db.get_all_records(path, record_id_column="id")
+        db.flush()
+        committed = ConnectorArrowDatabase(connector).get_all_records(
+            path, record_id_column="id"
+        )
+        for rows in (queued, committed):
+            assert rows is not None
+            assert rows.sort_by("id").to_pylist() == valid_rows
+            assert not rows.schema.field("y").nullable
+
+    async def on_loop() -> None:
+        check()
+
+    if run_async:
+        asyncio.run(on_loop())
+    else:
+        check()
+
+
 # ===========================================================================
 # 11. Flush behaviour
 # ===========================================================================
@@ -785,6 +849,356 @@ class TestFlushBehaviour:
         assert result is not None
         assert result.num_rows == 2
 
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_failed_connector_batch_is_reported_and_removed(
+        self, monkeypatch: pytest.MonkeyPatch, reverse: bool
+    ) -> None:
+        connector = MockDBConnector()
+        db = ConnectorArrowDatabase(connector)
+        db.add_record(self.PATH, b"old", make_table(v=[1]), flush=True)
+        keys = [b"first", b"second", b"third"]
+        for key in reversed(keys) if reverse else keys:
+            db.add_record(self.PATH, key, make_table(v=[2]), skip_duplicates=True)
+
+        def refuse_write(*args: object, **kwargs: object) -> None:
+            raise OSError("store unavailable")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(connector, "upsert_records", refuse_write)
+            with pytest.raises(
+                OrcapodDatabaseWriteError, match="store unavailable"
+            ) as raised:
+                db.flush()
+        assert all(repr(key) in str(raised.value) for key in keys)
+        db.flush()
+        rows = db.get_all_records(self.PATH, record_id_column="id")
+        assert rows is not None
+        assert rows.to_pylist() == [{"id": b"old", "v": 1}]
+        db.add_record(self.PATH, b"old", make_table(v=[99]), flush=True)
+        stored = ConnectorArrowDatabase(connector).get_all_records(
+            self.PATH, record_id_column="id"
+        )
+        assert stored is not None
+        assert stored.to_pylist() == [{"id": b"old", "v": 99}]
+
+    @staticmethod
+    def _stored_values(
+        connector: DBConnectorProtocol, path: tuple[str, ...]
+    ) -> dict[bytes, int]:
+        rows = ConnectorArrowDatabase(connector).get_all_records(
+            path, record_id_column="id"
+        )
+        return {} if rows is None else {row["id"]: row["v"] for row in rows.to_pylist()}
+
+    @pytest.mark.parametrize("skip_first", [False, True])
+    def test_a_skip_batch_does_not_change_the_policy_of_an_ordinary_write(
+        self, skip_first: bool
+    ) -> None:
+        """Batches of different write policies are never written as one: the
+        ordinary overwrite of a stored key is not dropped (ITL-1381, round 5)."""
+        with SQLiteConnector(":memory:") as connector:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(self.PATH, b"existing", make_table(v=[1]), flush=True)
+            db.add_record(self.PATH, b"kept", make_table(v=[5]), flush=True)
+            writes = [
+                lambda: db.add_record(self.PATH, b"existing", make_table(v=[2])),
+                lambda: db.add_records(
+                    self.PATH,
+                    pa.table(
+                        {
+                            "id": pa.array([b"kept", b"new"], type=pa.large_binary()),
+                            "v": pa.array([6, 3], type=pa.int64()),
+                        }
+                    ),
+                    record_id_column="id",
+                    skip_duplicates=True,
+                ),
+            ]
+            for write in reversed(writes) if skip_first else writes:
+                write()
+            db.flush()
+            assert self._stored_values(connector, self.PATH) == {
+                b"existing": 2,
+                b"kept": 5,
+                b"new": 3,
+            }
+
+    @staticmethod
+    def _mixed_policies(db: ConnectorArrowDatabase, path: tuple[str, ...]) -> None:
+        """Queue one ordinary row and one skip_duplicates row for one table."""
+        db.add_record(path, b"plain", make_table(v=[1]))
+        db.add_record(path, b"skipping", make_table(v=[2]), skip_duplicates=True)
+
+    @pytest.mark.parametrize(
+        "where", ["pyarrow.compute.is_in", "PendingCommits._select"]
+    )
+    def test_an_interrupt_while_splitting_by_policy_leaves_the_queue_whole(
+        self, monkeypatch: pytest.MonkeyPatch, where: str
+    ) -> None:
+        """Only a batch whose write was attempted leaves the queue: an interrupt
+        before the first policy batch is sent keeps every row queued
+        (ITL-1381, round 5)."""
+        from orcapod.databases._pending_commits import PendingCommits
+
+        with SQLiteConnector(":memory:") as connector:
+            db = ConnectorArrowDatabase(connector)
+            self._mixed_policies(db, self.PATH)
+            db.add_record(("other", "v1"), b"o", make_table(v=[3]))
+            interrupted: list[str] = []
+
+            def interrupt_once(original: Any) -> Any:
+                def wrapped(*args: Any, **kwargs: Any) -> Any:
+                    if not interrupted:
+                        interrupted.append(where)
+                        raise KeyboardInterrupt
+                    return original(*args, **kwargs)
+
+                return wrapped
+
+            with monkeypatch.context() as patch:
+                patch.setattr(pc, "is_in", interrupt_once(pc.is_in))
+                patch.setattr(
+                    PendingCommits, "_select", interrupt_once(PendingCommits._select)
+                )
+                with pytest.raises(KeyboardInterrupt):
+                    db.flush()
+            assert interrupted
+            db.flush()
+            assert self._stored_values(connector, self.PATH) == {
+                b"plain": 1,
+                b"skipping": 2,
+            }
+            assert self._stored_values(connector, ("other", "v1")) == {b"o": 3}
+
+    def test_an_interrupt_between_any_two_lines_of_a_flush_loses_no_row(
+        self,
+    ) -> None:
+        """A KeyboardInterrupt injected (by a line trace) between any two statements
+        of the queue bookkeeping or of a table's flush leaves each queued table's
+        rows and ids consistent; every row is then stored once, or named as removed
+        (ITL-1381, round 5). A batch leaves the queue before its write is tried, so
+        none is ever written twice.
+
+        Interrupts are injected between statements only, which is N58's scope: an
+        interrupt inside a single statement is out of scope. A repeated line event
+        of one line (a comprehension's loop) is inside a statement, and on Python
+        3.12 an exception a trace function raises there skips the frame's
+        ``except`` handlers, which a real ``KeyboardInterrupt`` does not."""
+        import sys
+        from pathlib import Path
+
+        from orcapod.databases import _pending_commits
+        from orcapod.databases import connector_arrow_database as module
+
+        traced_files = {_pending_commits.__file__, module.__file__}
+        traced_functions = {
+            "_flush_by_key",
+            "_commit_batch",
+            "_discard_attempted",
+        }
+
+        class LoggingConnector(SQLiteConnector):
+            def __init__(self) -> None:
+                super().__init__(":memory:")
+                self.written: list[bytes] = []
+
+            def upsert_records(
+                self,
+                table_name: str,
+                records: pa.Table,
+                id_column: str,
+                skip_existing: bool = False,
+            ) -> None:
+                super().upsert_records(
+                    table_name, records, id_column, skip_existing=skip_existing
+                )
+                self.written.extend(cast(list[bytes], records[id_column].to_pylist()))
+
+        expected = {b"plain": 1, b"skipping": 2, b"o": 3}
+        position = 0
+        while True:
+            position += 1
+            connector = LoggingConnector()
+            try:
+                db = ConnectorArrowDatabase(connector)
+                self._mixed_policies(db, self.PATH)
+                db.add_record(("other", "v1"), b"o", make_table(v=[3]))
+                lines = 0
+                last_line: dict[int, int] = {}
+
+                def trace(frame: Any, event: str, arg: Any) -> Any:
+                    nonlocal lines
+                    code = frame.f_code
+                    if code.co_filename not in traced_files or (
+                        Path(code.co_filename).name != "_pending_commits.py"
+                        and code.co_name not in traced_functions
+                    ):
+                        return None
+                    # Between statements only: a repeated line event of one line
+                    # is inside a statement (a comprehension's loop), out of
+                    # scope (N58), and there an exception a trace function raises
+                    # skips the frame's handlers on Python 3.12.
+                    if event == "line" and last_line.get(id(frame)) != frame.f_lineno:
+                        last_line[id(frame)] = frame.f_lineno
+                        lines += 1
+                        if lines == position:
+                            raise KeyboardInterrupt
+                    return trace
+
+                notes = ""
+                sys.settrace(trace)
+                try:
+                    db.flush()
+                except KeyboardInterrupt as interrupt:
+                    notes = "\n".join(getattr(interrupt, "__notes__", []))
+                finally:
+                    sys.settrace(None)
+                if lines < position:
+                    break  # Every line was interrupted once.
+                for key, table in db._pending_batches.items():
+                    queued = set(
+                        table[ConnectorArrowDatabase.RECORD_ID_COLUMN].to_pylist()
+                    )
+                    assert queued == set(db._pending_record_ids[key]), position
+                db.flush()
+                assert len(connector.written) == len(set(connector.written)), position
+                stored = self._stored_values(connector, self.PATH)
+                stored |= self._stored_values(connector, ("other", "v1"))
+                for key, value in expected.items():
+                    assert stored.get(key) == value or repr(key) in notes, (
+                        position,
+                        key,
+                    )
+            finally:
+                connector.close()
+        assert position > 20
+
+    def test_each_policy_batch_is_checked_against_the_schema_guard(self) -> None:
+        """The table's schema guard checks every write of a split flush, not only
+        the first (ITL-1381, round 5)."""
+        checked: list[pa.Schema] = []
+
+        def refuse(schema: pa.Schema) -> None:
+            checked.append(schema)
+            raise ValueError("schema refused")
+
+        with SQLiteConnector(":memory:") as connector:
+            db = ConnectorArrowDatabase(connector)
+            with db.guard_table_schema(self.PATH, refuse):
+                self._mixed_policies(db, self.PATH)
+            with pytest.raises(
+                OrcapodDatabaseWriteError, match="schema refused"
+            ) as raised:
+                db.flush()
+            assert len(checked) == 2
+            assert "second batch also failed" in "\n".join(
+                getattr(raised.value, "__notes__", [])
+            )
+            assert ConnectorArrowDatabase(connector).get_all_records(self.PATH) is None
+
+    def test_an_interrupt_in_the_cleanup_of_a_failed_commit_never_replays_it(
+        self,
+    ) -> None:
+        """A connector that commits and then raises, and a KeyboardInterrupt at the
+        start of the failure cleanup: the batch already left the queue before its
+        write was tried, so it is never written again (ITL-1381, round 5, N32)."""
+        import sys
+
+        from orcapod.databases import connector_arrow_database as module
+
+        class CommitsThenRaises(SQLiteConnector):
+            def __init__(self) -> None:
+                super().__init__(":memory:")
+                self.written: list[int] = []
+                self.fail = True
+
+            def upsert_records(
+                self,
+                table_name: str,
+                records: pa.Table,
+                id_column: str,
+                skip_existing: bool = False,
+            ) -> None:
+                super().upsert_records(
+                    table_name, records, id_column, skip_existing=skip_existing
+                )
+                self.written.extend(cast(list[int], records["v"].to_pylist()))
+                if self.fail:
+                    self.fail = False
+                    raise RuntimeError("refused after commit")
+
+        # The failure cleanup's first line.
+        cleanup = {"_discard_attempted"}
+
+        def trace(frame: Any, event: str, arg: Any) -> Any:
+            code = frame.f_code
+            if code.co_filename == module.__file__ and code.co_name in cleanup:
+                if event == "line":
+                    raise KeyboardInterrupt
+                return trace
+            return None
+
+        connector = CommitsThenRaises()
+        try:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(self.PATH, b"key", make_table(v=[1]))
+            sys.settrace(trace)
+            try:
+                with pytest.raises(KeyboardInterrupt):
+                    db.flush()
+            finally:
+                sys.settrace(None)
+            ConnectorArrowDatabase(connector).add_record(
+                self.PATH, b"key", make_table(v=[77]), flush=True
+            )
+            db.flush()
+            assert connector.written == [1, 77]
+            assert self._stored_values(connector, self.PATH) == {b"key": 77}
+        finally:
+            connector.close()
+
+    def test_a_flush_interrupted_after_its_commit_is_never_replayed(self) -> None:
+        """A BaseException during a flush removes the attempted batch as a
+        failure does, names its keys, and propagates (ITL-1381, round 5)."""
+
+        class InterruptedAfterCommit(SQLiteConnector):
+            def __init__(self) -> None:
+                super().__init__(":memory:")
+                self.written: list[int] = []
+                self.interrupt = True
+
+            def upsert_records(
+                self, table_name, records, id_column, skip_existing=False
+            ):
+                super().upsert_records(
+                    table_name, records, id_column, skip_existing=skip_existing
+                )
+                self.written.extend(cast(list[int], records["v"].to_pylist()))
+                if self.interrupt:
+                    self.interrupt = False
+                    raise KeyboardInterrupt
+
+        connector = InterruptedAfterCommit()
+        try:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(self.PATH, b"key", make_table(v=[1]))
+            with pytest.raises(KeyboardInterrupt) as raised:
+                db.flush()
+            assert any(
+                "flush/v1" in note and repr(b"key") in note
+                for note in getattr(raised.value, "__notes__", [])
+            )
+            assert db.get_all_records(self.PATH) is not None
+            assert db._get_record_key(self.PATH) not in db._pending_batches
+            ConnectorArrowDatabase(connector).add_record(
+                self.PATH, b"key", make_table(v=[77]), flush=True
+            )
+            db.flush()
+            assert connector.written == [1, 77]
+            assert self._stored_values(connector, self.PATH) == {b"key": 77}
+        finally:
+            connector.close()
+
     def test_second_flush_on_existing_table_upserts(self, db):
         """Flushing the same path twice should not duplicate rows."""
         db.add_record(self.PATH, b"u1", make_table(v=[1]), flush=True)
@@ -815,7 +1229,7 @@ class TestFlushBehaviour:
         assert result is not None
         assert result["v"][0].as_py() == 1  # original preserved via skip_existing=True
 
-    def test_flush_schema_mismatch_raises_value_error(self, db):
+    def test_flush_schema_mismatch_reports_discarded_keys(self, db):
         """flush() must raise ValueError when the pending schema differs from
         the table already in the connector — before any data is written."""
         db.add_record(("t",), b"a", make_table(v=[1]), flush=True)
@@ -825,7 +1239,7 @@ class TestFlushBehaviour:
             pa.table({"__record_id": pa.array([b"b"]), "x": pa.array([2])}),
             record_id_column="__record_id",
         )
-        with pytest.raises(ValueError, match="Schema mismatch"):
+        with pytest.raises(OrcapodDatabaseWriteError, match="Schema mismatch"):
             db.flush()
 
 

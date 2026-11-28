@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any, Self
 
 
@@ -1081,6 +1081,7 @@ class OrcapodDatabaseWriteError(OrcapodDatabaseError):
         *,
         flush: bool = False,
         table_flush: bool = False,
+        discarded_records: Mapping[str, Collection[bytes]] | None = None,
     ) -> None:
         """Create the error for one failed write.
 
@@ -1091,10 +1092,16 @@ class OrcapodDatabaseWriteError(OrcapodDatabaseError):
             tag: Tag values of the row being stored, if the write covered one row.
             flush: Whether committing pending writes failed.
             table_flush: Whether the flush was scoped to the given table.
+            discarded_records: Removed keys grouped by table when a connector
+                refuses a queued batch.
         """
         self.record_path: tuple[str, ...] = tuple(record_path)
         self.flush: bool = flush
         self._table_flush = table_flush
+        self.discarded_records = {
+            table: tuple(sorted(keys))
+            for table, keys in (discarded_records or {}).items()
+        }
         super().__init__(
             self.record_path, node_label, tag, node_label=node_label, tag=tag
         )
@@ -1130,9 +1137,16 @@ class OrcapodDatabaseWriteError(OrcapodDatabaseError):
         if self.flush:
             node = f" for node {self.node_label!r}" if self.node_label else ""
             if self._table_flush:
+                discarded = "".join(
+                    f"\nRemoved queued records from table {table!r} with keys "
+                    + ", ".join(map(repr, keys))
+                    for table, keys in self.discarded_records.items()
+                )
                 return (
                     f"Could not commit pending writes to the database{node} "
-                    f"(table {'/'.join(self.record_path)!r}){reason}. " + retry
+                    f"(table {'/'.join(self.record_path)!r}){reason}. "
+                    + retry
+                    + discarded
                 )
             return (
                 f"Could not commit pending writes to the database{node} "
