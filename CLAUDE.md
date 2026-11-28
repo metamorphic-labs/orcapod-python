@@ -1163,14 +1163,15 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   only where it is first created and no Arrow type exists: a `Data` built by hand from
   Python values, or given a Python value by `with_source_info` for a column it holds no
   Arrow token column for, and the string tokens Orcapod itself creates (a source's, a
-  function output's, `Pick`'s, `Index`'s over a string token, a placeholder's). A Python
-  replacement on an Arrow-backed row (`Data(table, source_info=...)`, `with_source_info`)
-  is written under the token type the row holds, item name, nullability and metadata
-  kept, never typed from its value (ITL-1557; one rule,
-  `arrow_utils.source_info_replacement`): a value that does not fit is refused (a string
-  for a list, a list for a string, a wrong depth, a null item under a required item
-  field, and `None` for a list type, since a list token is never null); `None` under a
-  held string type is a `large_string` null, in `as_table` and `source_info_table` alike.
+  function output's, `Pick`'s, `Index`'s over a string token, a placeholder's).
+  `with_source_info` writes a Python replacement under the row's held token type and
+  preserves the item name, nullability and metadata (`arrow_utils.source_info_replacement`,
+  ITL-1557). It refuses a string for a list, a list for a string, a wrong depth, a null item
+  under a required item field, and `None` for a list type. Under a held string type,
+  `with_source_info(x=None)` writes a `large_string` null in both `as_table` and
+  `source_info_table`. The `Data` constructor also checks non-`None` replacements against
+  the held type. `Data(table, source_info={"x": None})` keeps the token the table already
+  holds for `x`.
 - **A token's shape is its data's shape** (developer, November 27, 2026, ITL-1491). A token
   column's type is some list layers on top of `large_string`. Those layers must match
   EXACTLY the outer list layers of its data column's type, kind for kind: a `large_list`

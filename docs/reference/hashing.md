@@ -1311,14 +1311,15 @@ given a Python value for a column the row holds no Arrow token column for), and 
 tokens Orcapod itself creates (a source's, a function output's, `Pick`'s, a placeholder's),
 which are `large_string`.
 
-A row read from an Arrow table holds its token columns' types, and a Python replacement
-(`Data(table, source_info=...)`, `with_source_info`) is written under the held type: the
-list item's name, nullability and metadata are kept, and the type is never worked out again
-from the value. A replacement that does not fit the held type is refused: a string for a
-list, a list for a string, a wrong depth, a null item where the item field is required, and
-`None` for a list type (a list token is never null). `None` under a held string type is a
-`large_string` null, in `as_table(columns={"source": True})` and in `source_info_table()`
-alike.
+A row read from an Arrow table holds its token columns' types. `with_source_info` writes a
+Python replacement under the held type and preserves the list item's name, nullability and
+metadata. It refuses a string for a list, a list for a string, a wrong depth, a null item
+where the item field is required, and `None` for a list type. `with_source_info(x=None)`
+under a held string type writes a `large_string` null in both
+`as_table(columns={"source": True})` and `source_info_table()`. The `Data` constructor
+also checks non-`None` replacements against the held type. With
+`Data(table, source_info={"x": None})`, the constructor keeps the token the table already
+holds for `x`.
 
 #### The shape of a source-info token column
 
