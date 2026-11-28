@@ -24,6 +24,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import (
     PIPELINE_RECORDED_AT_COL,
     PIPELINE_RUN_ID_COL,
@@ -32,6 +33,7 @@ from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
 from orcapod.sources import DictSource
+from orcapod.types import PodConfig
 
 # Columns that differ between any two runs by design, also between two script runs: the
 # result's datagram uuid, the output's source-info token (which carries that uuid) and the
@@ -488,7 +490,6 @@ def press_interrupt_once_next_row_returned() -> None:
             _thread.interrupt_main()
 
 
-@function_pod(output_keys="y")
 def stuck_until_next_row_runs(x: int) -> int:
     """Row 0 presses the interrupt button once the next node's row is in its function."""
     if x == 0:
@@ -546,11 +547,17 @@ def test_second_interrupt_does_not_name_a_node_whose_function_returned() -> None
     second_press_helpers.clear()
     rows = [{"k": f"r{i}", "x": i} for i in range(2)]
     job = PipelineJob(name="returned_demo", database=InMemoryArrowDatabase())
+    # The first row waits for the second, so this test requires both to start.
+    stuck_pod = FunctionPod.from_fn(
+        stuck_until_next_row_runs,
+        output_keys="y",
+        pod_config=PodConfig(max_concurrency=2),
+    )
     with job:
         source = DictSource(
             data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
         )
-        stuck = stuck_until_next_row_runs.pod(source, label="stuck")
+        stuck = stuck_pod(source, label="stuck")
         _ = returns_after_the_run_ended.pod(stuck, label="after")
 
     async def notebook_cell() -> None:

@@ -70,6 +70,8 @@ Each is on one subject and can be read in any order after the parts it names.
 | [Tracing a value](tracing-a-value.md) | One value back to its source cells; why a row is missing | Parts 0 to 6 | 20 min |
 | [Chaining pipelines](chaining-pipelines.md) | A second pipeline over the stored results of the first | Parts 0 to 5 | 10 min |
 | [Handling errors](handling-errors.md) | Errors while building a pipeline; failed rows in a run | Parts 0 to 6 | 15 min |
+| [Missing values](missing-values.md) | Types that may be null, dropping nulls, nulls in joins and functions | Parts 0 to 3 | 15 min |
+| [Coming from pandas or Polars](coming-from-pandas-or-polars.md) | The Orcapod form of select, filter, join, group and new columns; where Orcapod differs | Part 0 | 15 min |
 
 [Where next](where-next.md) is a short tour of features these pages did not cover.
 

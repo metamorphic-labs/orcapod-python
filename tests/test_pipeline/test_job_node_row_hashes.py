@@ -14,9 +14,11 @@ from typing import Any
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.function_pod import FunctionPod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.sources import DictSource
+from orcapod.types import PodConfig
 
 N_ROWS = 5
 
@@ -31,7 +33,6 @@ def double(x: int) -> int:
     return 2 * x
 
 
-@function_pod(output_keys="y")
 async def first_row_last(x: int) -> int:
     """Return twice ``x``; row 0 finishes only after the last row is computed.
 
@@ -50,7 +51,7 @@ def run_job(pod: Any, rows: list[dict[str, Any]], orchestrator: Any) -> Any:
     """Run ``pod`` over ``rows`` in a fresh job; return its node."""
     job = PipelineJob(name="row_hashes", database=InMemoryArrowDatabase())
     with job:
-        pod.pod(
+        pod(
             DictSource(
                 data=rows, tag_columns=["k"], source_id="rows", tag_only_columns=True
             ),
@@ -63,7 +64,7 @@ def run_job(pod: Any, rows: list[dict[str, Any]], orchestrator: Any) -> Any:
 def sync_with_input_out_of_tag_order() -> Any:
     """A sync run whose input rows come in reverse tag order."""
     rows = [{"k": f"r{i}", "x": i} for i in reversed(range(N_ROWS))]
-    return run_job(double, rows, SyncPipelineOrchestrator())
+    return run_job(double.pod, rows, SyncPipelineOrchestrator())
 
 
 def async_with_first_row_finishing_last() -> Any:
@@ -71,7 +72,10 @@ def async_with_first_row_finishing_last() -> Any:
     global last_row_computed
     last_row_computed = asyncio.Event()
     rows = [{"k": f"r{i}", "x": i} for i in range(N_ROWS)]
-    return run_job(first_row_last, rows, AsyncPipelineOrchestrator())
+    pod = FunctionPod.from_fn(
+        first_row_last, output_keys="y", pod_config=PodConfig(max_concurrency=N_ROWS)
+    )
+    return run_job(pod, rows, AsyncPipelineOrchestrator())
 
 
 RUNS = {

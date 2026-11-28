@@ -21,12 +21,12 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterator, Mapping
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
 from types import UnionType
-from typing import TYPE_CHECKING, Any, Generic, Self, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeAlias, TypeVar, cast
 
 import pyarrow as pa
 from typing_extensions import override
@@ -341,6 +341,18 @@ class OrchestratorType(Enum):
     ASYNC_CHANNELS = "async_channels"
 
 
+# Upper bound on the default number of in-flight calls per async function pod.
+DEFAULT_FUNCTION_POD_CONCURRENCY_CAP = 16
+
+
+def _default_function_pod_concurrency() -> int:
+    """Return the default number of in-flight calls per async function pod."""
+    cpu_count = cast(
+        Callable[[], int | None], getattr(os, "process_cpu_count", os.cpu_count)
+    )
+    return min(DEFAULT_FUNCTION_POD_CONCURRENCY_CAP, max(1, cpu_count() or 1))
+
+
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
     """Pipeline-level execution configuration.
@@ -348,8 +360,10 @@ class PipelineConfig:
     Attributes:
         orchestrator: Which orchestrator strategy to use.
         channel_buffer_size: Max items buffered per channel edge.
-        default_max_concurrency: Pipeline-wide default for per-node
-            concurrency.  ``None`` means unlimited.
+        default_max_concurrency: Limit for async function pods that inherit
+            from this config. When omitted, computed at construction as the
+            usable CPU count clamped between 1 and
+            ``DEFAULT_FUNCTION_POD_CONCURRENCY_CAP`` (16). ``None`` means unlimited.
         execution_engine: Optional data-function executor applied to all
             function nodes (e.g. ``RayExecutor``).  ``None`` means in-process
             execution.
@@ -359,7 +373,9 @@ class PipelineConfig:
 
     orchestrator: OrchestratorType = OrchestratorType.SYNCHRONOUS
     channel_buffer_size: int = 64
-    default_max_concurrency: int | None = None
+    default_max_concurrency: int | None = field(
+        default_factory=_default_function_pod_concurrency
+    )
     execution_engine: DataFunctionExecutorProtocol | None = None
     execution_engine_opts: dict[str, Any] | None = None
 
@@ -369,12 +385,13 @@ class PodConfig:
     """Per-pod executor configuration.
 
     Attributes:
-        max_concurrency: Maximum concurrent function invocations for this pod.
-            ``None`` inherits from ``PipelineConfig.default_max_concurrency``.
-            ``1`` means sequential (rate-limited APIs, preserves ordering).
+        max_concurrency: Maximum in-flight calls when this pod runs asynchronously.
+            The default, ``"inherit"``, uses ``PipelineConfig.default_max_concurrency``.
+            An integer or ``None`` overrides the pipeline setting. ``None`` allows
+            unlimited dispatch, and ``1`` processes one row at a time.
     """
 
-    max_concurrency: int | None = None
+    max_concurrency: int | None | Literal["inherit"] = "inherit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,9 +448,8 @@ def resolve_concurrency(
     Raises:
         ValueError: If the resolved value is ``<= 0``.
     """
-    if pod_config.max_concurrency is not None:
-        result = pod_config.max_concurrency
-    else:
+    result = pod_config.max_concurrency
+    if result == "inherit":
         result = pipeline_config.default_max_concurrency
     if result is not None and result <= 0:
         raise ValueError(f"max_concurrency must be >= 1, got {result}")

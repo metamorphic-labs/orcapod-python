@@ -147,32 +147,11 @@ SpikeInterface support lives in a separate package,
 [`orcapod-extension-spikeinterface`](https://github.com/nauticalab/orcapod-extension-spikeinterface).
 It is not published on PyPI; install it from its repository.
 
-## Development
+## Contributing
 
-The project uses [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv sync --all-extras --dev
-```
-
-Every pull request must pass these checks:
-
-```bash
-uv run --with ruff ruff check .
-uv run --with ruff ruff format --check .
-uv run --with basedpyright basedpyright
-uv run pytest tests/
-```
-
-CI runs the tests in parallel (pytest-xdist). Locally they run serially; `uv run pytest -n 4 tests/`
-runs them on four workers, each holding its own copy of the suite's memory, so use it only on a
-machine with cores and memory to spare.
-
-The PostgreSQL integration tests are skipped unless asked for
-(`uv run pytest -m postgres --postgres`) and need a running PostgreSQL server, reached
-through the standard `PG*` environment variables; see
-[the workflow that runs them](https://github.com/metamorphic-labs/orcapod-python/blob/main/.github/workflows/run-postgres-tests.yml).
-Releases are cut by the GitHub Actions Release workflow; see
+[CONTRIBUTING.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/CONTRIBUTING.md)
+has the development setup, the checks every pull request must pass, and the project's
+conventions. Releases are cut by the GitHub Actions Release workflow; see
 [RELEASING.md](https://github.com/metamorphic-labs/orcapod-python/blob/main/RELEASING.md).
 
 ## License
