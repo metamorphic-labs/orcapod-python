@@ -684,7 +684,7 @@ PYTHON_FUNCTION = DataFunctionTypeDeclaration(
             str,
             _TEXT,
             True,
-            "the executor that ran the function (local, ray, none)",
+            "the executor that ran the function (local, ray.v0, none)",
         ),
         StoredColumn(
             "executor_info",
