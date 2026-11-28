@@ -1,14 +1,14 @@
 # Function pod `__call__` drops unused data columns (ITL-807, ITL-193) Implementation Plan
 
+ITL-1585 renamed the function pod call keyword to `strict_columns`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The examples use `strict_columns`, the call keyword introduced by ITL-1585.
-
 **Goal:** `pod(a, b)` on a function pod drops the data columns the function does not take, by
-inserting one automatic `SelectDataColumns` after the automatic join.
-`pod(..., strict_columns=True)` and `pod.process(...)` stay exact.
+inserting one automatic `SelectDataColumns` after the automatic join; `pod(..., strict=True)`
+and `pod.process(...)` stay exact.
 
-**Architecture:** One method, `_FunctionPodBase.__call__(*streams, label=None, strict_columns=False)`.
+**Architecture:** One method, `_FunctionPodBase.__call__(*streams, label=None, strict=False)`.
 It is graph construction only: it joins the inputs as `process` does today
 (`handle_input_streams`), and when the joined stream carries data columns that are not
 parameters it applies `SelectDataColumns(columns=<parameters present>)` (the select's default
@@ -57,9 +57,9 @@ parameters it applies `SelectDataColumns(columns=<parameters present>)` (the sel
 ## Design of `__call__`
 
 ```python
-def __call__(self, *streams, label=None, strict_columns=False):
-    # Use the exact call for strict columns or functions that take arbitrary keywords.
-    if strict_columns or self.data_function.accepts_arbitrary_keywords:
+def __call__(self, *streams, label=None, strict=False):
+    # strict, or a function that takes arbitrary keywords (developer, Nov 12 2026): exact call
+    if strict or self.data_function.accepts_arbitrary_keywords:
         return self.process(*streams, label=label)
     input_stream = self.handle_input_streams(*streams)      # the automatic join, as in process
     _, data_schema = input_stream.output_schema()
@@ -75,7 +75,7 @@ def __call__(self, *streams, label=None, strict_columns=False):
     return self.process(input_stream, label=label)
 ```
 
-`FunctionPod.__call__` stays as a typed override forwarding `strict_columns`.
+`FunctionPod.__call__` stays as a typed override forwarding `strict`.
 `process(input_stream)` with one stream does not join again, so the Join is recorded once.
 
 ## Tasks
@@ -84,31 +84,30 @@ def __call__(self, *streams, label=None, strict_columns=False):
 - [ ] Create `tests/test_core/function_pod/test_function_pod_auto_select.py` (public interface
   only). Cases: wide single input equals hand-written select (pipeline hash, content hash,
   `as_table(all_info=True)`); two inputs equal hand-written `Join` + select; nothing to drop:
-  `pod(a, b)`, `pod(a, b, strict_columns=True)`, `pod.process(a, b)` equal, hashes pinned
-  to the values main gives; default parameter absent = no select; `strict_columns=True`
-  and `process` raise on an extra column; missing required column raises in all three modes;
-  tags untouched;
+  `pod(a, b)`, `pod(a, b, strict=True)`, `pod.process(a, b)` equal, hashes pinned to the values
+  main gives; default parameter absent = no select; `strict=True` and `process` raise on an
+  extra column; missing required column raises in all three modes; tags untouched;
   tags-only input works; shared data column (used and unused) raises at the Join; misspelt
   column for a defaulted parameter: dropped, default used, info log; exactly one INFO record
   per dropping call, none otherwise, no WARNING; ctx_arg pod; `CachedFunctionPod`;
   `WrappedFunctionPod`; `accepts_arbitrary_keywords` true -> no select (a test-local data
   function wrapper overriding the property; comment that it is about that property);
-  `SideEffectPod.__call__` and operator `__call__` take no `strict_columns`.
+  `SideEffectPod.__call__` and operator `__call__` take no `strict`.
 - [ ] PipelineJob cases: job with `pod(wide)` vs job with hand-written select over one
   database: same node labels and types, same function node hashes, same
   `db.list_table_paths()`, second job makes zero function calls; changed unused column =
   zero new calls; no select node when the input already matches; sync vs async orchestrator
   give equal tables; saved job files equal apart from run id.
-- [ ] Run, confirm they fail (`TypeError` for the missing keyword or `ValueError`). Commit (WIP).
+- [ ] Run, confirm they fail (`TypeError: unexpected keyword 'strict'` / `ValueError`). Commit (WIP).
 
 ### Task 2: implementation
 - [ ] `protocols/core_protocols/data_function.py`: `accepts_arbitrary_keywords` property.
 - [ ] `core/data_function.py`: `DataFunctionBase.accepts_arbitrary_keywords -> False`;
   `DataFunctionWrapper` delegates.
 - [ ] `core/function_pod.py`: `_FunctionPodBase.__call__` as above; `FunctionPod.__call__`
-  forwards `strict_columns`.
+  forwards `strict`.
 - [ ] Move `tests/test_core/test_newcomer_papercuts.py::test_extra_column_error_names_the_column_and_logs_nothing`
-  to `pod.process(...)`; add a `strict_columns=True` twin.
+  to `pod.process(...)`; add a `strict=True` twin.
 - [ ] Tests pass; ruff; basedpyright exit code 0. Commit.
 
 ### Task 3: docs and records
