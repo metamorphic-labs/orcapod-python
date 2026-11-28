@@ -231,7 +231,7 @@ def test_unbound_blueprint_names_all_upstream_slots() -> None:
 
 
 @pytest.mark.filterwarnings("ignore:Index is provisional")
-def test_loaded_blueprint_chains_require_the_operator(tmp_path: Path) -> None:
+def test_loaded_blueprint_chains_use_saved_unary_structure(tmp_path: Path) -> None:
     source = _source("reading", False)
     lists = DictSource(
         [{"item": 1, "region": "north", "values": [1, 2], "y": 3}],
@@ -256,8 +256,57 @@ def test_loaded_blueprint_chains_require_the_operator(tmp_path: Path) -> None:
     operator = loaded.nodes["picked"]
     assert operator.producer is None
     assert operator.pipeline_hash() == pipeline.nodes["picked"].pipeline_hash()
-    with pytest.raises(ValueError, match="saved form does not carry input symmetry"):
-        operator.node_hash()
+    assert operator.name_chain() == pipeline.nodes["picked"].name_chain()
+    assert operator.node_hash() == pipeline.nodes["picked"].node_hash()
+    assert operator.source_chain() is None
+    with pytest.raises(UnboundSourceError, match="unbound.*lists"):
+        operator._chain_content_hash()
+
+
+@pytest.mark.filterwarnings("ignore:Index is provisional")
+def test_loaded_index_job_chains_survive_rebinding(tmp_path: Path) -> None:
+    """A saved Index passes its input chains through while remaining read-only."""
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+
+    source = DictSource(
+        [{"item": 1, "values": [1, 2]}],
+        tag_columns="item",
+        tag_only_columns=True,
+        source_id="lists",
+    )
+    job = PipelineJob(name="saved_index", database=InMemoryArrowDatabase())
+    with job:
+        _ = Index(column="values", i=0)(source, label="picked")
+    _ = job.run()
+    path = tmp_path / "job.json"
+    job.save(path)
+    loaded = PipelineJob.load(path, database=job.database)
+    original, restored = job.nodes["picked"], loaded.nodes["picked"]
+    assert isinstance(original, OperatorJobNode)
+    assert isinstance(restored, OperatorJobNode)
+    assert restored.producer is None
+    assert restored.pipeline_hash() == original.pipeline_hash()
+    assert restored.content_hash() == original.content_hash()
+    assert restored.name_chain() == original.name_chain()
+    assert restored.node_hash() == original.node_hash()
+    assert restored.source_chain() is None
+    with pytest.raises(UnboundSourceError, match="unbound.*lists"):
+        restored._chain_content_hash()
+
+    loaded.bind(sources={"lists": source})
+    assert restored.source_chain() == original.source_chain()
+    assert _hashes(restored) == _hashes(original)
+
+    replacement = DictSource(
+        [{"item": 9, "values": [3, 4]}],
+        tag_columns="item",
+        tag_only_columns=True,
+        source_id="replacement",
+    )
+    loaded.bind(sources={"lists": replacement})
+    assert restored.source_chain() == replacement.source_chain()
+    assert restored._chain_content_hash() != original._chain_content_hash()
+    assert restored.node_hash() == original.node_hash()
 
 
 def _data_tags(name: str, reverse: bool = False) -> DictSource:

@@ -313,9 +313,10 @@ contributing slot is unbound. The chain-based content hash is available internal
 `_chain_content_hash()` until the switch to `content_hash()`. Orcapod continues to use
 the existing hashes for graph keys and persistence. ITL-1590 tracks cases where the
 existing pipeline hash depends on source equality within a commutative input tie.
-The saved job format does not carry input symmetry yet. When an operator is
-unavailable on load, accessing either chain or combined hash raises an error.
-The legacy pipeline and content hashes remain available from the descriptor.
+The saved job format does not carry input symmetry yet. A loaded built-in `Index`
+uses the saved pipeline hash and passes through the chains of its single input.
+Other unavailable operators raise an error for either chain or combined hash.
+The legacy pipeline and content hashes are available from the descriptor.
 
 A polling source, including one wrapped in a cache, can report its source chain,
 name chain, and node hash before it knows its schema. The node hash combines a
@@ -323,6 +324,9 @@ pending polling-source structure term with the name chain without polling. Once 
 supplies the schema, the node hash combines the pipeline hash with the same name
 chain. The chain-based content hash requires the schema. Downstream identities that
 need the pipeline hash report that it is undefined until the schema is known.
+Polling source chain reads use the memoized legacy content hash when available.
+If computing that hash would call the polling implementation, the identity read
+raises an undefined-identity error.
 
 A plain derived source, including one wrapped in a cache, has no source chain while
 a contributing slot of its origin is unbound. Chain accessors report an undefined

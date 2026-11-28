@@ -257,6 +257,14 @@ class CachedSource(RootSource):
     # Identity — delegate to wrapped source
     # -------------------------------------------------------------------------
 
+    @property
+    @override
+    def _content_hash_depends_on_bindings(self) -> bool:
+        """Use the live memo whenever the wrapped preimage may follow a binding."""
+        if isinstance(self._source, RootSource):
+            return self._source._content_hash_depends_on_bindings
+        return True
+
     def identity_structure(self) -> Any:
         return self._source.identity_structure()
 

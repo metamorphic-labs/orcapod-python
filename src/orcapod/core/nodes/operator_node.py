@@ -264,7 +264,7 @@ class OperatorNodeBase(StreamBase):
         self._stored_schema: dict = {}
         self._stored_node_uri: tuple[str, ...] = ()
         self._stored_pipeline_path: tuple[str, ...] = ()
-        self._descriptor: dict = {}
+        self._descriptor: dict[str, Any] = {}
 
         if table_scope not in ("pipeline_hash", "content_hash"):
             raise ValueError(
@@ -297,8 +297,25 @@ class OperatorNodeBase(StreamBase):
         return self.pipeline_identity_structure()
 
     def _identity_leaf(self, walk: IdentityWalkProtocol) -> None:
-        """Refuse to compute provisional chains without the operator's grouping."""
+        """Require the operator's grouping unless the saved unary form suffices."""
         if self._operator is None:
+            from orcapod.core.operators.index import Index
+
+            saved_config: object = self._descriptor.get("operator_config")
+            config = (
+                cast("dict[str, object]", saved_config)
+                if isinstance(saved_config, dict)
+                else {}
+            )
+            if (
+                config.get("class_name") == Index.__name__
+                and config.get("module_path") == Index.__module__
+                and self._stored_pipeline_hash is not None
+                and len(self._identity_inputs()) == 1
+            ):
+                # Index contributes no chain terms and has exactly one input,
+                # so the saved structure and the input's chains suffice.
+                return None
             raise ValueError(
                 "Cannot compute operator identity chains because the saved form "
                 "does not carry input symmetry yet and the operator is unavailable."

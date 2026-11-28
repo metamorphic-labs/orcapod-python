@@ -1823,6 +1823,41 @@ class TestPollingSourceTagOrder:
         )
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_polling_chain_reads_do_not_call_user_code(
+    monkeypatch: pytest.MonkeyPatch, cached: bool
+) -> None:
+    """Source identity can reuse the legacy memo but cannot run the implementation."""
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.sources import CachedSource
+
+    impl = FakeDynamicSource(
+        batches=[_batch(1, 10)], schema_override=Schema({"id": int, "v": int})
+    )
+    source = PollingSource(
+        impl, tag_columns="id", source_id="declared", record_id_columns="id"
+    )
+    stream = CachedSource(source, InMemoryArrowDatabase()) if cached else source
+
+    def unexpected_callback(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a new identity read called the polling implementation")
+
+    with monkeypatch.context() as guard:
+        for method in ("identity", "schema", "poll", "fetch"):
+            guard.setattr(impl, method, unexpected_callback)
+        assert stream.name_chain() and stream.node_hash()
+        for accessor in (stream.source_chain, stream._chain_content_hash):
+            with pytest.raises(ValueError, match="undefined.*polling.*identity"):
+                _ = accessor()
+
+    expected = stream.content_hash()
+    with monkeypatch.context() as guard:
+        for method in ("identity", "schema", "poll", "fetch"):
+            guard.setattr(impl, method, unexpected_callback)
+        assert stream.source_chain() == expected
+        assert stream._chain_content_hash()
+
+
 def test_polling_leaf_chains_are_available_before_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1834,8 +1869,9 @@ def test_polling_leaf_chains_are_available_before_schema(
     def unexpected_poll() -> None:
         pytest.fail("pending identities must not poll for a schema")
 
+    expected = source.content_hash()
     monkeypatch.setattr(source, "_sync_poll_and_commit", unexpected_poll)
-    assert source.source_chain() == source.content_hash()
+    assert source.source_chain() == expected
     name_chain = source.name_chain()
     node_hash = source.node_hash()
     assert isinstance(node_hash, ContentHash)
@@ -1853,6 +1889,7 @@ def test_polling_leaf_chains_stay_stable_when_a_batch_supplies_schema() -> None:
         tag_columns="id",
         record_id_columns="id",
     )
+    _ = source.content_hash()
     before = source.source_chain(), source.name_chain()
     pending_hash = source.node_hash()
     assert isinstance(pending_hash, ContentHash)
@@ -1876,6 +1913,8 @@ def test_cached_polling_source_has_node_hash_without_fetch(
         record_id_columns="id",
     )
     cached = CachedSource(source, InMemoryArrowDatabase())
+    expected = cached.content_hash()
+    assert source.content_hash() == expected
     with monkeypatch.context() as guard:
 
         def unexpected_fetch() -> None:
@@ -1914,6 +1953,7 @@ def test_batch_identities_do_not_fetch_pending_schema(
         guard.setattr(source, "_sync_poll_and_commit", unexpected_fetch)
         guard.setattr(impl, "identity", unexpected_fetch)
         name = result.name_chain()
+    _ = source.content_hash()
     with monkeypatch.context() as guard:
         guard.setattr(source, "_sync_poll_and_commit", unexpected_fetch)
         for accessor in (result.node_hash, result._chain_content_hash):

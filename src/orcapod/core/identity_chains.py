@@ -46,7 +46,7 @@ def _identity_read() -> Iterator[None]:
 
 
 def refuse_identity_io(reason: str = "this source requires a schema") -> None:
-    """Report why the identity cannot be evaluated without reading rows."""
+    """Report why an identity read would need rows or a source callback."""
     if _reading_chains.get():
         raise ValueError(f"Pipeline identity is undefined: {reason}.")
 

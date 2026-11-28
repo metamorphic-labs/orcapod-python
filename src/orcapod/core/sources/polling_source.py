@@ -446,6 +446,12 @@ class PollingSource(RootSource, Generic[T]):
             return hasher.hash_object(("polling_source", None))
         return super()._identity_node_pipeline_hash(hasher)
 
+    @property
+    @override
+    def _content_hash_depends_on_bindings(self) -> bool:
+        """A polling implementation's identity has no upstream slot bindings."""
+        return False
+
     def identity_structure(self) -> Any:
         """Identity from the source id, the impl's own identity, tags and key columns.
 
@@ -460,6 +466,7 @@ class PollingSource(RootSource, Generic[T]):
         known only after a poll (ITL-1316 decides this source's identity).
         """
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
+        refuse_identity_io("this polling source requires calling its identity callback")
         return (
             self.source_id,
             self._impl.identity(),

@@ -161,6 +161,11 @@ class ContentIdentifiableBase(DataContextMixin, ABC):
         """
         ...
 
+    @property
+    def _content_hash_depends_on_bindings(self) -> bool:
+        """Whether a live identity read must bypass the legacy content memo."""
+        return True
+
     def content_hash(self, hasher=None) -> ContentHash:
         """
         Compute a hash based on the content of this object.
@@ -184,7 +189,7 @@ class ContentIdentifiableBase(DataContextMixin, ABC):
         cache_key = hasher.hasher_id
         cache = self._content_hash_cache
         live_cache = _live_content_hashes.get()
-        if live_cache is not None:
+        if live_cache is not None and self._content_hash_depends_on_bindings:
             # Keep each object alive for the read so its id stays unique.
             cache = live_cache.setdefault(id(self), (self, {}))[1]
 
