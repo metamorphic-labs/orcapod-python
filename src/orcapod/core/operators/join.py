@@ -1161,7 +1161,7 @@ class Join(NonZeroInputOperator):
         present = [table for table in tables if table is not None]
         if not present:
             return None
-        return Join._sort_merged_system_tags(arrow_utils.hstack_tables(*present))
+        return arrow_utils.sort_system_tag_values(arrow_utils.hstack_tables(*present))
 
     @staticmethod
     def _build_tag(
@@ -1350,78 +1350,6 @@ class Join(NonZeroInputOperator):
         )
         return merged_tag, Join._merge_data(
             left_tag, left_pkt, right_tag, right_pkt, final=final
-        )
-
-    @staticmethod
-    def _sort_merged_system_tags(table: "pa.Table") -> "pa.Table":
-        """Sort system tag values within same-provenance-path groups.
-
-        When two joined inputs share a pipeline_hash, their system tag
-        columns share a provenance path but occupy different canonical
-        positions.  Sorting the paired (source_id, record_id) values
-        across positions ensures commutativity — mirroring what
-        ``sort_system_tag_values`` does on Arrow tables in
-        ``static_process``.
-        """
-        sys_prefix = constants.SYSTEM_TAG_PREFIX
-        block_sep = constants.BLOCK_SEPARATOR
-        field_sep = constants.FIELD_SEPARATOR
-
-        # Parse keys → groups[provenance_path][position][field_type] = key
-        groups: dict[str, dict[str, dict[str, str]]] = {}
-        for key in table.column_names:
-            if not key.startswith(sys_prefix):
-                continue
-            base, sep, position = key.rpartition(field_sep)
-            if not sep or not position.isdigit():
-                continue
-            after_prefix = base[len(sys_prefix) :]
-            field_type, bsep, prov_path = after_prefix.partition(block_sep)
-            if not bsep:
-                continue
-            groups.setdefault(prov_path, {}).setdefault(position, {})[field_type] = key
-
-        sid_field = constants.SYSTEM_TAG_SOURCE_ID_PREFIX[len(sys_prefix) :]
-        rid_field = constants.SYSTEM_TAG_RECORD_ID_PREFIX[len(sys_prefix) :]
-
-        take_from: dict[str, str] = {}
-        for positions in groups.values():
-            if len(positions) <= 1:
-                continue
-
-            positions_in_order = sorted(positions, key=int)
-
-            def sort_key(fields: dict[str, str]) -> tuple[Any, Any]:
-                source = fields.get(sid_field)
-                record = fields.get(rid_field)
-                source_value = table.column(source)[0].as_py() if source else None
-                record_value = table.column(record)[0].as_py() if record else None
-                return source_value or "", record_value or b""
-
-            sorted_fields = sorted(
-                (positions[position] for position in positions_in_order), key=sort_key
-            )
-            for position, source_fields in zip(positions_in_order, sorted_fields):
-                for kind, name in positions[position].items():
-                    if kind in source_fields:
-                        take_from[name] = source_fields[kind]
-
-        if not take_from:
-            return table
-        nullable = arrow_utils.sorted_system_tag_nullability(
-            {field.name: field.nullable for field in table.schema}
-        )
-        sources = [take_from.get(name, name) for name in table.column_names]
-        fields = [
-            arrow_utils.sorted_system_tag_field(field, nullable[field.name])
-            if field.name in nullable
-            else field.with_nullable(
-                field.nullable or table.schema.field(source).nullable
-            )
-            for field, source in zip(table.schema, sources)
-        ]
-        return pa.Table.from_arrays(
-            [table.column(source) for source in sources], schema=pa.schema(fields)
         )
 
     def rows_dropped_text(

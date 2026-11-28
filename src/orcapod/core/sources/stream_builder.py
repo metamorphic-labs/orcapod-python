@@ -51,11 +51,54 @@ def require_supported_nullable_types(schema: pa.Schema) -> None:
         )
 
 
+def require_system_tag_without_field_metadata(
+    field: pa.Field[Any], *, stored_cache: bool = False
+) -> None:
+    """Refuse field metadata on a system tag before it can reach source rows."""
+    # Stopgap (ITL-1561): re-evaluate what metadata a system-tag field may carry.
+    # Extension metadata reaches the row hash now that rows use stream fields.
+    if not field.metadata:
+        return
+    if stored_cache:
+        raise InputValidationError(
+            f"System-tag column {field.name!r}: the source cache was written with "
+            "Arrow field metadata on a system tag. Rebuild the cache."
+        )
+    raise InputValidationError(
+        f"Custom system-tag column {field.name!r} has Arrow field metadata. "
+        "Remove the field metadata before building the source."
+    )
+
+
+def validate_source_table(table: pa.Table, *, stored_cache: bool = False) -> pa.Table:
+    """Validate an enriched table presented by a source without the source builder.
+
+    Args:
+        table: Source fields and values, with system tags already named as such.
+        stored_cache: Report the rebuild remedy for a persisted source cache.
+
+    Returns:
+        The same table, with fields and values unchanged.
+    """
+    require_supported_nullable_types(table.schema)
+    require_custom_system_tags(
+        table,
+        [
+            name
+            for name in table.column_names
+            if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        ],
+        stored_cache=stored_cache,
+    )
+    return table
+
+
 def require_custom_system_tags(
     table: pa.Table,
     names: Collection[str],
     *,
     schema: pa.Schema | None = None,
+    stored_cache: bool = False,
 ) -> None:
     """Validate custom system-tag declarations and values.
 
@@ -63,6 +106,7 @@ def require_custom_system_tags(
         table: The source's Arrow columns.
         names: The columns nominated as system tags.
         schema: The declared fields if the reader has yet to apply them.
+        stored_cache: Report the rebuild remedy for a persisted source cache.
 
     Raises:
         ValueError: If a nominated column is missing from the source table.
@@ -80,12 +124,10 @@ def require_custom_system_tags(
         )
     for name in names:
         field = fields.field(name)
-        # ITL-1561: Re-evaluate which Arrow field metadata a system tag may carry.
-        # Extension metadata reaches the row hash now that rows use stream fields.
-        if field.metadata or table.schema.field(name).metadata:
-            raise InputValidationError(
-                f"Custom system-tag column {name!r} has Arrow field metadata. "
-                "Remove the field metadata before building the source."
+        require_system_tag_without_field_metadata(field, stored_cache=stored_cache)
+        if schema is not None:
+            require_system_tag_without_field_metadata(
+                table.schema.field(name), stored_cache=stored_cache
             )
         has_nulls = table.column(name).null_count > 0
         if (

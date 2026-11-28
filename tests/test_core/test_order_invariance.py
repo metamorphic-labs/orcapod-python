@@ -75,6 +75,7 @@ from orcapod.core.nodes.function_node import (
 )
 from orcapod.core.nodes.operator_node import OPERATOR_RECORDED_AT_COL
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.sources.source_proxy import SourceProxy
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import RestrictedAggregationWarning
@@ -790,6 +791,20 @@ def _cached_source(role: str, order: int, layout: str, _tmp: Path) -> Any:
     )
 
 
+def _bound_source_proxy(role: str, order: int, layout: str, _tmp: Path) -> Any:
+    delegate = source(MAIN, role, order, layout)
+    tags, data = delegate.output_schema()
+    proxy = SourceProxy(
+        delegate.source_id,
+        delegate.content_hash().to_string(),
+        delegate.pipeline_hash().to_string(),
+        tags,
+        data,
+    )
+    proxy.bind(delegate)
+    return proxy
+
+
 def _derived_source(role: str, order: int, layout: str, _tmp: Path) -> Any:
     return DerivedSource(
         source(MAIN, role, order, layout),
@@ -842,6 +857,7 @@ STREAM_CASES: tuple[StreamCase, ...] = (
     # PollingSource takes no tag_only_columns: its tags are plain.
     StreamCase("polling_source", _polling_source, roles=(PLAIN,)),
     StreamCase("cached_source", _cached_source),
+    StreamCase("bound_source_proxy", _bound_source_proxy),
     StreamCase("derived_source_tags_as_data", _derived_source),
     StreamCase("raw_arrow_table_stream", _raw_stream),
     StreamCase("function_pod_call", _pod_call, with_async=True),
@@ -863,6 +879,7 @@ KIND_CASES: dict[str, str] = {
     "SQLiteTableSource": "sqlite_table_source",
     "PollingSource": "polling_source",
     "CachedSource": "cached_source",
+    "SourceProxy": "bound_source_proxy",
     "DerivedSource": "derived_source_tags_as_data",  # plain: test_plain_derived_source_...
     "ArrowTableStream": "raw_arrow_table_stream",
 }
@@ -870,7 +887,6 @@ NOT_APPLICABLE: dict[str, str] = {
     "RootSource": "the abstract base of every source",
     "StreamBase": "the abstract base of every stream",
     "StreamView": "exposes its table and has no sync or async datagram iterator",
-    "SourceProxy": "stands in for a source a loaded job cannot rebuild; it reads nothing",
 }
 CONNECTOR_KINDS = (DBTableSource, PostgreSQLTableSource, SpiralDBTableSource)
 
@@ -994,7 +1010,7 @@ def test_stream_and_rows_agree_on_tag_data_and_token_fields(
 
     Connector-backed kinds have their own fixture below. The only exclusions
     are the abstract RootSource and StreamBase, StreamView (table only), and
-    SourceProxy (represents a missing source and cannot read rows).
+    the unbound form of SourceProxy (cannot read rows).
     The standalone SideEffectPod exposes the stream iterator. Async delivery
     through the job executor is exercised by the job tests below.
     """
