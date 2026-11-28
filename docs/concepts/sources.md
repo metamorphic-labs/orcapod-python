@@ -625,7 +625,7 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   revisiting the float refusals. SpiralDB cannot compare a `float16` column, so Orcapod reads the rows the
   other conditions select and compares them itself, by the same rule and before `limit`. To
   select rows by such values as Orcapod matches them, filter
-  inside the pipeline (`PolarsFilter`). An infinite value is saved as `{"float": "inf"}` or
+  inside the pipeline (`Filter`). An infinite value is saved as `{"float": "inf"}` or
   `{"float": "-inf"}`, since JSON has no such number.
 - **One restriction per source identity in a pipeline.** Restrictions are equal by statement.
   On an integer column, `t >= 3` and `t > 2` select the same rows but count as two

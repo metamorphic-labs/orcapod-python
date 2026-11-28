@@ -53,6 +53,10 @@ from .several_items import (
     make_source,
 )
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 ALPHA = "std:v1:test-held-alpha"
 BETA = "std:v1:test-held-beta"
 HELD_KEYS = (ALPHA, ALPHA, BETA, BETA, ALPHA, ALPHA)

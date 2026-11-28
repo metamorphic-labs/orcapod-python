@@ -46,6 +46,10 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.streams import ViewStatus
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 IDS = [3, 1, 4, 0, 2]
 
 CALLS: Counter[str] = Counter()

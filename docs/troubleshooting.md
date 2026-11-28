@@ -159,7 +159,9 @@ can. Ordinary comparisons such as `pl.col("x") > 1` work everywhere.
 **Fix.** Use `filter` (`stream.filter(column=value)`, `stream.filter(col("x") > 1)`), which
 takes equalities, comparisons, `is_in`, `between` and null tests and needs no Polars
 expression, or compute a boolean column in a function pod and filter on it. See
-[Filter](concepts/operators.md#filter) and [PolarsFilter](concepts/operators.md#polarsfilter).
+[Filter](concepts/operators.md#filter). `polars_filter` is not recommended: it can change
+the values it passes through, and warns every time one is built; see the warning in
+[PolarsFilter](concepts/operators.md#polarsfilter).
 
 ### `AttributeError: 'PipelineJob' has no attribute 'show_graph'. Available node labels: [...]`
 

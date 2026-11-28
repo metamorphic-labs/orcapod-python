@@ -907,43 +907,41 @@ known for this source kind". The result is an `Explanation` (`orcapod.types`), p
 whose `text()` is what it prints. The preview of a `Filter` directly over a source shows the
 same split in one line of its header.
 
-When `filter` cannot say what you need (arithmetic between columns, a string function), use
+When `filter` cannot say what you need (arithmetic between columns, a string function),
+compute the test as a column in a function pod and filter on that column. `PolarsFilter`
+takes such an expression directly, but it is not recommended: see the warning in
 [PolarsFilter](#polarsfilter).
 
 ### PolarsFilter
+
+!!! warning "Not recommended: it can change the values it passes through"
+    `PolarsFilter` passes every column of its input through Polars, also the columns its
+    predicates do not read, and Polars does not hold every Arrow type exactly. The known
+    case: a `date64` value that is not at midnight comes back at midnight, with no error
+    (ITL-1296, not fixed). Use [`Filter`](#filter), which passes every value through as it
+    is. Building a `PolarsFilter` (the class, or `stream.polars_filter(...)`) issues
+    `PolarsFilterWarning` (`orcapod.errors`) every time, and loading a saved job issues it
+    once for each `PolarsFilter` the job holds. The samples below issue it when they run.
 
 !!! warning "Provisional"
     `PolarsFilter` is a [provisional operator](#provisional-operators): its identity is not
     frozen with data context v1 and may change in a later release (ITL-1247). Building one
     issues `ProvisionalHashWarning` once per process.
 
-Filter rows using Polars expressions:
-
-```python
-import polars as pl
-from orcapod.operators import PolarsFilter
-
-filt = PolarsFilter(predicates=[pl.col("age") > 10])
-filtered = filt.process(source)
-for tag, pkt in filtered:
-    print(f"{tag.as_dict()} -> {pkt.as_dict()}")
-# {'subject_id': 'mouse_01'} -> {'age': 12, 'weight': 25.3}
-# {'subject_id': 'mouse_03'} -> {'age': 15, 'weight': 27.8}
-```
-
-You can also filter by exact values using `constraints`:
-
-```python
-filt = PolarsFilter(constraints={"subject_id": "mouse_01"})
-print(filt(source).as_table().to_pylist())
-# [{'subject_id': 'mouse_01', 'age': 12, 'weight': 25.3}]
-```
+`PolarsFilter(predicates=[...], constraints={...})`, or `stream.polars_filter(*predicates,
+**constraints)`, keeps the rows that satisfy every Polars expression in `predicates` and
+equal every value in `constraints`. An equality or a comparison of a column with a value is
+written with [`Filter`](#filter) instead: `stream.filter(col("age") > 10)`,
+`stream.filter(subject_id="mouse_01")`.
 
 An expression predicate is part of the filter's identity, so a filtered stream can feed a
 join, a function pod or a `PipelineJob`. Two filters written with the same expression share
 their hashes, even when the expression is spelled differently:
 
 ```python
+import polars as pl
+from orcapod.operators import PolarsFilter
+
 by_operator = PolarsFilter(predicates=[pl.col("age") > 10])(source)
 by_method = source.polars_filter(pl.col("age").gt(10))
 print(by_operator.pipeline_hash() == by_method.pipeline_hash())
@@ -985,7 +983,7 @@ except ValueError as exc:
 each named column from `T | None` to `T`. `DropNulls()`, with no names, does this for every
 tag and data column (see [Every column](#every-column) below). Use it when a column is nullable by specification
 but a function needs a value: a pod whose parameter is a plain `int` refuses an `int | None`
-column, and `Filter` or `PolarsFilter` can drop the null rows but leave the type as it was.
+column, and `Filter` can drop the null rows but leaves the type as it was.
 
 ```python
 import pyarrow as pa
