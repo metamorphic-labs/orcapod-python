@@ -440,6 +440,13 @@ class SQLiteConnector:
         Returns:
             List of ColumnInfo objects; empty list if table doesn't exist.
         """
+        self._validate_table_name(table_name)
+        return self._get_column_info(table_name, schema=schema)
+
+    def _get_column_info(
+        self, table_name: str, *, schema: str | None = None
+    ) -> list[ColumnInfo]:
+        """Read metadata for an already parsed, safely quoted table identifier."""
         with self._lock:
             conn = self._require_open()
             namespace = "" if schema is None else sql_table_identifier(schema) + "."
@@ -506,9 +513,9 @@ class SQLiteConnector:
                 queried_table = unquote_sql_identifier(table_match["table"])
                 namespace = table_match["schema"]
                 column_info = (
-                    self.get_column_info(queried_table)
+                    self._get_column_info(queried_table)
                     if namespace is None
-                    else self.get_column_info(
+                    else self._get_column_info(
                         queried_table, schema=unquote_sql_identifier(namespace)
                     )
                 )

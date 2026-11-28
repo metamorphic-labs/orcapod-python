@@ -536,7 +536,20 @@ def _mocked_postgresql() -> tuple[PostgreSQLConnector, MagicMock]:
     """A ``PostgreSQLConnector`` over a mocked connection (no server)."""
     with patch("psycopg.connect") as mock_connect:
         conn = MagicMock()
-        conn.cursor.return_value.__enter__.return_value.fetchone.return_value = None
+        cursor = conn.cursor.return_value.__enter__.return_value
+
+        def fetchone():
+            query = cursor.execute.call_args.args[0]
+            if (
+                isinstance(query, str)
+                and "SELECT ns.nspname," in query
+                and "ns.oid," not in query
+                and "WHERE ns.nspname = current_schema()" in query
+            ):
+                return ("public", False)
+            return None
+
+        cursor.fetchone.side_effect = fetchone
         mock_connect.return_value = conn
         return PostgreSQLConnector("postgresql://localhost/test"), conn
 
