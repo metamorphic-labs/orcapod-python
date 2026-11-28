@@ -536,3 +536,6 @@ def test_operator_storage_keeps_one_declared_token_schema(
         {"k": 0, "x": 1},
         {"k": 1, "x": 2},
     ]
+    node.attach_databases(pipeline_database=store, cache_mode=CacheMode.REPLAY)
+    replayed = node.execute(stream_value).as_table(columns={"source": True})
+    assert replayed.schema.field("_source_x") == schema.field("_source_x")

@@ -41,7 +41,6 @@ from orcapod.core.data_tags import (
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import (
-    RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
     produced_stream,
     rows_on_read,
@@ -1740,10 +1739,10 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 as in any run.
 
         Returns:
-            The node's output stream: its rows as the table ``_rows_to_table`` builds
-            from them (``StaticOutputOperatorPod._output_stream``), with this node's
-            identity, built from the operator's result table without making rows
-            (ITL-1347, stage 2). The sync orchestrator hands it to every successor.
+            The output stream under the operator's declared fields, with this node's
+            identity. When the result already holds its Arrow table, the keeper
+            uses that table directly. The sync orchestrator hands the stream to
+            every successor.
 
         Raises:
             ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
@@ -1771,16 +1770,16 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             # Check REPLAY cache first
             cached_output = self.get_cached_output()
             if cached_output is not None:
-                try:
-                    output = StaticOutputOperatorPod._output_stream(
-                        cached_output.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
-                        cached_output.keys(),
+                table = cached_output.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+                if table.num_rows:
+                    output = StaticOutputOperatorPod._as_upstream_stream(
+                        table,
+                        cached_output.keys()[0],
+                        stream_data_tags(cached_output),
                         self,
                     )
-                except RowBuiltFormUnavailable:
-                    # A stored table F cannot build from: its rows, built when read,
-                    # as main handed them on (ITL-1347).
-                    output = rows_on_read(cached_output.iter_data(), self)
+                else:
+                    output = rows_on_read([], self)
                 ctx_obs.on_node_end(node_label, node_hash)
                 return output
 
