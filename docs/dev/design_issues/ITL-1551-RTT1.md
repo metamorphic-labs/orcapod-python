@@ -8,6 +8,8 @@
 Result cache lookup and function-node record selection could choose a different
 result when the database returned several equal-time records in a different order.
 
-**Fix:** Compare the stored timestamps first and the result UUIDv7 bytes second.
-The rule also selects the placeholder when multiple records point to vanished
-ephemeral results for the same instance.
+**Fix:** Compare stored timestamps first. In the result cache, use the greater
+result UUIDv7 on a tie. For equally timed pipeline records, an available result
+takes priority over a missing ephemeral result. When the tied results are both
+available or both gone, use the greater UUIDv7. If all ephemeral results for an
+instance are gone, this ordering selects the record that supplies its placeholder.
