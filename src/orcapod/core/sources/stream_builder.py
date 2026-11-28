@@ -27,6 +27,9 @@ from orcapod.errors import InputValidationError, RowIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
+from orcapod.semantic_types.narrow_float_keys import (
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.schema_utils import compute_source_schema_hash
 
@@ -559,6 +562,9 @@ class SourceStreamBuilder:
             raise schema_utils.schema_hash_rejected_columns_error(
                 found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
             )
+        # Nor is a dict keyed by, or a set of, float32 or float16 (ITL-1591): refused
+        # here first, as the stream refuses it, before any key column or hash.
+        require_schema_without_narrow_float_keys(table.schema)
 
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)

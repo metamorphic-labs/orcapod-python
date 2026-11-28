@@ -37,6 +37,11 @@ from orcapod.errors import CanonicalOrderError
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.semantic_types.canonical_order import canonical_python_value
+from orcapod.semantic_types.narrow_float_keys import (
+    NarrowFloatKeyError,
+    require_schema_without_narrow_float_keys,
+)
+from orcapod.semantic_types.nested_none import with_context
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -188,6 +193,8 @@ class Datagram(ContentIdentifiableBase):
             if python_schema
             else inferred
         )
+        if python_schema:
+            self._refuse_narrow_float_keys(python_schema)
         self._data_dict = self._canonical_dict_values(
             data_columns, self._data_python_schema
         )
@@ -201,6 +208,29 @@ class Datagram(ContentIdentifiableBase):
         )
         self._meta_table: pa.Table | None = None
         self._context_table: pa.Table | None = None
+
+    def _refuse_narrow_float_keys(self, python_schema: SchemaLike) -> None:
+        """Refuse a declared type with a ``float32`` or ``float16`` dict key or set element.
+
+        The datagram converts its values to Arrow only when asked for a table; a type
+        with such a key or element is refused when it is declared, here (ITL-1591).
+        The rule is the type converter's, applied when it maps the declared type to
+        Arrow. Any other reason a declared type has no Arrow type is reported where it
+        is today, by the conversion.
+
+        Args:
+            python_schema: The declared Python types, by column name.
+
+        Raises:
+            NarrowFloatKeyError: Naming the column and its declared type.
+        """
+        for name, python_type in python_schema.items():
+            try:
+                self.converter.python_type_to_arrow_type(python_type)
+            except NarrowFloatKeyError as exc:
+                raise with_context(f"Column {name!r} ({python_type})", exc) from exc
+            except Exception:  # noqa: BLE001 - reported by the conversion, as before
+                continue
 
     def _canonical_dict_values(
         self, columns: dict[str, DataValue], schema: Schema
@@ -237,6 +267,10 @@ class Datagram(ContentIdentifiableBase):
             )
 
         table = arrow_utils.normalize_table_to_large_types(table)
+        # A dict keyed by, or a set of, float32 or float16 is refused where its type
+        # is declared, here by the table (ITL-1591): an update would narrow two
+        # distinct floats to one stored value and lose an entry.
+        require_schema_without_narrow_float_keys(table.schema)
 
         # Extract context from table if not provided externally
         if constants.CONTEXT_KEY in table.column_names and data_context is None:

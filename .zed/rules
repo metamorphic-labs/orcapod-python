@@ -1416,6 +1416,20 @@ data. The rules:
   Batch with a size has its own form, grouping rows by arrival. A new operator whose output
   rows each come from one input row declares ROW_BY_ROW; write no other per-operator batch
   code.
+- A dict key and a set element are never `float32` or `float16` (developer, November 28, 2026,
+  D16 and D25, ITL-1591): a float stored under such a type is narrowed, two distinct floats
+  can become one stored value, and the container loses an entry. A declared type with such a
+  key or element is refused (`NarrowFloatKeyError`, an `InputValidationError`) where it is
+  declared, Python-declared and Arrow-declared alike, at any depth, by a check of types that
+  never reads a value. One rule, `semantic_types/narrow_float_keys.py`: the type converter
+  applies it to every dict and set type it builds (sources' Python schemas, datagrams,
+  user-class fields, a function pod's inputs and outputs when the pod is defined), and
+  `SourceStreamBuilder.build`, `ArrowTableStream.__init__` and a datagram given an Arrow
+  table apply it to the table's schema; never check it elsewhere. A dict is the converter's
+  one dict shape (`nested_storage.dict_entry_fields`; never write a second shape test) or an
+  Arrow map; a set is the native set container, live or in its storage form. `float32` and
+  `float16` stay valid as a plain column, a list element, a struct field and a dict value;
+  the silent narrowing of such plain values from an Arrow declaration is ITL-1613.
 - The type converter keys synthesized struct classes by the large-normalized struct, so
   struct<b: string> and struct<b: large_string> are one Python type (a workaround,
   TODO(ITL-841)).

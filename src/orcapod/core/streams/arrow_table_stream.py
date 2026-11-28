@@ -20,6 +20,9 @@ from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagPro
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
+from orcapod.semantic_types.narrow_float_keys import (
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.utils import arrow_utils, schema_utils
 
 logger = logging.getLogger(__name__)
@@ -101,6 +104,11 @@ class ArrowTableStream(StreamBase):
             raise schema_utils.schema_hash_rejected_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
+
+        # Nor is a dict keyed by, or a set of, float32 or float16 (developer, November
+        # 28, 2026, ITL-1591): two distinct floats can narrow to one stored value, so
+        # an entry would be lost. A check of types, as the two above.
+        require_schema_without_narrow_float_keys(table.schema)
 
         data_table, data_context_table = arrow_utils.split_by_column_groups(
             table, [constants.CONTEXT_KEY]

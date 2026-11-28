@@ -44,7 +44,12 @@ from orcapod.semantic_types.nested_none import (
     unrestorable_none_error,
     with_context,
 )
+from orcapod.semantic_types.narrow_float_keys import (
+    NarrowFloatKeyError,
+    require_no_narrow_float_keys,
+)
 from orcapod.semantic_types.nested_storage import (
+    dict_entry_fields,
     NestedTypeNotStorableError,
     require_storable_in_struct_field,
 )
@@ -338,6 +343,7 @@ class UniversalTypeConverter:
                 except (
                     NestedNoneNotRestorableError,
                     NestedTypeNotStorableError,
+                    NarrowFloatKeyError,
                 ) as exc:
                     raise with_context(f"Column {name!r} ({annotation})", exc) from exc
 
@@ -513,9 +519,13 @@ class UniversalTypeConverter:
             require_storable_in_struct_field(key_arrow)
             require_storable_in_struct_field(val_arrow)
             require_restorable_none(args[1], val_arrow, self._is_user_class_extension)
-            return pa.large_list(
+            dict_arrow = pa.large_list(
                 pa.struct([pa.field("key", key_arrow), pa.field("value", val_arrow)])
             )
+            # A dict keyed by float32 or float16 is refused where it is declared
+            # (ITL-1591).
+            require_no_narrow_float_keys(dict_arrow)
+            return dict_arrow
 
         # Concrete class — registry or factory dispatch
         if isinstance(annotation, type):
@@ -627,6 +637,8 @@ class UniversalTypeConverter:
             ),
             is_set=True,
         )
+        # A set of float32 or float16 is refused where it is declared (ITL-1591).
+        require_no_narrow_float_keys(lt.get_arrow_extension_type())
         existing = self._logical_type_registry.get_by_arrow_extension_name(
             lt.logical_type_name
         )
@@ -1082,7 +1094,11 @@ class UniversalTypeConverter:
         for field_name, python_type in python_schema.items():
             try:
                 arrow_type = self.python_type_to_arrow_type(python_type)
-            except (NestedNoneNotRestorableError, NestedTypeNotStorableError) as exc:
+            except (
+                NestedNoneNotRestorableError,
+                NestedTypeNotStorableError,
+                NarrowFloatKeyError,
+            ) as exc:
                 raise with_context(
                     f"Column {field_name!r} ({python_type})", exc
                 ) from exc
@@ -1564,7 +1580,11 @@ class UniversalTypeConverter:
             require_storable_in_struct_field(value_type)
             require_restorable_none(args[1], value_type, self._is_user_class_extension)
             key_value_struct = pa.struct([("key", key_type), ("value", value_type)])
-            return pa.large_list(key_value_struct)
+            dict_arrow = pa.large_list(key_value_struct)
+            # A dict keyed by float32 or float16 is refused where it is declared
+            # (ITL-1591).
+            require_no_narrow_float_keys(dict_arrow)
+            return dict_arrow
 
         # Handle Union/Optional types
         elif origin is typing.Union or origin is types.UnionType:
@@ -1702,17 +1722,12 @@ class UniversalTypeConverter:
             element_type = arrow_type.value_type
 
             # Check if this is a dict representation: list<struct<key, value>>
-            if pa.types.is_struct(element_type):
-                field_names = [field.name for field in element_type]
-                if set(field_names) == {"key", "value"}:
-                    # This is a dict
-                    key_field = next(f for f in element_type if f.name == "key")
-                    value_field = next(f for f in element_type if f.name == "value")
+            if (entry_fields := dict_entry_fields(arrow_type)) is not None:
+                key_field, value_field = entry_fields
+                key_python_type = self.arrow_type_to_python_type(key_field.type)
+                value_python_type = self.arrow_type_to_python_type(value_field.type)
 
-                    key_python_type = self.arrow_type_to_python_type(key_field.type)
-                    value_python_type = self.arrow_type_to_python_type(value_field.type)
-
-                    return dict[key_python_type, value_python_type]
+                return dict[key_python_type, value_python_type]
 
             # Regular list
             element_python_type = self.arrow_type_to_python_type(element_type)
@@ -2029,30 +2044,25 @@ class UniversalTypeConverter:
             element_type = arrow_type.value_type
 
             # Check if this is a dict representation
-            if pa.types.is_struct(element_type):
-                field_names = [field.name for field in element_type]
-                if set(field_names) == {"key", "value"}:
-                    # Dict representation
-                    key_field = next(f for f in element_type if f.name == "key")
-                    value_field = next(f for f in element_type if f.name == "value")
+            if (entry_fields := dict_entry_fields(arrow_type)) is not None:
+                key_field, value_field = entry_fields
+                key_converter = self.get_arrow_to_python_converter(key_field.type)
+                value_converter = self._nested_value_converter(value_field.type)
 
-                    key_converter = self.get_arrow_to_python_converter(key_field.type)
-                    value_converter = self._nested_value_converter(value_field.type)
+                def convert_entries(value: Any) -> dict[Any, Any]:
+                    if not value:
+                        return {}
+                    converted = {}
+                    for item in value:
+                        # A null entry is not a key/value pair: never drop it.
+                        if item is None:
+                            raise unrestorable_none_error(element_type)
+                        converted[key_converter(item["key"])] = value_converter(
+                            item["value"]
+                        )
+                    return converted
 
-                    def convert_entries(value: Any) -> dict[Any, Any]:
-                        if not value:
-                            return {}
-                        converted = {}
-                        for item in value:
-                            # A null entry is not a key/value pair: never drop it.
-                            if item is None:
-                                raise unrestorable_none_error(element_type)
-                            converted[key_converter(item["key"])] = value_converter(
-                                item["value"]
-                            )
-                        return converted
-
-                    return convert_entries
+                return convert_entries
 
             # Regular list
             element_converter = self._nested_value_converter(element_type)

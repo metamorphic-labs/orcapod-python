@@ -182,6 +182,11 @@ print(labels_type.storage_type)
   `NestedTypeNotStorableError` that names the column or `Class.field` (ITL-1150). Hold the set
   in a dataclass field, where it keeps its type, or declare the plain type
   (`dict[str, list[int]]`).
+- A set of `float32` or `float16` elements is refused where it is declared, in Python
+  (`set[np.float32]`) and in Arrow (`set[float]`, `set[halffloat]`), with a
+  `NarrowFloatKeyError`: a float stored under such a type is narrowed, two distinct floats can
+  become one stored element, and the set would lose one (ITL-1591). Declare `set[float]`
+  (`set[double]`). The same holds for the key of a dict.
 - `frozenset[T]` is not supported: declare `set[T]`. Support is to be evaluated in ITL-1140.
 
 A container type you implement yourself is not a native container. It is an ordinary logical

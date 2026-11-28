@@ -34,6 +34,7 @@ from orcapod.semantic_types.nested_none import (
     require_restorable_none,
     with_context,
 )
+from orcapod.semantic_types.narrow_float_keys import NarrowFloatKeyError
 from orcapod.semantic_types.nested_storage import NestedTypeNotStorableError
 from orcapod.logical_types.registry import (
     make_arrow_extension_type,
@@ -330,7 +331,11 @@ class UserClassLogicalTypeFactory:
                         UserClassLogicalType,
                     ),
                 )
-            except (NestedNoneNotRestorableError, NestedTypeNotStorableError) as exc:
+            except (
+                NestedNoneNotRestorableError,
+                NestedTypeNotStorableError,
+                NarrowFloatKeyError,
+            ) as exc:
                 raise with_context(
                     f"{python_type.__qualname__}.{field_name} ({annotation})", exc
                 ) from exc
