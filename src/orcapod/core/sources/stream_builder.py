@@ -685,6 +685,7 @@ class SourceStreamBuilder:
         source_id: str,
         row_identifiers: Sequence[str],
         data_tags: Sequence[str] = (),
+        with_source_info: bool = True,
     ) -> ArrowTableStream:
         """Add source-info and system-tag columns to ``table`` and wrap it as a stream.
 
@@ -706,19 +707,25 @@ class SourceStreamBuilder:
                 source.
             data_tags: The tag columns that are also data columns (data-tags);
                 they get source info like any data column.
+            with_source_info: Whether to build the source-info tokens. ``False`` only
+                for a read whose caller keeps no source-info column and hashes no row
+                (ITL-1464): the tokens are one string per row and data column, many
+                times the size of the rows. The stream then holds null tokens and
+                must not be handed on.
 
         Returns:
             The stream over the enriched table.
         """
-        source_info = [
-            f"{source_id}{constants.BLOCK_SEPARATOR}{identifier}"
-            for identifier in row_identifiers
-        ]
-        table = arrow_utils.add_source_info(
-            table,
-            source_info,
-            exclude_columns=[c for c in tag_columns if c not in data_tags],
-        )
+        if with_source_info:
+            source_info = [
+                f"{source_id}{constants.BLOCK_SEPARATOR}{identifier}"
+                for identifier in row_identifiers
+            ]
+            table = arrow_utils.add_source_info(
+                table,
+                source_info,
+                exclude_columns=[c for c in tag_columns if c not in data_tags],
+            )
         table = arrow_utils.add_system_tag_columns(
             table,
             schema_hash,
