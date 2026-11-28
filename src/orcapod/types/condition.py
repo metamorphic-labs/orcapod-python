@@ -1312,7 +1312,10 @@ class Condition:
                         f"a condition is a mapping of column to value, or a condition "
                         f"built with col(...); got {type(argument).__name__}. A mask "
                         "by position is not a condition (row order is not a result); "
-                        "for a Polars expression use polars_filter"
+                        "a Polars expression is not one either: write it with col(...), "
+                        "or compute it as a column in a function pod and filter on that "
+                        "column (polars_filter takes one, but is not recommended: it "
+                        "can change the values it passes through)"
                     )
             for column, given in columns.items():
                 value = _checked_value(column, given)

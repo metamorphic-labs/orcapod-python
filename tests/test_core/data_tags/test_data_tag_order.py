@@ -34,6 +34,10 @@ from orcapod.pipeline import (
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import CacheMode
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 JOB = "order"
 
 

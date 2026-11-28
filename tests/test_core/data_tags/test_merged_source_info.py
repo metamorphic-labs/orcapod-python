@@ -47,6 +47,10 @@ from orcapod.core.data_tags import merge_source_info
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.utils import arrow_utils
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 GROUP_TOKEN = re.compile(rf"^{GROUP_BY_FOLD_LABEL}:[0-9a-f]{{64}}$")
 JOIN_TOKEN = re.compile(rf"^{JOIN_FOLD_LABEL}:[0-9a-f]{{64}}$")
 

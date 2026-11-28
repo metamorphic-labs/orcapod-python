@@ -53,6 +53,10 @@ from .test_streaming_joins import (
     assert_same_rows,
 )
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 
 @pytest.fixture(autouse=True)
 def _quiet_provisional() -> Any:

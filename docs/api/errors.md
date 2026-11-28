@@ -82,6 +82,8 @@ These exceptions and warnings report problems running pipelines, processing rows
 
 ::: orcapod.errors.RejoinDifferingColumnWarning
 
+::: orcapod.errors.PolarsFilterWarning
+
 ::: orcapod.errors.UpstreamFailedError
 
 ::: orcapod.errors.EmptyDataAccessError
