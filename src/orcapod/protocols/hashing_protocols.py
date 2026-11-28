@@ -14,13 +14,18 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class IdentityChains:
-    """The three chains of one element. An unbound slot leaves sources absent."""
+    """The three chains of one element.
+
+    An unbound slot leaves sources absent. Collapsed symmetry invalidates the
+    combined hashes.
+    """
 
     pipeline_hash: Callable[[SemanticHasherProtocol], ContentHash]
     sources: ContentHash | None
     names: ContentHash
     unbound_slots: frozenset[str] = frozenset()
     node_pipeline_hash: Callable[[SemanticHasherProtocol], ContentHash] | None = None
+    collapsed_input_symmetry: bool = False
 
 
 class IdentityWalkProtocol(Protocol):

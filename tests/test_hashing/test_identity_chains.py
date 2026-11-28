@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from itertools import permutations
 from pathlib import Path
-from typing import TYPE_CHECKING
+from random import Random
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from typing_extensions import override
@@ -416,6 +418,118 @@ def test_nested_symmetry_keeps_repeated_ordered_pairs() -> None:
     ):
         hasher = SemanticAwarePythonHasher(hasher_id=label)
         assert result_chain == hasher.hash_object((group_chain, group_chain))
+
+
+@pytest.fixture
+def collapsed_nested_pair() -> tuple[StreamProtocol, StreamProtocol]:
+    """Build the review's two orderings of content-equal, differently named slots."""
+    from orcapod.operators import SelectDataColumns
+
+    class ReversedPairJoin(Join):
+        @override
+        def argument_symmetry(
+            self, streams: Collection[StreamProtocol]
+        ) -> ArgumentGroup:
+            a, b, c, d = streams
+            return frozenset(((a, b), (d, c)))
+
+    source = _data_tags("reading")
+    job = PipelineJob(name="nested_pairs", database=InMemoryArrowDatabase())
+    with job:
+        for name in "abcd":
+            _ = SelectDataColumns(["x", "y"])(
+                SourceNode.from_stream(source, name=name), label=f"out_{name}"
+            )
+    job.bind(dict.fromkeys("abcd", source))
+    a, b, c, d = (cast("StreamProtocol", job.nodes[name]) for name in "abcd")
+    assert a == b == c == d
+    symmetry = ReversedPairJoin().argument_symmetry((a, b, c, d))
+    assert isinstance(symmetry, frozenset) and len(symmetry) == 1
+    return ReversedPairJoin()(a, b, c, d), ReversedPairJoin()(d, c, b, a)
+
+
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError, reason="ITL-1590: a nested group loses a pair"
+)
+def test_nested_symmetry_preserves_order_in_collapsed_pairs(
+    collapsed_nested_pair: tuple[StreamProtocol, StreamProtocol],
+) -> None:
+    """Swapping the commutative groups preserves their ordered name chains."""
+    original, swapped = collapsed_nested_pair
+    assert original.pipeline_hash() == swapped.pipeline_hash()
+    assert original.source_chain() == swapped.source_chain()
+    assert original.name_chain() == swapped.name_chain()
+    assert _hashes(original) == _hashes(swapped)
+
+
+def test_combined_hashes_refuse_collapsed_commutative_groups(
+    collapsed_nested_pair: tuple[StreamProtocol, StreamProtocol],
+) -> None:
+    """A collapsed group makes both combined hashes undefined, including downstream."""
+    from orcapod.operators import SelectDataColumns
+
+    source = _data_tags("reading")
+    repeated = Join()(source, source)
+    for result in (repeated, *collapsed_nested_pair):
+        assert result.pipeline_hash()
+        assert result.content_hash()
+        unary = SelectDataColumns(["x", "y"])(result)
+        ordered = MergeJoin()(result, source)
+        for stream in (result, unary, ordered):
+            with pytest.raises(ValueError, match="commutative.*ITL-1590"):
+                _ = stream.node_hash()
+            with pytest.raises(ValueError, match="commutative.*ITL-1590"):
+                _ = stream._chain_content_hash()
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_permutations_in_nested_operator_trees(seed: int) -> None:
+    """Every commutative permutation keeps identity; an ordered swap changes it."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    class OrderedJoin(Join):
+        @override
+        def argument_symmetry(
+            self, streams: Collection[StreamProtocol]
+        ) -> ArgumentGroup:
+            return tuple(streams)
+
+    rng = Random(seed)
+    leaves: list[SourceJobNode] = []
+    for index in range(6):
+        tag = f"tag_{index}"
+        name = f"slot_{index}"
+        source = DictSource(
+            [{"key": 1, tag: index}], tag_columns=["key", tag], source_id=name
+        )
+        leaves.append(SourceJobNode.from_stream(source, name=name))
+
+    def build_tree(streams: list[SourceJobNode]) -> StreamProtocol:
+        if len(streams) == 1:
+            return streams[0]
+        splits = sorted(
+            rng.sample(range(1, len(streams)), rng.randint(1, min(2, len(streams) - 1)))
+        )
+        edges = [0, *splits, len(streams)]
+        children = [
+            build_tree(streams[start:stop]) for start, stop in zip(edges, edges[1:])
+        ]
+        commutative = rng.choice([True, False])
+        operator = Join() if commutative else OrderedJoin()
+        original = operator(*children)
+        hashes = (original.pipeline_hash(), *_hashes(original))
+        if commutative:
+            for order in permutations(children):
+                result = operator(*order)
+                assert (result.pipeline_hash(), *_hashes(result)) == hashes
+        else:
+            result = operator(children[1], children[0], *children[2:])
+            assert result.pipeline_hash() != hashes[0]
+            assert result._chain_content_hash() != hashes[1]
+            assert result.node_hash() != hashes[2]
+        return original
+
+    _ = build_tree(leaves)
 
 
 def test_anonymous_source_proxy_uses_saved_identity_and_slot_name() -> None:

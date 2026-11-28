@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 class _NodeIdentityProtocol(Protocol):
-    """Public identities available on every orchestrated node."""
+    """Identity accessors available on every orchestrated node."""
 
     def node_hash(self) -> ContentHash:
         """Combine structure and slot names."""
@@ -40,6 +40,10 @@ class _NodeIdentityProtocol(Protocol):
 
     def name_chain(self) -> ContentHash:
         """Return the chain of source-slot names."""
+        ...
+
+    def _chain_content_hash(self) -> ContentHash:
+        """Combine structure and sources for the provisional content identity."""
         ...
 
 

@@ -41,6 +41,9 @@ class _NodeIdentities:
     def name_chain(self):
         return None
 
+    def _chain_content_hash(self):
+        return None
+
 
 class TestSourceNodeProtocol:
     def test_requires_execute(self):

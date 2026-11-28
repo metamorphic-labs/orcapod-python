@@ -77,10 +77,10 @@ InputSymmetry = int | list["InputSymmetry"] | _SymmetricInputs
 def encode_input_symmetry(
     inputs: tuple[StreamProtocol, ...],
     symmetry: Callable[[tuple[StreamProtocol, ...]], ArgumentGroup],
-) -> InputSymmetry | None:
-    """Translate a pod's grouping of real streams into argument positions."""
+) -> tuple[InputSymmetry | None, bool]:
+    """Encode argument positions and report whether a symmetric group lost inputs."""
     if len(inputs) < 2:
-        return None
+        return None, False
 
     remaining = dict(enumerate(inputs))
     symmetric: list[tuple[ArgumentGroup, InputSymmetry, list[InputSymmetry]]] = []
@@ -116,10 +116,12 @@ def encode_input_symmetry(
         grouped = encode(group, remaining, repeat=False)
     except ValueError:
         # Use argument order when the callback does not return the input streams.
-        return None
+        return None, False
 
+    collapsed = bool(remaining and symmetric)
     # A frozenset can collapse an equal leaf or an entire equal subgroup.
-    # Claim repeats of larger members first so their leaves stay together.
+    # Keep the standalone chains' existing fallback. This can recover repeats,
+    # but cannot recover the order of equal inputs within a missing subgroup.
     if remaining:
         members = [
             (child, siblings, _input_positions(encoded))
@@ -137,8 +139,8 @@ def encode_input_symmetry(
                     break
                 remaining = available
     if remaining:
-        return None
-    return None if grouped == list(range(len(inputs))) else grouped
+        return None, collapsed
+    return (None if grouped == list(range(len(inputs))) else grouped), collapsed
 
 
 def _input_positions(group: InputSymmetry) -> tuple[int, ...]:
@@ -215,6 +217,12 @@ def _pool_group(
         else None,
         _pool(hash_term, NAME_CHAIN_HASH_LABEL, tuple(names), name_term),
     )
+
+
+def _require_complete_symmetry(chains: IdentityChains) -> None:
+    """Refuse to combine chains if a commutative ancestor lost input order."""
+    if chains.collapsed_input_symmetry:
+        raise ValueError("A commutative group dropped content-equal inputs (ITL-1590).")
 
 
 class IdentityChainsMixin(ABC):
@@ -362,10 +370,11 @@ class IdentityChainsMixin(ABC):
                     name_term,
                 ),
                 upstream.unbound_slots,
+                collapsed_input_symmetry=upstream.collapsed_input_symmetry,
             )
 
         # Symmetric groups use structural ordering. Occurrences keep repeats.
-        group = encode_input_symmetry(inputs, self._identity_symmetry)
+        group, collapsed = encode_input_symmetry(inputs, self._identity_symmetry)
         if group is None:
             group = list[InputSymmetry](range(len(inputs)))
         children = tuple(
@@ -386,6 +395,8 @@ class IdentityChainsMixin(ABC):
             frozenset(
                 name for upstream in upstreams for name in upstream.unbound_slots
             ),
+            collapsed_input_symmetry=collapsed
+            or any(upstream.collapsed_input_symmetry for upstream in upstreams),
         )
 
     def source_chain(self) -> ContentHash | None:
@@ -403,10 +414,12 @@ class IdentityChainsMixin(ABC):
 
         Raises:
             UnboundSourceError: If any contributing source slot is unbound.
+            ValueError: If a commutative group dropped content-equal inputs.
         """
         with self._identity_lock:
             walk = IdentityWalk(self._identity_hasher)
             chains = walk.visit(self)
+            _require_complete_symmetry(chains)
             if chains.sources is None:
                 names = ", ".join(repr(name) for name in sorted(chains.unbound_slots))
                 raise UnboundSourceError(
@@ -417,10 +430,15 @@ class IdentityChainsMixin(ABC):
             )
 
     def node_hash(self) -> ContentHash:
-        """Combine structure and slot names, independently of binding."""
+        """Combine structure and slot names.
+
+        Raises:
+            ValueError: If a commutative group dropped content-equal inputs.
+        """
         with self._identity_lock:
             walk = IdentityWalk(self._identity_hasher)
             chains = walk.visit(self)
+            _require_complete_symmetry(chains)
             structure = chains.node_pipeline_hash or chains.pipeline_hash
             return self._identity_hash(
                 NODE_HASH_LABEL, (structure(walk.hasher), chains.names)
