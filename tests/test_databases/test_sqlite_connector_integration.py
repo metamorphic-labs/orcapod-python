@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
 
 from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
+from orcapod.databases._sql_store import STORE_PATH_CATALOG
 from orcapod.errors import OrcapodDatabaseError
 from orcapod.types import ColumnInfo
 
@@ -120,6 +123,33 @@ class TestConnectorArrowDatabaseWithSQLite:
             assert connector.get_table_names() == []
             db.add_record(("new",), b"one", pa.table({"value": [1]}), flush=True)
             assert db.list_table_paths() == [("new",)]
+
+    def test_unknown_catalog_entries_are_ignored(self, tmp_path: Path) -> None:
+        location = tmp_path / "store.db"
+        path = ("job", "pdb_v2")
+        with SQLiteConnector(location) as connector:
+            ConnectorArrowDatabase(connector).add_record(
+                path, b"one", pa.table({"value": [1]}), flush=True
+            )
+        with sqlite3.connect(location) as conn:
+            row = conn.execute(
+                f'SELECT layout_version, table_name FROM "{STORE_PATH_CATALOG}"'
+            ).fetchone()
+            assert row is not None
+            version, name = row
+            assert version == 1
+            _ = conn.execute(
+                f'INSERT INTO "{STORE_PATH_CATALOG}" '
+                "(layout_version, table_name, entry_kind, entry_name, entry_value) "
+                "VALUES (?, ?, 'future', 'short_name', 'an opaque value')",
+                (version, name),
+            )
+        with SQLiteConnector(location) as connector:
+            db = ConnectorArrowDatabase(connector)
+            assert db.list_table_paths(("job",)) == [path]
+            rows = db.get_all_records(path)
+            assert rows is not None and rows.to_pylist() == [{"value": 1}]
+            db.add_record(path, b"two", pa.table({"value": [2]}), flush=True)
 
     def test_add_and_get_record(self, db: ConnectorArrowDatabase) -> None:
         # add_record stamps all rows with the same __record_id, so within-batch

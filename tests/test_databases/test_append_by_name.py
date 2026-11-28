@@ -33,7 +33,7 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     SQLiteConnector,
 )
-from orcapod.databases._sql_store import STORE_PATH_CATALOG
+from orcapod.databases._sql_store import STORE_PATH_CATALOG, TABLE_PATH_ENTRY_KIND
 from orcapod.databases.utils import in_held_column_order
 from orcapod.errors import (
     InputValidationError,
@@ -647,7 +647,10 @@ def _sqlite_table_name(conn: sqlite3.Connection) -> str:
     """Get the physical name of the one registered table in these fixtures."""
     ((table_name,),) = cast(
         "list[tuple[str]]",
-        conn.execute(f'SELECT table_name FROM "{STORE_PATH_CATALOG}"').fetchall(),
+        conn.execute(
+            f'SELECT table_name FROM "{STORE_PATH_CATALOG}" WHERE entry_kind = ?',
+            (TABLE_PATH_ENTRY_KIND,),
+        ).fetchall(),
     )
     return table_name
 

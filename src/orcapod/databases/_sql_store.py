@@ -8,9 +8,22 @@ from typing import Protocol, cast, runtime_checkable
 
 from orcapod.errors import OrcapodDatabaseError
 
-# Quoted as one identifier. The dots keep this versioned layout marker outside
-# both the old and the current grammar for record table names.
-STORE_PATH_CATALOG = "orcapod.store_paths.v1"
+STORE_PATH_LAYOUT_VERSION = 1
+# Quoted as one identifier. The dots keep this name outside the grammar for
+# both old and current record table names.
+STORE_PATH_CATALOG = f"orcapod.store_paths.v{STORE_PATH_LAYOUT_VERSION}"
+TABLE_PATH_ENTRY_KIND = "table"
+
+# A table entry uses an empty entry_name and holds the path as canonical JSON.
+# A future column entry can key its mapping by the physical column name.
+STORE_PATH_CATALOG_FIELDS = """(
+    table_name TEXT NOT NULL,
+    entry_kind TEXT NOT NULL,
+    entry_name TEXT NOT NULL,
+    entry_value TEXT NOT NULL,
+    layout_version INTEGER NOT NULL CHECK (layout_version = {layout_version}),
+    PRIMARY KEY (table_name, entry_kind, entry_name)
+)"""
 
 
 @runtime_checkable

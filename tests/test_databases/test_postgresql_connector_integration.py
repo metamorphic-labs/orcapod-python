@@ -29,8 +29,10 @@ from collections.abc import Iterator
 import psycopg
 import pyarrow as pa
 import pytest
+from psycopg import sql
 
 from orcapod.databases import ConnectorArrowDatabase, PostgreSQLConnector
+from orcapod.databases._sql_store import STORE_PATH_CATALOG
 from orcapod.types import ColumnInfo
 
 
@@ -649,3 +651,78 @@ def test_record_write_failure_rolls_back_the_table_and_registration(
         assert other.list_table_paths() == []
         other.add_record(path, b"one", record, flush=True)
         assert other.list_table_paths() == [path]
+
+
+@pytest.mark.postgres
+def test_unknown_catalog_entries_are_ignored(connector: PostgreSQLConnector) -> None:
+    path = ("job", "pdb_v2")
+    store = ConnectorArrowDatabase(connector)
+    store.add_record(path, b"one", pa.table({"value": [1]}), flush=True)
+    catalog = sql.Identifier(STORE_PATH_CATALOG)
+    with psycopg.connect(connector._dsn) as conn:
+        row = conn.execute(
+            sql.SQL("SELECT layout_version, table_name FROM {}").format(catalog)
+        ).fetchone()
+        assert row is not None
+        version, name = row
+        assert version == 1
+        _ = conn.execute(
+            sql.SQL("""
+                INSERT INTO {} (layout_version, table_name, entry_kind, entry_name, entry_value)
+                VALUES (%s, %s, 'future', 'short_name', 'an opaque value')
+                """).format(catalog),
+            (version, name),
+        )
+    assert store.list_table_paths(("job",)) == [path]
+    rows = store.get_all_records(path)
+    assert rows is not None and rows.to_pylist() == [{"value": 1}]
+    store.add_record(path, b"two", pa.table({"value": [2]}), flush=True)
+
+
+@pytest.mark.postgres
+def test_catalog_uses_the_first_schema_on_the_search_path(
+    connector: PostgreSQLConnector,
+) -> None:
+    _, _, _, primary = connector.current_location()
+    fallback = f"test_{uuid.uuid4().hex[:12]}"
+    base_dsn = _base_dsn()
+    path = ("job", "pdb_v2")
+    with psycopg.connect(base_dsn, autocommit=True) as admin:
+        _ = admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(fallback)))
+        try:
+            with (
+                PostgreSQLConnector(
+                    f"{base_dsn} options=-csearch_path={fallback}"
+                ) as other,
+                PostgreSQLConnector(
+                    f"{base_dsn} options=-csearch_path={primary},{fallback}"
+                ) as first,
+            ):
+                other_store = ConnectorArrowDatabase(other)
+                store = ConnectorArrowDatabase(first)
+                other_store.add_record(
+                    path, b"one", pa.table({"value": [1]}), flush=True
+                )
+
+                assert store.list_table_paths() == []
+                assert store.get_all_records(path) is None
+                store.add_record(path, b"one", pa.table({"value": [2]}), flush=True)
+
+                assert len(STORE_PATH_CATALOG.encode("utf-8")) <= 63
+                assert STORE_PATH_CATALOG in first.get_table_names()
+                assert STORE_PATH_CATALOG in other.get_table_names()
+                assert (
+                    store.list_table_paths() == other_store.list_table_paths() == [path]
+                )
+                primary_rows = store.get_all_records(path)
+                fallback_rows = other_store.get_all_records(path)
+                assert primary_rows is not None and primary_rows.to_pylist() == [
+                    {"value": 2}
+                ]
+                assert fallback_rows is not None and fallback_rows.to_pylist() == [
+                    {"value": 1}
+                ]
+        finally:
+            _ = admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(fallback))
+            )

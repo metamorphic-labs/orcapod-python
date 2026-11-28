@@ -26,6 +26,9 @@ import pyarrow as pa
 
 from orcapod.databases._sql_store import (
     STORE_PATH_CATALOG,
+    STORE_PATH_CATALOG_FIELDS,
+    STORE_PATH_LAYOUT_VERSION,
+    TABLE_PATH_ENTRY_KIND,
     catalog_name_pattern,
     require_catalog_pair,
 )
@@ -312,12 +315,16 @@ class SQLiteConnector:
                 "Iterator[sqlite3.Row]",
                 conn.execute(
                     f"""
-                    SELECT paths.table_name, paths.path_json
+                    SELECT paths.table_name, paths.entry_value
                     FROM main."{STORE_PATH_CATALOG}" AS paths
                     JOIN main.sqlite_schema AS physical ON physical.name = paths.table_name
                     WHERE physical.type = 'table' AND paths.table_name {match}
+                      AND paths.entry_kind = ? AND paths.entry_name = ''
                     """,
-                    (name if exact else catalog_name_pattern(name),),
+                    (
+                        name if exact else catalog_name_pattern(name),
+                        TABLE_PATH_ENTRY_KIND,
+                    ),
                 ),
             )
             return [(cast(str, row[0]), cast(str, row[1])) for row in rows]
@@ -331,17 +338,20 @@ class SQLiteConnector:
             conn = self._require_open()
             _ = conn.execute("BEGIN IMMEDIATE")
             try:
+                fields = STORE_PATH_CATALOG_FIELDS.format(
+                    layout_version=STORE_PATH_LAYOUT_VERSION
+                )
                 _ = conn.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS main."{STORE_PATH_CATALOG}"
-                    (table_name TEXT NOT NULL PRIMARY KEY, path_json TEXT NOT NULL)
-                    """
+                    f'CREATE TABLE IF NOT EXISTS main."{STORE_PATH_CATALOG}" {fields}'
                 )
                 row = cast(
                     "sqlite3.Row | None",
                     conn.execute(
-                        f'SELECT path_json FROM main."{STORE_PATH_CATALOG}" WHERE table_name = ?',
-                        (table_name,),
+                        f"""
+                        SELECT entry_value FROM main."{STORE_PATH_CATALOG}"
+                        WHERE table_name = ? AND entry_kind = ? AND entry_name = ''
+                        """,
+                        (table_name, TABLE_PATH_ENTRY_KIND),
                     ).fetchone(),
                 )
                 physical = cast(
@@ -363,8 +373,17 @@ class SQLiteConnector:
                 )
                 if row is None:
                     _ = conn.execute(
-                        f'INSERT INTO main."{STORE_PATH_CATALOG}" (table_name, path_json) VALUES (?, ?)',
-                        (table_name, path_json),
+                        f"""
+                        INSERT INTO main."{STORE_PATH_CATALOG}"
+                            (table_name, entry_kind, entry_name, entry_value, layout_version)
+                        VALUES (?, ?, '', ?, ?)
+                        """,
+                        (
+                            table_name,
+                            TABLE_PATH_ENTRY_KIND,
+                            path_json,
+                            STORE_PATH_LAYOUT_VERSION,
+                        ),
                     )
                 yield physical is not None
                 conn.commit()

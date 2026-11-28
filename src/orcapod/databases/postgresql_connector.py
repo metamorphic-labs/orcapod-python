@@ -27,6 +27,9 @@ import pyarrow as pa
 
 from orcapod.databases._sql_store import (
     STORE_PATH_CATALOG,
+    STORE_PATH_CATALOG_FIELDS,
+    STORE_PATH_LAYOUT_VERSION,
+    TABLE_PATH_ENTRY_KIND,
     catalog_name_pattern,
     require_catalog_pair,
 )
@@ -463,14 +466,15 @@ class PostgreSQLConnector:
             match = pg_sql.SQL("= %s" if exact else "LIKE %s ESCAPE '!'")
             _ = cur.execute(
                 pg_sql.SQL("""
-                    SELECT paths.table_name, paths.path_json
+                    SELECT paths.table_name, paths.entry_value
                     FROM {catalog} AS paths
                     JOIN pg_catalog.pg_class AS physical ON physical.relname = paths.table_name
                     JOIN pg_catalog.pg_namespace AS ns ON ns.oid = physical.relnamespace
                     WHERE ns.nspname = current_schema()
                       AND physical.relkind IN ('r', 'p') AND paths.table_name {match}
+                      AND paths.entry_kind = %s AND paths.entry_name = ''
                     """).format(catalog=catalog, match=match),
-                (name if exact else catalog_name_pattern(name),),
+                (name if exact else catalog_name_pattern(name), TABLE_PATH_ENTRY_KIND),
             )
             return cast("list[tuple[str, str]]", cur.fetchall())
 
@@ -501,17 +505,20 @@ class PostgreSQLConnector:
                     catalog = pg_sql.Identifier(
                         cast(str, location[0]), STORE_PATH_CATALOG
                     )
-                    _ = cur.execute(
-                        pg_sql.SQL("""
-                            CREATE TABLE IF NOT EXISTS {}
-                            (table_name TEXT NOT NULL PRIMARY KEY, path_json TEXT NOT NULL)
-                            """).format(catalog)
+                    fields = pg_sql.SQL(STORE_PATH_CATALOG_FIELDS).format(
+                        layout_version=pg_sql.Literal(STORE_PATH_LAYOUT_VERSION)
                     )
                     _ = cur.execute(
-                        pg_sql.SQL(
-                            "SELECT path_json FROM {} WHERE table_name = %s"
-                        ).format(catalog),
-                        (table_name,),
+                        pg_sql.SQL("CREATE TABLE IF NOT EXISTS {} {}").format(
+                            catalog, fields
+                        )
+                    )
+                    _ = cur.execute(
+                        pg_sql.SQL("""
+                            SELECT entry_value FROM {}
+                            WHERE table_name = %s AND entry_kind = %s AND entry_name = ''
+                            """).format(catalog),
+                        (table_name, TABLE_PATH_ENTRY_KIND),
                     )
                     row = cur.fetchone()
                     _ = cur.execute(
@@ -535,10 +542,16 @@ class PostgreSQLConnector:
                     )
                     if row is None:
                         _ = cur.execute(
-                            pg_sql.SQL(
-                                "INSERT INTO {} (table_name, path_json) VALUES (%s, %s)"
-                            ).format(catalog),
-                            (table_name, path_json),
+                            pg_sql.SQL("""
+                                INSERT INTO {} (table_name, entry_kind, entry_name, entry_value, layout_version)
+                                VALUES (%s, %s, '', %s, %s)
+                                """).format(catalog),
+                            (
+                                table_name,
+                                TABLE_PATH_ENTRY_KIND,
+                                path_json,
+                                STORE_PATH_LAYOUT_VERSION,
+                            ),
                         )
                 yield physical is not None
                 conn.commit()
