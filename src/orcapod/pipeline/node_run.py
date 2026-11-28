@@ -24,12 +24,48 @@ from orcapod.pipeline.run_summary import (
     RunSummary,
     run_node_summaries,
 )
-from orcapod.pipeline.restrictions import restrictions_in_force, source_name
+from orcapod.pipeline.restrictions import (
+    restrictions_in_force,
+    source_name,
+    streams_beneath,
+)
 from orcapod.pipeline.result import StreamsOnRead
 from orcapod.utils.database_errors import flush_best_effort
 
 if TYPE_CHECKING:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.pipeline.job import PipelineJob
+    from orcapod.protocols.core_protocols import StreamProtocol
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+
+
+def require_run_source_consistency(target: StreamProtocol) -> None:
+    """Check source registrations and slot identities before an individual node runs."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.pipeline.source_consistency import (
+        require_consistent_sources,
+        require_distinct_slot_bindings,
+    )
+
+    require_consistent_sources([(f"node {target.label!r}", target)])
+    slots: list[SourceJobNode] = []
+    owners: set[PipelineJob] = set()
+    visited: set[int] = set()
+    pending = [target]
+    while pending:
+        stream = pending.pop()
+        if id(stream) in visited:
+            continue
+        visited.add(id(stream))
+        if isinstance(stream, SourceJobNode):
+            slots.append(stream)
+            if (owner := stream._job_binding_owner()) is not None:  # pyright: ignore[reportPrivateUsage]  # a node run checks its job's live slots
+                owners.add(owner)
+        else:
+            pending.extend(streams_beneath(stream))
+    for owner in owners:
+        owner._require_distinct_slot_bindings()  # pyright: ignore[reportPrivateUsage]  # apply the job's pre-run check
+    require_distinct_slot_bindings(slots)
 
 
 def _is_job_node(stream: Any) -> bool:

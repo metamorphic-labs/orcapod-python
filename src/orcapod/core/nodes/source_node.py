@@ -1703,15 +1703,19 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             load_only: Accepted for every job node; a source reads its rows either way.
 
         Raises:
-            InconsistentSourceError: If the bound stream reads conflicting sources.
+            InconsistentSourceError: If the bound stream reads conflicting sources
+                or two slots of the job have the same live source identity.
             UnboundSourceError: When no concrete source is bound.
             ValueError: If ``load_only`` and the bound stream computes or delivers
                 when read (``node_run.refuse_unloadable_inputs``).
         """
-        from orcapod.pipeline.node_run import check_sources, refuse_unloadable_inputs
-        from orcapod.pipeline.source_consistency import require_consistent_sources
+        from orcapod.pipeline.node_run import (
+            check_sources,
+            refuse_unloadable_inputs,
+            require_run_source_consistency,
+        )
 
-        require_consistent_sources([(f"node {self.label!r}", self)])
+        require_run_source_consistency(self)
         _ = check_sources([self])
         if load_only:
             refuse_unloadable_inputs(self)
@@ -1741,13 +1745,17 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         """
         from orcapod.pipeline.source_consistency import require_slot_free_binding
 
-        owner = self._binding_owner() if self._binding_owner is not None else None
+        owner = self._job_binding_owner()
         if owner is None:
             require_slot_free_binding(self.name, value)
             self._bind(value)
             self._update_modified_time()
         else:
             owner._replace_source_binding(self, value)  # pyright: ignore[reportPrivateUsage]  # the setter uses the job's binding transaction
+
+    def _job_binding_owner(self) -> PipelineJob | None:
+        """Return the job whose active slots include this slot."""
+        return self._binding_owner() if self._binding_owner is not None else None
 
     def _set_binding_owner(self, owner: PipelineJob | None) -> None:
         """Route changes to a job while this is one of its active slots."""

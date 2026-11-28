@@ -12,6 +12,7 @@ from orcapod.utils.schema_utils import arrow_schema_identity
 if TYPE_CHECKING:
     import pyarrow as pa
 
+    from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
     from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.restrictions import Rebinding
@@ -19,6 +20,25 @@ if TYPE_CHECKING:
     from orcapod.types import ContentHash
 
 SourceUse = tuple[str, "StreamProtocol"]
+
+
+def require_distinct_slot_bindings(
+    slots: Iterable[SourceJobNode], rebinding: Rebinding = ()
+) -> None:
+    """Refuse live identities that would collapse two execution vertices."""
+    replacements = {id(slot): source for slot, source in rebinding}
+    first_by_hash: dict[str, SourceJobNode] = {}
+    for slot in slots:
+        source = replacements.get(id(slot), slot.bound_source)
+        if source is None:
+            continue
+        previous = first_by_hash.setdefault(source.content_hash().to_string(), slot)
+        if previous is not slot:
+            raise InconsistentSourceError(
+                f"Slots {previous.name!r} and {slot.name!r} would read one source "
+                "identity. Bind each slot to a distinct source or use one slot "
+                "for this source (ITL-1559)."
+            )
 
 
 def require_slot_free_binding(name: str, source: StreamProtocol | None) -> None:

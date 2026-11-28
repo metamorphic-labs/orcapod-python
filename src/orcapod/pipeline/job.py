@@ -49,6 +49,7 @@ from orcapod.pipeline.run_summary import (
 from orcapod.pipeline.source_consistency import (
     invocation_source_uses,
     require_consistent_sources,
+    require_distinct_slot_bindings,
     require_slot_free_binding,
 )
 from orcapod.protocols import core_protocols as cp
@@ -639,24 +640,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self._apply_source_bindings(self._prepare_source_bindings([(slot, source)]))
 
     def _require_distinct_slot_bindings(self, rebinding: Rebinding = ()) -> None:
-        """Refuse live identities that would collapse two execution vertices."""
-        replacements = {id(slot): source for slot, source in rebinding}
-        names_by_hash: dict[str, str] = {}
-        for node in self._persistent_node_map.values():
-            if not isinstance(node, SourceJobNode):
-                continue
-            source = replacements.get(id(node), node.bound_source)
-            if source is None:
-                continue
-            previous = names_by_hash.setdefault(
-                source.content_hash().to_string(), node.name
-            )
-            if previous != node.name:
-                raise InconsistentSourceError(
-                    f"Slots {previous!r} and {node.name!r} would read one source "
-                    "identity. Bind each slot to a distinct source or use one slot "
-                    "for this source (ITL-1559)."
-                )
+        """Check all slots in this job, including any prospective replacements."""
+        require_distinct_slot_bindings(
+            (
+                node
+                for node in self._persistent_node_map.values()
+                if isinstance(node, SourceJobNode)
+            ),
+            rebinding,
+        )
 
     def _prepare_source_bindings(
         self, rebinding: Rebinding

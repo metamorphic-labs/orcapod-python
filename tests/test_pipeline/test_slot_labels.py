@@ -1,12 +1,18 @@
 """Public slot names are captured labels rather than dataset IDs."""
 
 from pathlib import Path
+from typing import cast
 
+import pyarrow as pa
 import pytest
 
 from orcapod import Pipeline, PipelineJob, function_pod
-from orcapod.core.nodes.source_node import SourceNode
+from orcapod.core.nodes.operator_node import OperatorJobNode
+from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
+from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InconsistentSourceError, SourceSlotNameCollisionError
+from orcapod.operators import Join, MergeJoin
 from orcapod.sources import DictSource
 
 
@@ -213,9 +219,51 @@ def test_a_prebuilt_step_cannot_be_a_slot(
     source = _source("data", "input")
     outside = source.select_data_columns(["value"])
     pipeline = pipeline_type(name="job")
-    with pytest.raises(ValueError, match=r"node\.as_source\(\).*ITL-1559"):
-        with pipeline:
-            _increment.pod(outside, label="output")
+    with pipeline:
+        with pytest.raises(ValueError, match=r"node\.as_source\(\).*ITL-1559"):
+            _ = _increment.pod(outside, label="output")
+
+
+@pytest.mark.parametrize("kind", ["raw", "joined", "narrowed"])
+def test_refused_leaf_leaves_the_job_available_for_valid_captures(kind: str) -> None:
+    source = _source("data", "input")
+    if kind == "raw":
+        outside = ArrowTableStream(pa.table({"value": [1]}))
+    elif kind == "joined":
+        other = DictSource(
+            [{"key": "row", "other": 2}], tag_columns="key", tag_only_columns=True
+        )
+        outside = Join()(source, other)
+    else:
+        outside = source.select_data_columns(["value"])
+
+    job = PipelineJob(name="job", auto_compile=False)
+    with job:
+        _ = source.map_data({"value": "before"}, label="before")
+    with job:
+        try:
+            _ = outside.map_data({"value": "refused"}, label="refused")
+        except ValueError as error:
+            assert "as a source slot" in str(error)
+        _ = source.map_data({"value": "after"}, label="after")
+    job.compile()
+    assert set(job.nodes) == {"input", "before", "after"}
+    assert job.sources == {"input": source}
+
+
+def test_node_run_refuses_two_slots_now_reading_one_source() -> None:
+    one, two = _source("one", "left"), _source("two", "right")
+    job = PipelineJob(database=InMemoryArrowDatabase())
+    with job:
+        _ = MergeJoin()(one, two, label="merged")
+    right = cast("SourceJobNode", job.nodes["right"])
+    merged = cast("OperatorJobNode", job.nodes["merged"])
+
+    # Simulate a live binding that changed after the bind-time checks.
+    vars(right)["_bound_source"] = one
+    for run in (job.run, merged.run, right.run):
+        with pytest.raises(InconsistentSourceError, match="would read one source"):
+            _ = run()
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -223,9 +271,6 @@ def test_a_prebuilt_step_cannot_be_a_slot(
 def test_several_slots_round_trip_in_operator_argument_order(
     tmp_path: Path, reverse: bool, mode: str
 ) -> None:
-    from orcapod.databases import InMemoryArrowDatabase
-    from orcapod.operators import MergeJoin
-
     def source(value: int, role: str) -> DictSource:
         return DictSource(
             [{"key": "row", "value": value}],

@@ -1450,18 +1450,19 @@ data. The rules:
   Arrow type, and the remedy is declaring the slot from the source or in Arrow. A source whose system-tag columns
   are not exactly one source-id and one record-id column (a joined or merged stream, a raw
   stream with none) is refused by the same check (developer, November 14, 2026, ITL-1126);
-  binding one properly is ITL-1127. That includes a pipeline's input: Pipeline.compile
-  binds each leaf through SourceJobNode.from_stream, so a pipeline built directly over a
-  raw ArrowTableStream is refused (developer, November 14, 2026; wrap the table as a
-  source). Never pass a bound stream's own system tags through.
+  binding one properly is ITL-1127. A raw ArrowTableStream is refused as a pipeline
+  leaf at capture (wrap the table as a source). Never pass a bound stream's own system
+  tags through.
 - A job's source slot uses its captured label as its name (ITL-1565). The source's
   assigned label or class name is the default. Use source.as_slot(name) to label only
   the slot. Two slots sharing a name are refused, and slot labels are reserved before
   generated step labels. A graph-owned slot cannot be renamed (ITL-1559). Dataset IDs,
   system tags and source tokens use the source's identity. A bound slot takes the
   content identity of its source, and the pipeline identity uses its Arrow schema.
-  For now, jobs refuse multiple slots with one live source identity and prebuilt
-  non-source leaves (ITL-1559). Capture the step within the job or pass node.as_source().
+  For now, jobs refuse multiple slots with one live source identity at capture, bind,
+  and before job.run(), run_async() or a job node's run() (ITL-1559).
+  Non-source leaves are refused during capture, before the invocation is recorded.
+  Capture the step within the job or pass node.as_source().
 - A source id is the source's name (developer, November 11, 2026; ITL-957; every source,
   November 15, 2026, ITL-1154), and every source id is <kind>_v<N>:<name> (developer,
   November 23, 2026, ITL-1425). The kind part names the kind and implementation version that

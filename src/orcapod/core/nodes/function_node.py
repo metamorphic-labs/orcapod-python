@@ -351,13 +351,13 @@ def run_job_node(
         check_sources,
         depends_on_job_nodes,
         refuse_unloadable_inputs,
+        require_run_source_consistency,
         run_with_dependencies,
     )
     from orcapod.pipeline.restrictions import refuse_restriction_conflicts
     from orcapod.pipeline.run_summary import warn_row_failures
-    from orcapod.pipeline.source_consistency import require_consistent_sources
 
-    require_consistent_sources([(f"node {node.label!r}", node)])
+    require_run_source_consistency(node)
     # A source read under two restrictions, or a caching operator over a restricted
     # source, is refused before any source is checked and before anything is
     # computed or written (ITL-1218).
@@ -4347,7 +4347,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 ``load_only`` is false; or if its input is unavailable
                 (``CACHE_ONLY``): read its stored rows with ``as_source()``.
             InconsistentSourceError: If distinct source objects share a content
-                hash, or sources with one ID differ in schema or key columns.
+                hash, sources with one ID differ in schema or key columns, or
+                two slots have the same live source identity.
         """
         from orcapod.pipeline.serialization import LoadStatus
 

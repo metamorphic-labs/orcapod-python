@@ -1952,21 +1952,22 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             ValueError: If this node or one it depends on caches (``LOG`` or
                 ``REPLAY``) over a restricted source (ITL-1218); nothing has run.
             InconsistentSourceError: If distinct source objects share a content
-                hash, or sources with one ID differ in schema or key columns.
+                hash, sources with one ID differ in schema or key columns, or
+                two slots have the same live source identity.
         """
         from orcapod.pipeline.node_run import (
             check_sources,
             depends_on_job_nodes,
             refuse_unloadable_inputs,
+            require_run_source_consistency,
             run_with_dependencies,
         )
         from orcapod.pipeline.restrictions import refuse_restriction_conflicts
         from orcapod.pipeline.run_summary import warn_row_failures
-        from orcapod.pipeline.source_consistency import require_consistent_sources
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
-        require_consistent_sources([(f"node {self.label!r}", self)])
+        require_run_source_consistency(self)
         # A source read under two restrictions, or a caching operator over a restricted
         # source, is refused before any source is checked and before anything is
         # computed or written (ITL-1218).

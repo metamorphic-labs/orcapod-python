@@ -1423,7 +1423,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             SideEffectLogDataContextError: As for ``execute``.
             OrcapodDatabaseWriteError: If committing the invocation log fails.
             InconsistentSourceError: If distinct source objects share a content
-                hash, or sources with one ID differ in schema or key columns.
+                hash, sources with one ID differ in schema or key columns, or
+                two slots have the same live source identity.
         """
         import sys
 

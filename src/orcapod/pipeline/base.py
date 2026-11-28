@@ -348,10 +348,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             A callback that records the validated invocation.
 
         Raises:
-            ValueError: If the invocation reads a source under another restriction
-                than the pipeline's streams read it under now, or two of its inputs
-                read one source under two restrictions (ITL-1218), whatever streams
-                lead there. Nothing is recorded then.
+            ValueError: If an input would become a non-source leaf, or the invocation
+                reads one source under conflicting restrictions (ITL-1218). Nothing
+                is recorded then.
         """
         from orcapod.pipeline.restrictions import require_one_restriction
 
@@ -371,11 +370,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         slot_names: dict[str, str] = {}
         for upstream, upstream_key in zip(inputs, input_keys, strict=True):
-            if upstream_key in self._invocation_lut or not isinstance(
-                upstream, (RootSource, SourceNodeBase)
-            ):
-                # A prebuilt step can match an invocation recorded later in this
-                # capture. Only compile knows whether it is truly a leaf.
+            if upstream_key in self._invocation_lut:
                 continue
             name = source_slot_name(upstream)
             previous = self._captured_slot_names.get(upstream_key)
