@@ -45,6 +45,10 @@ from orcapod.system_constants import constants
 from orcapod.types import SourceInfoValue
 from orcapod.utils.arrow_utils import normalize_to_large_types
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 INT = pa.int64()
 STR = pa.large_string()
 

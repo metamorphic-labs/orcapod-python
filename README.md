@@ -124,7 +124,7 @@ Orcapod is before version 1.0. In the development version (0.4.0 is next):
   stored results again, so a hash value released in 0.4.0 will not change in a later release
   of the same data context; CI checks this. Until 0.4.0 a v1 hash may still change, only by
   an approved and explained change (0.3.0, which first shipped v1, was withdrawn). This
-  does not cover a provisional operator (such as `PolarsFilter` and `Filter`): its identity, and every hash
+  does not cover a provisional operator (such as `Filter` and `GroupBy`): its identity, and every hash
   downstream of it, may still change in a later release of v1. See
   [Golden hashes](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/reference/golden-hashes.md)
   and

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import math
+import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -43,7 +44,7 @@ from orcapod.pipeline import SyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.system_constants import constants
 from tests.test_core.operators.test_rejoin import other_context  # noqa: F401  # the fixture
-from orcapod.errors import UpstreamFailedError
+from orcapod.errors import PolarsFilterWarning, UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
 from tests.test_core.operators.test_async_sync_equivalence import (
     AFTER_OPERATOR_CASES,
@@ -56,6 +57,9 @@ from tests.test_core.operators.test_async_sync_equivalence import (
 pytestmark = [
     pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning"),
     pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning"),
+    # PolarsFilter is built here on purpose; the warning of every construction is tested in
+    # test_polars_filter_warning.py (ITL-1296).
+    pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning"),
 ]
 
 ALL = {"system_tags": True, "source": True}
@@ -276,11 +280,16 @@ def test_the_row_by_row_operators_are_exactly_these() -> None:
     assert declared == ROW_BY_ROW
 
 
-@pytest.mark.parametrize(
-    "case",
-    [case for case in CASES if type(case.make_op()).__name__ in ROW_BY_ROW],
-    ids=lambda case: case.label,
-)
+def _row_by_row_cases() -> list[Case]:
+    """The cases of the row-by-row operators. Each case's operator is built here, when
+    the tests are collected, where no mark applies: the ``PolarsFilter`` case's warning
+    (ITL-1296, tested in test_polars_filter_warning.py) is ignored for this block."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PolarsFilterWarning)
+        return [case for case in CASES if type(case.make_op()).__name__ in ROW_BY_ROW]
+
+
+@pytest.mark.parametrize("case", _row_by_row_cases(), ids=lambda case: case.label)
 def test_a_row_by_row_operator_sends_each_batch_as_it_arrives(case: Case) -> None:
     """One result per input record batch, sent before the next input is read. Each
     one-row input is sent and its result (the sync body over that row alone) is
