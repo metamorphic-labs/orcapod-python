@@ -23,7 +23,9 @@ observers, and the built-ins derive event metadata as before.
 
 The run puts the count and first reported error for each observer kind in
 `RunSummary.lost_observer_events`. If the error's message cannot be rendered,
-the summary shows its type name. The warning escapes text for strict output encodings.
+the summary shows its type name. The summary and warning escape non-ASCII text for
+strict output encodings. If warning delivery raises, the totals are logged. A filter
+that promotes `ObserverEventsLostWarning` to an error still raises it.
 The run issues one `ObserverEventsLostWarning` after
 keeping the completed summary. The warning points to the `run()` call, the
 `run_async()` await, or the event loop's resumption site for a separately scheduled

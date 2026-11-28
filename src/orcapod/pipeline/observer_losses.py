@@ -21,6 +21,11 @@ LOGGING_EVENTS = "logging"
 """The kind of the events a ``LoggingObserver`` records."""
 
 
+def ascii_loss_text(text: str) -> str:
+    """Escape observer-loss text for strict output encodings, including surrogates."""
+    return str.encode(text, "ascii", "backslashreplace").decode("ascii")
+
+
 @dataclass(frozen=True)
 class LostObserverEvents:
     """The events of one observer kind that a run could not record.
@@ -30,7 +35,7 @@ class LostObserverEvents:
             transitions) or ``"logging"`` (a ``LoggingObserver``'s log rows).
         count: How many events of that kind were not recorded.
         first_error: The first reported error as ``Type: message``, or its type
-            name if its message could not be rendered.
+            name if its message could not be rendered. Non-ASCII text is escaped.
     """
 
     kind: str
@@ -76,8 +81,9 @@ class RunLosses:
             text = f"{name}: {message}"
         except BaseException:
             text = name
+        safe_text = ascii_loss_text(text)
         with self._lock:
-            self._first_errors[kind] = text
+            self._first_errors[kind] = safe_text
 
     def by_kind(self) -> dict[str, LostObserverEvents]:
         """The lost events so far, by observer kind, in kind order.

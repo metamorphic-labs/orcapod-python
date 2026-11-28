@@ -20,6 +20,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from hypothesis import HealthCheck, example, given, settings, strategies as st
 from typing_extensions import override
 
 from orcapod import PipelineJob, function_pod
@@ -566,7 +567,7 @@ def test_observer_warning_displays_on_strict_stderr(
     assert message.count("ObserverEventsLostWarning:") == 1
     assert "unreadable filename:" in message
     assert r"\udcff" in message
-    assert summary.lost_observer_events["status"].first_error.endswith("café\udcff")
+    assert summary.lost_observer_events["status"].first_error.endswith(r"caf\xe9\udcff")
     assert summary is job.last_run and summary.ok
     assert _rows(job) == EXPECTED_ROWS
 
@@ -1008,6 +1009,151 @@ class _WriteErrorWithStringSubclass(OSError):
     @override
     def __str__(self) -> str:
         return _UnformattableMessage("failed to write")
+
+
+def _run_with_non_ascii_caller(
+    job: PipelineJob, observer: StatusObserver, path: str
+) -> RunSummary:
+    async def run() -> RunSummary:
+        return await job.run_async(observer=observer)  # café
+
+    if path == "run_async":
+        return asyncio.run(run())
+    orchestrator = ORCHESTRATORS[path]()
+    return job.run(orchestrator=orchestrator, observer=observer)  # café
+
+
+@pytest.mark.parametrize("path", ["sync", "async", "run_async"])
+@pytest.mark.parametrize("mode", ["default", "error", "strict-ascii"])
+@settings(
+    max_examples=12,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(message=st.none() | st.text(alphabet=st.characters(), max_size=256))
+@example(message="caf\xe9 😀\ud800\udfff <script>\x00\x1b\nnext line")
+@example(message="long é\udcff " * 4096)
+@example(message="")
+@example(message=None)
+def test_loss_reporting_handles_arbitrary_error_text(
+    path: str,
+    mode: str,
+    arrangement: Arrangement,
+    utf8_log_capture: pytest.LogCaptureFixture,
+    message: str | None,
+) -> None:
+    """Store encoding-safe error text and keep the result under each warning policy."""
+
+    class WriteError(OSError):
+        @override
+        def __str__(self) -> str:
+            if message is None:
+                return str(_UnprintableWriteError())
+            return _UnformattableMessage(message)
+
+    observer = StatusObserver(_database(error=WriteError))
+    job = _job(arrangement)
+    utf8_log_capture.clear()
+    with (
+        io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict") as stderr,
+        warnings.catch_warnings(record=mode == "default") as caught,
+        pytest.MonkeyPatch.context() as patch,
+    ):
+        if mode == "error":
+            warnings.simplefilter("error")
+        else:
+            warnings.simplefilter("default", ObserverEventsLostWarning)
+
+        if mode == "strict-ascii":
+
+            def render_warning(
+                warning: Warning, category: type[Warning], filename: str, lineno: int
+            ) -> None:
+                # Pytest installs its own recorder. Exercise standard rendering, including
+                # the source line from linecache, and write it to the strict stream.
+                _ = stderr.write(
+                    warnings.formatwarning(warning, category, filename, lineno)
+                )
+
+            patch.setattr(warnings, "showwarning", render_warning)
+
+        if mode == "error":
+            with pytest.raises(ObserverEventsLostWarning) as raised:
+                _ = _run_with_non_ascii_caller(job, observer, path)
+            warning_text = str(raised.value)
+            summary = job.last_run
+        else:
+            summary = _run_with_non_ascii_caller(job, observer, path)
+            if mode == "strict-ascii":
+                reports = [
+                    record.getMessage()
+                    for record in utf8_log_capture.records
+                    if record.name == "orcapod.pipeline.run_summary"
+                ]
+                assert len(reports) == 1
+                (warning_text,) = reports
+            else:
+                assert caught is not None
+                observer_warnings = [
+                    item
+                    for item in caught
+                    if item.category is ObserverEventsLostWarning
+                ]
+                assert len(observer_warnings) == 1
+                warning_text = str(observer_warnings[0].message)
+
+    assert summary is job.last_run and summary is not None and summary.ok
+    notebook = summary._repr_html_()  # pyright: ignore[reportPrivateUsage]  # notebook display protocol
+    assert notebook is not None
+    for display in (repr(summary), notebook, warning_text):
+        assert display.isascii()
+        assert "first error: WriteError" in display
+    first_error = "WriteError"
+    if message is not None:
+        first_error += ": " + message.encode("ascii", "backslashreplace").decode(
+            "ascii"
+        )
+    assert summary.lost_observer_events == {
+        "status": LostObserverEvents("status", 2 * N_ROWS, first_error)
+    }
+    assert _rows(job) == EXPECTED_ROWS
+    utf8_log_capture.clear()
+
+
+@pytest.mark.parametrize("fallback_raises", [False, True])
+def test_failing_warning_renderer_cannot_interrupt_completed_run(
+    fallback_raises: bool,
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A renderer raising even the warning itself is different from filter promotion."""
+
+    def fail_to_show(message: Warning, *args: object, **kwargs: object) -> None:
+        raise message
+
+    def fail_to_log(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("log handler is unavailable")
+
+    observer = StatusObserver(_database())
+    job = _job(arrangement)
+    with warnings.catch_warnings():
+        monkeypatch.setattr(warnings, "showwarning", fail_to_show)
+        if fallback_raises:
+            monkeypatch.setattr(
+                logging.getLogger("orcapod.pipeline.run_summary"),
+                "warning",
+                fail_to_log,
+            )
+        warnings.simplefilter("default", ObserverEventsLostWarning)
+        summary = run_job(job, observer)
+
+    assert summary is job.last_run and summary.ok
+    assert summary.lost_observer_events["status"].count == 2 * N_ROWS
+    assert _rows(job) == EXPECTED_ROWS
+    if not fallback_raises:
+        assert caplog.text.count("Observer events were not recorded in this run:") == 1
 
 
 @pytest.mark.parametrize("kind", ["status", "logging"])

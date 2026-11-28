@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import threading
 import traceback
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from orcapod.core.result_cache import ResultCache
 from orcapod.pipeline.observer import NoOpLogger
+from orcapod.pipeline.observer_losses import ascii_loss_text
 from orcapod.pipeline.restrictions import restriction_text
 
 if TYPE_CHECKING:
@@ -26,6 +28,8 @@ if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
     from orcapod.pipeline.restrictions import RestrictedSource
     from orcapod.types import Condition, SchemaLike
+
+logger = logging.getLogger(__name__)
 
 _NOOP_LOGGER = NoOpLogger()
 _ASYNC_ATTRIBUTION_NOTE = (
@@ -462,6 +466,7 @@ def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
     complete then, the run's rows and summary are already kept (the warning turned into
     an error loses nothing). The first loss happens inside a node, possibly on a
     worker thread. Each failed write is still logged by its observer when it happens.
+    If the warning machinery fails, report the totals through the module logger.
 
     Args:
         summary: The run's summary, with lost observer events.
@@ -470,22 +475,29 @@ def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
     from orcapod.errors import ObserverEventsLostWarning
     from orcapod.utils.warning_utils import warn_at_frame
 
-    # Warning sinks can use a strict encoding, including across worker processes.
-    # Keep the original error text on the summary.
-    details = (
-        summary.lost_observer_events_message()
-        .encode("ascii", "backslashreplace")
-        .decode("ascii")
-    )
-    warn_at_frame(
+    details = ascii_loss_text(summary.lost_observer_events_message())
+    message = (
         "Observer events were not recorded in this run: "
         + f"{details}. The run's results are not "
         + "affected, but its status and log records are incomplete. Each failed "
         + "write was logged with its traceback; the counts are in the run "
-        + "summary's lost_observer_events.",
-        ObserverEventsLostWarning,
-        caller,
+        + "summary's lost_observer_events."
     )
+    warning = ObserverEventsLostWarning(message)
+    try:
+        warn_at_frame(warning, ObserverEventsLostWarning, caller)
+    except BaseException as error:
+        # A filter promoting this warning raises it directly in warn_at_frame.
+        # Python rendering adds frames, even if a renderer raises the same instance.
+        if error is warning and warning.__traceback__ is not None:
+            issuing_frame = warning.__traceback__.tb_next
+            if issuing_frame is not None and issuing_frame.tb_next is None:
+                raise
+        try:
+            logger.warning("%s", message)
+        except BaseException:
+            # Application log handlers can also raise. The summary is already kept.
+            pass
 
 
 class RunCountingObserver:

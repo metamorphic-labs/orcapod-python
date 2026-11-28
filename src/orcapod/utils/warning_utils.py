@@ -29,7 +29,9 @@ def outside_orcapod_stacklevel() -> int:
     return 2
 
 
-def warn_at_frame(message: str, category: type[Warning], frame: FrameType) -> None:
+def warn_at_frame(
+    message: str | Warning, category: type[Warning], frame: FrameType
+) -> None:
     """Issue a warning shown at ``frame``'s line, at every call.
 
     The one place Orcapod issues a warning at a frame it names (ITL-1344), for the
@@ -61,7 +63,7 @@ def warn_at_frame(message: str, category: type[Warning], frame: FrameType) -> No
     a module with no file on disk (a zip import) is shown on every version.
 
     Args:
-        message: The warning's text.
+        message: The warning's text or an existing warning instance.
         category: The warning's class.
         frame: The frame whose file, line and module name the warning is shown at.
     """
