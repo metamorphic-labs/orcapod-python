@@ -89,7 +89,7 @@ class Tag(Datagram):
         if isinstance(data, _pa.RecordBatch):
             data = _pa.Table.from_batches([data])
 
-        extracted_sys_tags: dict[str, DataValue]
+        extracted_sys_tags: dict[str, DataValue] = {}
         system_tag_table = None
 
         if isinstance(data, _pa.Table):
@@ -111,16 +111,9 @@ class Tag(Datagram):
                 system_tag_table = arrow_utils.normalize_table_to_large_types(
                     data.select(sys_tag_cols), keep_null=True
                 )
-                extracted_sys_tags = (
-                    self._data_context.type_converter.arrow_table_to_python_dicts(
-                        system_tag_table
-                    )[0]
-                )
                 self._data_table = self._data_table.drop_columns(sys_tag_cols)  # type: ignore[union-attr]
                 # Invalidate derived caches
                 self._data_arrow_schema = None
-            else:
-                extracted_sys_tags = {}
         else:
             # Dict path: extract system-tag keys before calling super()
             data_only = {
@@ -142,10 +135,44 @@ class Tag(Datagram):
                 **kwargs,
             )
 
-        if system_tag_table is not None and not system_tags:
-            self._set_system_tag_table(system_tag_table, extracted_sys_tags)
-        else:
+        if system_tag_table is None:
             self._set_system_tags({**extracted_sys_tags, **(system_tags or {})})
+            return
+
+        if system_tags:
+            system_tag_table = self._merge_system_tag_table(
+                system_tag_table, system_tags
+            )
+        self._set_system_tag_table(system_tag_table)
+
+    def _merge_system_tag_table(
+        self, table: "pa.Table", tags: Mapping[str, DataValue]
+    ) -> "pa.Table":
+        """Apply Python tags, reusing existing Arrow fields for replacements."""
+        replacements = {name: tags[name] for name in table.column_names if name in tags}
+        additions = {
+            name: value for name, value in tags.items() if name not in replacements
+        }
+        if replacements:
+            schema = arrow_utils.schema_select(table.schema, list(replacements))
+            for field in schema:
+                if not field.nullable and replacements[field.name] is None:
+                    raise ValueError(f"Column {field.name!r} is declared non-nullable")
+            updated = self.converter.python_dicts_to_arrow_table(
+                [replacements], arrow_schema=schema
+            )
+            table = arrow_utils.hstack_tables(
+                table.drop_columns(list(replacements)), updated
+            ).select(table.column_names)
+        if additions:
+            added = self.converter.python_dicts_to_arrow_table(
+                [additions],
+                python_schema=infer_python_schema_from_pylist_data(
+                    [additions], default_type=str
+                ),
+            )
+            table = arrow_utils.hstack_tables(table, added)
+        return table
 
     def _set_system_tags(self, system_tags: dict[str, DataValue]) -> None:
         """Hold ``system_tags`` as this tag's system tags."""
@@ -156,16 +183,12 @@ class Tag(Datagram):
         self._system_tags_table: "pa.Table | None" = None
         self._system_tags_from_arrow = False
 
-    def _set_system_tag_table(
-        self, table: "pa.Table", values: dict[str, DataValue]
-    ) -> None:
+    def _set_system_tag_table(self, table: "pa.Table") -> None:
         """Hold the system-tag fields and values supplied by an Arrow table."""
         self._system_tags_table = table
-        self._system_tags = values
+        self._system_tags = self.converter.arrow_table_to_python_dicts(table)[0]
         self._system_tags_python_schema = Schema(
-            self._data_context.type_converter.arrow_schema_to_python_schema(
-                table.schema
-            )
+            self.converter.arrow_schema_to_python_schema(table.schema)
         )
         self._system_tags_from_arrow = True
 
@@ -202,12 +225,7 @@ class Tag(Datagram):
             if system_tag_row is None:
                 tag._set_system_tags({})
             else:
-                tag._set_system_tag_table(
-                    system_tag_row,
-                    tag._data_context.type_converter.arrow_table_to_python_dicts(
-                        system_tag_row
-                    )[0],
-                )
+                tag._set_system_tag_table(system_tag_row)
             yield tag
 
     # ------------------------------------------------------------------
