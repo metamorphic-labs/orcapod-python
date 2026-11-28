@@ -2,7 +2,7 @@
 
 Orcapod v0.3 writes the data context key ``std:v1:default`` into the column
 ``__data_context`` of every table it stores, and every table moved to a new layout
-(the last path component): ``pdb_v2``, ``rdb_v1``, ``tdb_v2``, ``odb_v2``, ``sdb_v2``.
+(the last path component): ``pdb_v2``, ``rdb_v1``, ``tdb_v2``, ``odb_v3``, ``sdb_v2``.
 
 - Rows of the current data context are the current entries. Rows of another data context
   in the same table are never returned or reused, are left unchanged, and are reported
@@ -212,7 +212,7 @@ def old_layout_path(path: tuple[str, ...]) -> tuple[str, ...]:
         return path[:-2] + ("rdb_v2",)
     if layout in renamed:
         return path[:-1] + (renamed[layout],)
-    assert layout in ("odb_v2", "sdb_v2"), path
+    assert layout in ("odb_v3", "sdb_v2"), path
     return path[:-1]
 
 
@@ -341,7 +341,7 @@ def table_path(store: Store, layout: str) -> tuple[str, ...]:
     return path
 
 
-LAYOUTS = ("pdb_v2", "rdb_v1", "odb_v2", "sdb_v2", "tdb_v2")
+LAYOUTS = ("pdb_v2", "rdb_v1", "odb_v3", "sdb_v2", "tdb_v2")
 
 
 # ---------------------------------------------------------------------------
@@ -889,7 +889,7 @@ class TestRowsOfAnotherDataContext:
             for r in caplog.records
             if "another data context" in r.getMessage()
         ]
-        for layout in ("pdb_v2", "odb_v2"):
+        for layout in ("pdb_v2", "odb_v3"):
             path = "/".join(table_path(store, layout))
             (report,) = [r for r in reports if repr(path) in r]
             assert report.startswith("Skipped 2 rows of stored table")
@@ -1524,7 +1524,7 @@ class TestStoredDataContexts:
         path = table_path(store, layout)
         assert stored_data_contexts(reopened(store), path) == {CURRENT: 2}
 
-    @pytest.mark.parametrize("layout", ["pdb_v2", "rdb_v1", "odb_v2", "sdb_v2"])
+    @pytest.mark.parametrize("layout", ["pdb_v2", "rdb_v1", "odb_v3", "sdb_v2"])
     def test_table_holding_two_data_contexts(
         self, new_store: Callable[[], Store], layout: str
     ):

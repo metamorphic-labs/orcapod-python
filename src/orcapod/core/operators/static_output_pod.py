@@ -370,6 +370,8 @@ class StaticOutputOperatorPod(TraceableBase):
     @staticmethod
     def _rows_to_table(
         rows: Sequence[tuple[TagProtocol, DataProtocol]],
+        *,
+        keep_token_fields: bool = False,
     ) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
         """Concatenate (Tag, Data) pairs into one table, keeping per-row source info.
 
@@ -379,6 +381,7 @@ class StaticOutputOperatorPod(TraceableBase):
 
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
+            keep_token_fields: Preserve Arrow token fields carried by the rows.
 
         A data-tag (a name in both the tag and the data of a row) is one
         column: it is taken from the tags, and its source info from the data.
@@ -389,6 +392,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
+        from orcapod.core.datagrams import Data
         from orcapod.utils import arrow_utils
 
         if not rows:
@@ -397,7 +401,16 @@ class StaticOutputOperatorPod(TraceableBase):
         first_tag, first_data = rows[0]
         data_tags = data_tag_names(first_tag.keys(), first_data.keys())
         tag_tables = [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
-        data_tables = [data.as_table(columns={"source": True}) for _, data in rows]
+        data_tables = []
+        for _, data in rows:
+            if keep_token_fields and isinstance(data, Data):
+                tokens = data._source_info_for_transport()  # pyright: ignore[reportPrivateUsage]  # transport keeps the row's declaration
+                table = data.as_table()
+                if tokens.num_columns:
+                    table = arrow_utils.hstack_tables(table, tokens)
+                data_tables.append(table)
+            else:
+                data_tables.append(data.as_table(columns={"source": True}))
         if data_tags:
             data_tables = [t.drop_columns(list(data_tags)) for t in data_tables]
 
@@ -468,24 +481,23 @@ class StaticOutputOperatorPod(TraceableBase):
         result: StreamProtocol,
         rows: Sequence[tuple[TagProtocol, DataProtocol]],
     ) -> StreamProtocol:
-        """Return what an operator node keeps, and stores, of a run of its operator.
-
-        The rows of the run as ``_materialize_to_stream`` builds them, or, with no row,
-        the result with no rows in the same order (``_zero_rows_in_row_order``). Every
-        way a node runs its operator (a job run, sync or async, and ``node.run()`` on
-        its own) keeps this, so a node has one column order, the row order, in memory
-        and in its stored table (ITL-1133).
-
-        Args:
-            result: The operator's result of the run.
-            rows: ``result``'s rows, in order.
-
-        Returns:
-            A stream over the rows, in row order.
-        """
+        """Keep the operator's output rows under their declared token fields."""
         if rows:
-            return StaticOutputOperatorPod._materialize_to_stream(rows)
+            return StaticOutputOperatorPod._stream_over_row_table(
+                StaticOutputOperatorPod._rows_to_table(rows, keep_token_fields=True)
+            )
         return StaticOutputOperatorPod._zero_rows_in_row_order(result)
+
+    @staticmethod
+    def _keep_output_table(table: pa.Table, result: StreamProtocol) -> ArrowTableStream:
+        """Put the result table in row order using its declared fields."""
+        tag_keys = result.keys()[0]
+        return ArrowTableStream(
+            StaticOutputOperatorPod._in_row_order(table, tag_keys),
+            tag_columns=tag_keys,
+            data_tags=stream_data_tags(result),
+            data_context=result.data_context_key,
+        )
 
     @staticmethod
     def _type_source_info_by_values(table: pa.Table) -> pa.Table:
@@ -956,7 +968,9 @@ class StaticOutputOperatorPod(TraceableBase):
         """
         from orcapod.system_constants import constants
 
-        table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
+        table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(
+            rows, keep_token_fields=True
+        )
         table = table.append_column(
             pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
             pa.array([data.data_context_key for _, data in rows], pa.large_string()),

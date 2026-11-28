@@ -1877,7 +1877,7 @@ Every row Orcapod stores names its data context in the column `__data_context`:
 |---|---|
 | Function-node pipeline table | `pdb_v2` |
 | Function result table | `rdb_v1`, after the revision of the data function type's record (`.../python.function.v1/rev1/rdb_v1`; see [Data function types](data-function-types.md)) |
-| Operator-node cache table | `odb_v2` |
+| Operator-node cache table | `odb_v3` |
 | Cached-source table | `sdb_v2` |
 | Side-effect invocation log | `tdb_v2` |
 
@@ -1886,6 +1886,10 @@ The layout component is always the last component of a table's path, also when a
 nullable token fields and hashes records with those flags. An `sdb_v1`
 table is reported as an older layout and left untouched. A bound source can
 populate a new `sdb_v2` table from its live data.
+
+Operator caches use the output stream's declared Arrow fields for records and their
+hashes under `odb_v3`. An `odb_v2` table is reported as an older layout and left
+untouched. LOG computes fresh records for the new layout.
 
 **Rows of the current data context are the current entries.** Key lookups match rows of the
 current data context only, and every read of a whole table (a node's `as_table()`,

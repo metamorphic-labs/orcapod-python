@@ -100,7 +100,7 @@ def _join_job(
 
 
 def _operator_table(store: ArrowDatabaseProtocol) -> pa.Table:
-    """The one stored operator cache table (``odb_v2``)."""
+    """The one stored operator cache table (``odb_v3``)."""
     paths = [p for p in store.list_table_paths() if p[-1] == OPERATOR_DB_SCHEMA_VERSION]
     assert len(paths) == 1, paths
     table = store.get_all_records(paths[0])
@@ -428,3 +428,111 @@ def test_a_plain_operator_or_an_uncached_one_asks_nothing_of_the_database() -> N
     with_data_tags.attach_databases(
         pipeline_database=database, cache_mode=CacheMode.OFF
     )
+
+
+@STORES
+@pytest.mark.parametrize("mode", ["sync", "async", "run"])
+@pytest.mark.parametrize("mixed_first", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_operator_storage_keeps_one_declared_token_schema(
+    make_store: Callable[[Path], ArrowDatabaseProtocol],
+    tmp_path: Path,
+    mode: str,
+    mixed_first: bool,
+    nested: bool,
+) -> None:
+    """A repeated row has the same stored key in both batches."""
+    import asyncio
+
+    from orcapod.channels import Channel
+    from orcapod.operators import Filter
+    from orcapod.streams import ArrowTableStream
+    from orcapod.types import col
+
+    op_filter = Filter(col("x") > 0)
+    origin = op.sources.DictSource(
+        [{"k": 0, "x": 1}], tag_columns=["k"], tag_only_columns=True, source_id="seed"
+    )
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+            pa.field(
+                "_source_x",
+                pa.large_list(pa.large_list(pa.large_string()))
+                if nested
+                else pa.large_string(),
+            ),
+        ]
+    )
+
+    def stream(mixed: bool) -> ArrowTableStream:
+        rows: list[dict[str, int | str | list[list[str]] | None]] = [
+            {"k": 0, "x": 1, "_source_x": [["seed::0::x"]] if nested else "seed::0::x"}
+        ]
+        if mixed:
+            rows.append({"k": 1, "x": 2, "_source_x": [] if nested else None})
+        return ArrowTableStream(
+            pa.Table.from_pylist(rows, schema=schema),
+            tag_columns=["k"],
+            producer=op_filter,
+            upstreams=(origin,),
+        )
+
+    class Snapshots(ArrowTableStream):
+        """Keep the producer identity while a source snapshot is replaced."""
+
+        current: ArrowTableStream = stream(mixed_first)
+
+        def as_table(self, **kwargs):
+            return self.current.as_table(**kwargs)
+
+        def iter_data(self):
+            return self.current.iter_data()
+
+    stream_value = Snapshots(
+        schema.empty_table(), tag_columns=["k"], producer=op_filter, upstreams=(origin,)
+    )
+    store = make_store(tmp_path)
+    node = OperatorJobNode(
+        op_filter, [stream_value], pipeline_database=store, cache_mode=CacheMode.LOG
+    )
+
+    async def execute_async() -> None:
+        incoming, outgoing = Channel(buffer_size=8), Channel(buffer_size=8)
+        for row in stream_value.iter_data():
+            await incoming.writer.send(row)
+        await incoming.writer.close()
+        await node.async_execute([incoming.reader], outgoing.writer)
+        _ = await outgoing.reader.collect()
+
+    for mixed in (mixed_first, not mixed_first):
+        stream_value.current = stream(mixed)
+        node.clear_cache()
+        if mode == "run":
+            node.run()
+        elif mode == "sync":
+            node.execute(stream_value)
+        else:
+            asyncio.run(execute_async())
+        store.flush()
+
+    assert len(store.list_table_paths()) == 1
+    path = store.list_table_paths()[0]
+    assert path[-1] == "odb_v3"
+    stored = store.get_all_records(path, record_id_column="_record_hash")
+    assert stored is not None
+    assert stored.num_rows == 2
+    assert stored.schema.field("_source_x") == schema.field("_source_x")
+    preimage = stored.select([*schema.names, constants.NODE_CONTENT_HASH_COL])
+    for i, saved in enumerate(stored["_record_hash"].to_pylist()):
+        assert (
+            node.data_context.arrow_hasher.hash_table(
+                preimage.slice(i, 1)
+            ).to_prefixed_digest()
+            == saved
+        )
+    assert node.as_source().as_table().sort_by("k").to_pylist() == [
+        {"k": 0, "x": 1},
+        {"k": 1, "x": 2},
+    ]

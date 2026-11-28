@@ -1008,7 +1008,7 @@ current data context are the current entries.
 | Function pipeline | `pdb_v2` | `PIPELINE_DB_SCHEMA_VERSION` |
 | Function result | `rdb_v1` (after the type's revision, `rev1`) | `RESULT_DB_SCHEMA_VERSION` |
 | Side-effect log | `tdb_v2` | `TRACKING_DB_SCHEMA_VERSION` |
-| Operator cache | `odb_v2` | `OPERATOR_DB_SCHEMA_VERSION` |
+| Operator cache | `odb_v3` | `OPERATOR_DB_SCHEMA_VERSION` |
 | Cached source | `sdb_v2` | `SOURCE_DB_SCHEMA_VERSION` |
 
 - Every layout marker started at `v1` for the first release, 0.4.0 (developer, November 18,
@@ -1404,8 +1404,8 @@ data. The rules:
   Streams, rows and record batches declare every `_source_*` token field nullable (ITL-1557).
   The top-level flag comes from `arrow_utils.source_info_field` and is independent
   of the token values and of any list item fields. CachedSource writes these fields
-  and their record hashes under `sdb_v2`. The operator cache retains its physical
-  `odb_v2` field flags and record hashes when storing output.
+  and their record hashes under `sdb_v2`. The operator cache stores and hashes the
+  output stream's declared fields under `odb_v3` (ITL-1562).
   A row built by `Data` still gives an untyped null the `large_string` type.
   `PolarsFilter` is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (`arrow_utils.restore_column_types` and

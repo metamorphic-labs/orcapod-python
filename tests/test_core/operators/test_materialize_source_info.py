@@ -141,41 +141,21 @@ def _materialize_buffer(buf: Sequence[Row], node: Any) -> StreamProtocol:
 
 
 def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every materialization stamp row 0's source info, as before ITL-845."""
-    # Non-public on purpose: re-creating the pre-fix behaviour has no public hook.
-    original = StaticOutputOperatorPod._rows_to_table  # pyright: ignore[reportPrivateUsage]
+    """Reproduce a broadcast-token write under today's declared fields."""
+    keep = StaticOutputOperatorPod._keep_output_table  # pyright: ignore[reportPrivateUsage]  # intercept the keeper
 
-    def broadcasting(
-        rows: Sequence[Row],
-    ) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
-        """Stamp row 0's source info on every row, then build the table."""
-        row_zero = rows[0][1].source_info()
-        return original(
-            [(tag, data.with_source_info(**row_zero)) for tag, data in rows]
-        )
-
-    original_form = StaticOutputOperatorPod._row_built_form  # pyright: ignore[reportPrivateUsage]
-
-    def broadcasting_form(
-        table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
-    ) -> pa.Table:
-        """Stamp row 0's source info on every row of the row-built form (ITL-1347)."""
-        formed = original_form(table, keys)
-        for i, name in enumerate(formed.column_names):
-            if name.startswith(constants.SOURCE_PREFIX):
-                column = formed.column(i)
-                first = column.slice(0, 1).combine_chunks()
-                repeated = pa.concat_arrays([first] * formed.num_rows)
-                formed = formed.set_column(i, formed.schema.field(i), repeated)
-        return formed
+    def broadcasting(table: pa.Table, result: StreamProtocol) -> StreamProtocol:
+        """Replace each source-info column by its first token repeated."""
+        for i, field in enumerate(table.schema):
+            if field.name.startswith(constants.SOURCE_PREFIX):
+                first = table.column(i).slice(0, 1).combine_chunks()
+                table = table.set_column(
+                    i, field, pa.concat_arrays([first] * table.num_rows)
+                )
+        return keep(table, result)
 
     monkeypatch.setattr(
-        StaticOutputOperatorPod, "_rows_to_table", staticmethod(broadcasting)
-    )
-    # An operator node keeps the row-built form of its result's table, without
-    # making the rows (ITL-1347, stage 2).
-    monkeypatch.setattr(
-        StaticOutputOperatorPod, "_row_built_form", staticmethod(broadcasting_form)
+        StaticOutputOperatorPod, "_keep_output_table", staticmethod(broadcasting)
     )
 
 
@@ -584,26 +564,10 @@ def _record_ids(node: OperatorJobNode) -> dict[str, bytes]:
 
 
 class TestIdentityPinned:
-    """Values recorded on ``main`` at ab544982, before the fix.
-
-    Re-recorded under starfix hash format 2 (``arrow_v1``, ITL-910): the node content
-    hash and the record hashes are Arrow-derived; the pipeline hash is not.
-
-    Re-recorded for ITL-957: the pinned source has no given ``source_id``, so its default
-    id (now ``arrow_table:<label>:<hex>``) moved, and with it the node content hash and
-    the record hashes; the pipeline hash did not.
-
-    Re-recorded for ITL-640: the source's Arrow schema enters the node's pipeline and
-    content hash, and the record hashes cover the content hash; the default id did not
-    move.
-
-    The node's identity, the output data and the row-0 record hash (whose
-    source-info token was already right) are unchanged; only rows whose stored
-    source-info token was wrong get a new record hash.
-    """
+    """Pin the ordinary source-fed node's identities and declared-fields record keys."""
 
     def test_operator_node_identity_and_row_zero_record_hash(self):
-        """Node hashes, data, schema and row 0's record hash match ``ab544982``."""
+        """The node identities are stable and odb_v3 keys include nullable token fields."""
         src = _pin_source()
         node = OperatorJobNode(
             SelectDataColumns(["x"]),
@@ -621,12 +585,14 @@ class TestIdentityPinned:
         assert node.content_hash().to_string() == (
             "semantic_v1:b71ffc40650c9e66af9dfd03a1372bc9394bf3cbc8bb43c55619e8de60f5afa8"
         )
-        ids = _record_ids(node)
-        assert ids["a"] == ROW_ZERO_RECORD_ID
-        assert (
-            ids["b"] not in PRE_FIX_RECORD_IDS
-        )  # pre-fix rows b, c held row a's source-info token
-        assert ids["c"] not in PRE_FIX_RECORD_IDS
+        assert {
+            key: value.removeprefix(b"arrow_v1:").hex()
+            for key, value in _record_ids(node).items()
+        } == {
+            "a": "0000025dd9e2da1f622ebca89649103ae5c822867d8014311edd90e7f56532df3b0bdd",
+            "b": "00000204792f33a68601ba00ba21fe2664bf8ad8d6909722356e2f155cd159eb7b4c2a",
+            "c": "0000029d6c37ac47859e7700b1822a7519fd21ace6b644343df719c69257ad995aae53",
+        }
 
         records = node.get_all_records(columns={"source": True})
         assert records is not None
@@ -636,51 +602,12 @@ class TestIdentityPinned:
             {"id": "c", "x": 3},
         ]
         assert _source_fields(records) == {
-            "_source_x": pa.field("_source_x", pa.large_string(), nullable=False)
+            "_source_x": pa.field("_source_x", pa.large_string())
         }
 
 
-# ``_record_hash`` of rows a, b, c stored by the pinned node before the fix (ab544982).
-# Row a's source-info token was already right, so the fix leaves its record hash.
-# Re-recorded in starfix hash format 2 (ITL-910) and again as labelled digests
-# (``b"arrow_v1:" + digest``, ITL-945) by reproducing the pre-fix broadcast with
-# ``_broadcast_row_zero``. Re-recorded once more for ITL-957: the pinned source has no
-# given ``source_id``, and its default id (now ``arrow_table:<label>:<hex>``) is part of
-# every source-info token these record hashes cover. Re-recorded for ITL-1154: a
-# source-info token now holds the row identifier (``row_<n>``) and the full-length
-# default source id. Re-recorded again for ITL-1154 (key columns in a source's
-# identity): the node content hash, which every stored row hash covers, moved. And for
-# ITL-640 (a schema enters an identity as its Arrow schema): the node content hash moved
-# again; the source's default id did not. Re-recorded for ITL-1425 the same way: the
-# default id became ``arrow_table_v1:<label>:<hex>`` (in every token) and the class name
-# left the source identity (the node content hash moved).
-ROW_ZERO_RECORD_ID = b"arrow_v1:" + bytes.fromhex(
-    "00000234b25240a441d52b207f72dd4e883ecc384173138d5408c795512a7b15bcb80d"
-)
-PRE_FIX_RECORD_IDS = frozenset(
-    {
-        ROW_ZERO_RECORD_ID,
-        b"arrow_v1:"
-        + bytes.fromhex(
-            "00000242f5936aa63d0e124dfcdfc02543f9cccf2ec1c6ca3f5af2061dfee7684dae2d"
-        ),
-        b"arrow_v1:"
-        + bytes.fromhex(
-            "000002857b8ea4384ea197784961d1e6146f388a4098aa2f2e9c44b02b21c409676fc1"
-        ),
-    }
-)
-
-
 class TestStoreWrittenBeforeFix:
-    """What a user sees when a database written by pre-fix ``main`` is re-run.
-
-    Operator-node tables written by ``main`` from c398e7d4 (ITL-539) up to the fix
-    hold row 0's source-info tokens on every row. The fixed code gives the corrected
-    rows new record hashes, so a LOG re-run adds them next to the old ones, and a
-    REPLAY node then emits both. Pinned as it behaves today; the cleanup guidance
-    lives in the CHANGELOG.
-    """
+    """Covered reads after a bad broadcast-token write and an older layout."""
 
     def _node(
         self, db: ArrowDatabaseProtocol, mode: CacheMode = CacheMode.LOG
@@ -693,7 +620,9 @@ class TestStoreWrittenBeforeFix:
             cache_mode=mode,
         )
 
-    def test_rerun_after_pre_fix_store(self, monkeypatch: pytest.MonkeyPatch):
+    def test_rerun_after_a_broadcast_token_write_in_the_current_layout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """A LOG re-run adds corrected rows next to the old ones; REPLAY sees both."""
         db = InMemoryArrowDatabase()
         old = self._node(db)

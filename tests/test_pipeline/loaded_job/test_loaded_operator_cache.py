@@ -381,14 +381,6 @@ def test_an_absent_cache_table_gives_an_empty_result(
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "ITL-1089: a loaded node over an unbound input slot has only a Python schema, "
-        "so its zero-row table cannot have the types a running node's has (ITL-912)"
-    ),
-)
 def test_an_absent_cache_table_gives_the_running_nodes_types(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -685,3 +677,57 @@ def test_get_all_records_of_a_loaded_operator_runs_the_advisory_check(
         assert node.get_all_records() is None
         assert node.get_all_records() is None
     assert len([w for w in record if w.category is OrcapodDatabaseContentWarning]) == 1
+
+
+@pytest.mark.parametrize("kind", STORES)
+def test_saved_replay_reports_the_older_operator_cache_layout(
+    kind: str,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Replay reports its older table and leaves the store unchanged."""
+    from orcapod.core.nodes import operator_node
+
+    store = _store(kind, tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(operator_node, "OPERATOR_DB_SCHEMA_VERSION", "odb_v2")
+        saved = _save(_run(store, "non_null"), tmp_path)
+    (old_path,) = [path for path in store.list_table_paths() if path[-1] == "odb_v2"]
+    old = store.get_all_records(old_path)
+    assert old is not None and old.num_rows == 2
+
+    node = _load_replaying(saved, store).nodes["joined"]
+    with pytest.warns(OrcapodDatabaseContentWarning, match="records 2 rows .* holds 0"):
+        assert node.get_all_records() is None
+    assert any(
+        "older table layout" in message and "odb_v2" in message
+        for message in caplog.messages
+    )
+    after = store.get_all_records(old_path)
+    assert after is not None and after.equals(old, check_metadata=True)
+
+
+def test_source_fed_job_keeps_its_pipeline_record_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary source identity still yields the same keys under fixed result IDs."""
+    import uuid
+    from itertools import count
+
+    ids = count(1)
+    monkeypatch.setattr(
+        "orcapod.core.data_function.uuid7", lambda: uuid.UUID(int=next(ids))
+    )
+    store = InMemoryArrowDatabase()
+    _run(store, "non_null")
+    store.flush()
+    (path,) = [path for path in store.list_table_paths() if path[-1] == "pdb_v2"]
+    records = store.get_all_records(path, record_id_column="key")
+    assert records is not None
+    keys = records["key"].to_pylist()
+    assert all(isinstance(value, bytes) for value in keys)
+    assert sorted(bytes(value).hex() for value in keys if value is not None) == [
+        "6172726f775f76313a0000023c18eebf286c50d33cec2d0b6ff1d2c564d27ddb57b1327d9f12c81b246df83c",
+        "6172726f775f76313a000002c70b291e05964b790d5cbd0d505e06a9b4238bb01332370bf4159e2922181065",
+    ]

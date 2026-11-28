@@ -2,7 +2,7 @@
 
 A function node's pipeline table (``pdb_v2``) holds, for every row, its instance id
 (``__pipeline_instance_id``) and, as its key, its record id. A side-effect log
-(``tdb_v2``) is keyed by the entry id. The operator cache (``odb_v2``) stores the entry
+(``tdb_v2``) is keyed by the entry id. The operator cache (``odb_v3``) stores the entry
 id and an insertion time beside its row key.
 
 The job is ``rows -> f -> g -> tell``: ``f`` has two outputs, so ``g``'s input has two
@@ -481,7 +481,7 @@ def test_the_operator_cache_stores_the_entry_id_of_every_row(
     database = InMemoryArrowDatabase()
     job = _operator_job(database, arrangement)
     _run(job, orchestrator)
-    stored = _table(database, "odb_v2")
+    stored = _table(database, "odb_v3")
     assert stored.num_rows == 3
     assert stored.schema.field("__pipeline_entry_id").type == pa.large_binary()
     assert not stored.schema.field("__pipeline_entry_id").nullable
@@ -506,7 +506,7 @@ def test_neither_stored_column_is_part_of_the_row_key(orchestrator: str) -> None
     """The row key is the hash of the row without the entry id and the time."""
     database = InMemoryArrowDatabase()
     _run(_operator_job(database, "as_declared"), orchestrator)
-    stored = _table(database, "odb_v2")
+    stored = _table(database, "odb_v3")
     hashed = stored.drop(
         [KEY, "__pipeline_entry_id", "__recorded_at", constants.DATA_CONTEXT_COL]
     )
@@ -523,12 +523,12 @@ def test_a_row_passed_again_keeps_its_first_insertion_time(orchestrator: str) ->
     database = InMemoryArrowDatabase()
     job = _operator_job(database, "as_declared")
     _run(job, orchestrator)
-    first = _table(database, "odb_v2").sort_by(KEY)
+    first = _table(database, "odb_v3").sort_by(KEY)
     # The same job runs again over the same rows (cleared, or nothing would run).
     for label in ("f", "sel"):
         job.nodes[label].clear_cache()  # pyright: ignore[reportAttributeAccessIssue]  # job.nodes is typed by the node protocol; every job node has clear_cache
     _run(job, orchestrator)
-    assert _table(database, "odb_v2").sort_by(KEY).equals(first)
+    assert _table(database, "odb_v3").sort_by(KEY).equals(first)
     assert calls["f"] == 3
 
 

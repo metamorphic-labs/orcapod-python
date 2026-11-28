@@ -756,7 +756,7 @@ def test_derived_source_checks_reserved_columns_before_filtering_storage(
         ) -> pa.Table | None:
             """Add a reserved column to the stored operator table."""
             table = super().get_all_records(record_path, *args, **kwargs)
-            if table is not None and record_path[-1] == "odb_v2":
+            if table is not None and record_path[-1] == "odb_v3":
                 return table.append_column("__raw_missing", pa.nulls(table.num_rows))
             return table
 

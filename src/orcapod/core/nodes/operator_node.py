@@ -74,7 +74,9 @@ from orcapod.errors import (
     UnstorableColumnError,
 )
 from orcapod.contexts.stored import (
+    account_for_stale_tables,
     data_context_field,
+    find_stale_tables,
     require_storable,
     keep_rows_of_data_context,
     require_same_data_context,
@@ -855,6 +857,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.
     _skipped_rows_reported: bool = False
+    _stale_tables_checked: bool = False
     # The job file's expected row count for a loaded node, and whether it was checked
     # against the attached database (ITL-1043). Advisory: a mismatch only warns.
     _expected_row_count: int | None = None
@@ -1029,6 +1032,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         # runs or changes (ITL-1162).
         self.require_storable_tables(pipeline_database, cache_mode)
         self._skipped_rows_reported = False
+        self._stale_tables_checked = False
         self._row_count_checked = False
         self._pipeline_database = pipeline_database
         self._cache_mode = cache_mode
@@ -1403,6 +1407,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             raise RuntimeError(
                 f"OperatorJobNode {self.label!r} has no pipeline database attached."
             )
+        self._account_for_stale_tables()
         output_table = stream.as_table(
             columns={"source": True, "system_tags": True, "context": True},
         )
@@ -1418,28 +1423,6 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         for row_context_key in row_context_keys:
             require_same_data_context(row_context_key, self.data_context_key)
         output_table = output_table.drop([constants.CONTEXT_KEY])
-
-        # The odb_v2 schema and record hash use the token flags of the complete
-        # stored output. Stream reads through ArrowTableStream declare the
-        # logical token fields nullable again.
-        stored_fields = [
-            field.with_nullable(column.null_count > 0)
-            if field.name.startswith(constants.SOURCE_PREFIX)
-            else field
-            for field, column in zip(
-                output_table.schema, output_table.columns, strict=True
-            )
-        ]
-        output_table = pa.Table.from_arrays(
-            output_table.columns,
-            schema=pa.schema(
-                stored_fields,
-                metadata=cast(
-                    "dict[bytes | str, bytes | str] | None",
-                    output_table.schema.metadata,
-                ),
-            ),
-        )
 
         # The entry id of each row (ITL-1471) is computed from the row as the stream
         # gives it, before the bookkeeping columns are added.
@@ -1534,6 +1517,19 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             [self.HASH_COLUMN_NAME, constants.NODE_CONTENT_HASH_COL]
         )
 
+    def _account_for_stale_tables(self) -> None:
+        """Report operator caches at other layouts once per attached database."""
+        if self._stale_tables_checked or self._pipeline_database is None:
+            return
+        account_for_stale_tables(
+            find_stale_tables(
+                self._pipeline_database, name_path=self.node_uri[:1] or None
+            ),
+            delivers_side_effects=False,
+            current_context=self.data_context_key,
+        )
+        self._stale_tables_checked = True
+
     def _read_stored_records(self) -> "pa.Table | None":
         """Read this node's stored rows written under the current data context.
 
@@ -1576,6 +1572,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 data-tags (ITL-1019).
         """
         assert self._pipeline_database is not None
+        self._account_for_stale_tables()
         records = self._pipeline_database.get_all_records(
             self._stored_table_path, record_id_column=self.HASH_COLUMN_NAME
         )
@@ -1828,16 +1825,13 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
 
                 # Cache, in row order with or without rows (ITL-1131, ITL-1133).
                 if result_table.num_rows:
-                    try:
-                        kept_table = StaticOutputOperatorPod._row_built_form(
-                            result_table, keys
+                    self._cached_output_stream = (
+                        StaticOutputOperatorPod._keep_output_table(
+                            result_table, produced
                         )
-                    except RowBuiltFormUnavailable as error:
-                        StaticOutputOperatorPod._raise_as_rows_do(
-                            produced.iter_data(), error
-                        )
-                    self._cached_output_stream = ArrowTableStream(
-                        kept_table, tag_columns=tag_keys, data_tags=data_tags
+                    )
+                    kept_table = self._cached_output_stream.as_table(
+                        columns=ZERO_ROW_INPUT_COLUMNS
                     )
                     # The output stream, built once the node holds its run (as the
                     # sync orchestrator built a successor's input after ``execute``
@@ -1878,7 +1872,11 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         run on its own has the columns, in memory and stored, of the same node in a
         job (ITL-1133). The rows are computed here, not when first read.
         """
-        result = self._operator.process(*self._input_streams)
+        result = produced_stream(self._operator.process(*self._input_streams))
+        if reads_as_its_class(result, ArrowTableStream):
+            return StaticOutputOperatorPod._keep_output_table(
+                result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result
+            )
         return StaticOutputOperatorPod._kept_output(result, list(result.iter_data()))
 
     def _compute_and_store(self, *, store: bool = True) -> None:
@@ -2420,7 +2418,11 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             # with no rows replaces an earlier run's output too: the node then
             # reads as a zero-row table.
             if collected:
-                stream = StaticOutputOperatorPod._materialize_to_stream(collected)
+                stream = StaticOutputOperatorPod._stream_over_row_table(
+                    StaticOutputOperatorPod._rows_to_table(
+                        collected, keep_token_fields=True
+                    )
+                )
                 self._cached_output_stream = stream
                 if should_store:
                     self._store_output_stream(stream)

@@ -123,7 +123,7 @@ class TestStoredPathsAndKeys:
         _ = _operator_job(store).run()
 
         paths = sorted(store.list_sources())
-        assert sorted(path[-1] for path in paths) == ["odb_v2", "pdb_v2", "rdb_v1"]
+        assert sorted(path[-1] for path in paths) == ["odb_v3", "pdb_v2", "rdb_v1"]
         for path in paths:
             for component in path:
                 assert "semantic_v" not in component, path
@@ -139,7 +139,7 @@ class TestStoredPathsAndKeys:
         store = InMemoryArrowDatabase()
         _ = _operator_job(store).run()
 
-        (path,) = [p for p in store.list_sources() if p[-1] == "odb_v2"]
+        (path,) = [p for p in store.list_sources() if p[-1] == "odb_v3"]
         table = store.get_all_records(path, record_id_column="_record_hash")
         assert table is not None
         keys = cast(list[bytes], table.column("_record_hash").to_pylist())

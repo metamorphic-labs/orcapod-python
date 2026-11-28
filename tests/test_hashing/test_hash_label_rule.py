@@ -574,10 +574,10 @@ class TestNamesHoldBareDigests:
         assert BARE_SHA256.fullmatch(schema_component.removeprefix("schema:"))
 
     def test_operator_table_path_holds_bare_digests(self) -> None:
-        """An operator-cache table path holds bare digests, then the layout (``odb_v2``)."""
+        """An operator-cache table path holds bare digests, then the layout (``odb_v3``)."""
         node, store = _run_cached_join()
         (path,) = store.list_sources()
-        assert path == node.node_identity_path + ("odb_v2",)
+        assert path == node.node_identity_path + ("odb_v3",)
         assert path[0] == "Join"
         assert BARE_SHA256.fullmatch(path[1]), path
         assert path[2].startswith("schema:")

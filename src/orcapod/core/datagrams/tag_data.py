@@ -655,6 +655,12 @@ class Data(Datagram):
             ),
         )
 
+    def _source_info_for_transport(self) -> "pa.Table":
+        """Return the row's token fields for table transport, including typed nulls."""
+        if self._typed_source_info is not None:
+            return self._typed_source_info
+        return self._ensure_source_info_table()
+
     def _token_columns(self, kept: "Mapping[str, pa.ChunkedArray[Any]]") -> "pa.Table":
         """Return one token column per data column this row holds, in their order.
 
