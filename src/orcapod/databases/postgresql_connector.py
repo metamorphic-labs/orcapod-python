@@ -37,10 +37,8 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import psycopg
-    from psycopg import sql as pg_sql
 else:
     psycopg = LazyModule("psycopg")
-    pg_sql = LazyModule("psycopg.sql")
 
 logger = logging.getLogger(__name__)
 
@@ -440,6 +438,8 @@ class PostgreSQLConnector:
         self, name: str, *, exact: bool = False
     ) -> list[tuple[str, str]]:
         """Return registered record tables matching a physical name or prefix."""
+        from psycopg import sql as pg_sql
+
         with (
             self._lock,
             cast(
@@ -479,6 +479,8 @@ class PostgreSQLConnector:
         self, table_name: str, path_json: str
     ) -> Iterator[bool]:
         """Register and write a record table, yielding whether it already exists."""
+        from psycopg import sql as pg_sql
+
         with self._lock:
             conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
             self._store_transaction_active = True
