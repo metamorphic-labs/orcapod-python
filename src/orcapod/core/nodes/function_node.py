@@ -2771,6 +2771,37 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         return self._output_stream(output)
 
+    def _persistent_result_in_ephemeral_mode(
+        self, data: DataProtocol
+    ) -> DataProtocol | None:
+        """Return the persistent store's result for ``data``, for a node in ephemeral mode.
+
+        STOPGAP (ITL-1503), replaced by the design of layered result-cache
+        wrappers (ITL-1516). In ephemeral mode the order is: the persistent result
+        store, then the ephemeral one, then the function; a fresh result is saved
+        to the ephemeral store only. The ephemeral wrapper knows its own store
+        alone, so the node makes the first step itself, with a read-only lookup
+        by input data hash. A hit is recorded as a persistent result that was not
+        computed, and nothing is written to either result store.
+
+        A persistent result that this node's own pipeline record points to was
+        served in ephemeral mode before, through the lookup by instance id. What
+        this adds is reuse by input data hash when no pipeline record supplies
+        a result. A persistent hit takes precedence over an ephemeral hit and
+        avoids calling the function when the ephemeral store would miss too.
+
+        Args:
+            data: The node's input row (its fall-through columns still on it).
+
+        Returns:
+            The stored result, or ``None`` on a miss or when the node has no
+            persistent result store it can compute over.
+        """
+        pod = self._cached_function_pod
+        if not isinstance(pod, CachedFunctionPod):
+            return None
+        return pod.lookup_cached_data(function_input(self._function_pod, data))
+
     def _empty_data_cache_hit(
         self, tag: TagProtocol, data: EmptyData, instance_id: bytes
     ) -> tuple[TagProtocol, DataProtocol]:
@@ -2899,12 +2930,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     "ephemeral database has been assigned. Call set_ephemeral_database() with "
                     "an ArrowDatabaseProtocol before executing this node."
                 )
-            tag_out, output_data = self._ephemeral_cached_pod.process_data(
-                tag,
-                function_input(self._function_pod, data),
-                logger=logger,
-                run_id=run_id,
-            )
+            # Stopgap (ITL-1503, until ITL-1516): the persistent store is asked first.
+            output_data = self._persistent_result_in_ephemeral_mode(data)
+            from_persistent = output_data is not None
+            if from_persistent:
+                tag_out = tag
+            else:
+                tag_out, output_data = self._ephemeral_cached_pod.process_data(
+                    tag,
+                    function_input(self._function_pod, data),
+                    logger=logger,
+                    run_id=run_id,
+                )
             if output_data is not None:
                 result_computed = bool(
                     output_data.get_meta_value(
@@ -2918,7 +2955,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         instance_id,
                         data_record_id=output_data.datagram_uuid,
                         computed=result_computed,
-                        is_ephemeral=True,
+                        is_ephemeral=not from_persistent,
                         output_data_hash=output_data.content_hash(),
                         run_id=run_id,
                     )
@@ -3038,9 +3075,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     "ephemeral database has been assigned. Call set_ephemeral_database() with "
                     "an ArrowDatabaseProtocol before executing this node."
                 )
-            tag_out, output_data = await self._ephemeral_cached_pod.async_process_data(
-                tag, function_input(self._function_pod, data), logger=logger
-            )
+            # Stopgap (ITL-1503, until ITL-1516): the persistent store is asked first.
+            output_data = self._persistent_result_in_ephemeral_mode(data)
+            from_persistent = output_data is not None
+            if from_persistent:
+                tag_out = tag
+            else:
+                (
+                    tag_out,
+                    output_data,
+                ) = await self._ephemeral_cached_pod.async_process_data(
+                    tag, function_input(self._function_pod, data), logger=logger
+                )
             if output_data is not None:
                 result_computed = bool(
                     output_data.get_meta_value(
@@ -3054,7 +3100,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         instance_id,
                         data_record_id=output_data.datagram_uuid,
                         computed=result_computed,
-                        is_ephemeral=True,
+                        is_ephemeral=not from_persistent,
                         output_data_hash=output_data.content_hash(),
                     )
         elif self._cached_function_pod is not None:
@@ -4563,11 +4609,49 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
                 # Local dict: correlation_key → (original_tag, original_input_data)
                 input_store: dict[bytes, tuple[TagProtocol, DataProtocol, bytes]] = {}
+                # Rows answered by the persistent store in ephemeral mode (the
+                # ITL-1503 stopgap, until ITL-1516).
+                persistent_hits: set[bytes] = set()
+                # What the first completed lookup of each instance gave, for this
+                # run: a later occurrence of the instance takes that answer, so
+                # one instance gets one result in one run, also when a persistent
+                # result for it is published in between. A miss (``None``) sends
+                # every occurrence to the ephemeral wrapper, where the conditional
+                # write keeps one result. A lookup that raised is not remembered:
+                # that occurrence delivered nothing, and the next one looks again.
+                persistent_lookups: dict[bytes, DataProtocol | None] = {}
                 # Instance ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
                 # Rows whose function raised (error policy "continue").
                 failed_rows: list[int] = [0]
+
+                def lookup_crashed(
+                    tag: TagProtocol, data: DataProtocol, exc: Exception
+                ) -> bool:
+                    """Report a row whose stored-result lookup raised, as the sync path does.
+
+                    A database error, or a stored row that cannot be decoded, is
+                    never a row failure: the run stops whatever the policy, after
+                    the row's crash is reported, the database error naming the node
+                    and the row. Any other error is a failed row under the row
+                    failure policy.
+
+                    Returns:
+                        Whether the run goes on to the next row; ``False`` means the
+                        caller re-raises ``exc``.
+                    """
+                    if isinstance(exc, OrcapodDatabaseError):
+                        exc.add_context(node_label=node_label, tag=tag.as_dict())
+                    if isinstance(exc, (OrcapodDatabaseError, TypeIdentityError)):
+                        with keep_database_error(exc, "Observer on_data_crash"):
+                            ctx_obs.on_data_crash(node_label, tag, data, exc)
+                        return False
+                    ctx_obs.on_data_crash(node_label, tag, data, exc)
+                    if error_policy == "fail_fast":
+                        return False
+                    failed_rows[0] += 1
+                    return True
 
                 async def route_inputs() -> None:
                     """Stage 1: send cache hits to output; stamp misses for computation."""
@@ -4608,33 +4692,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                     found_tag, found = self._empty_data_cache_hit(
                                         tag, data, instance_id
                                     )
-                                except OrcapodDatabaseError as exc:
-                                    # Never a row failure, whatever the policy:
-                                    # the run stops, after the row's crash is
-                                    # reported, as on the sync path.
-                                    exc.add_context(
-                                        node_label=node_label, tag=tag.as_dict()
-                                    )
-                                    with keep_database_error(
-                                        exc, "Observer on_data_crash"
-                                    ):
-                                        ctx_obs.on_data_crash(
-                                            node_label, tag, data, exc
-                                        )
-                                    raise
-                                except TypeIdentityError as exc:
-                                    with keep_database_error(
-                                        exc, "Observer on_data_crash"
-                                    ):
-                                        ctx_obs.on_data_crash(
-                                            node_label, tag, data, exc
-                                        )
-                                    raise
                                 except Exception as exc:
-                                    ctx_obs.on_data_crash(node_label, tag, data, exc)
-                                    if error_policy == "fail_fast":
+                                    if not lookup_crashed(tag, data, exc):
                                         raise
-                                    failed_rows[0] += 1
                                     continue
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, found, cached=False
@@ -4643,6 +4703,38 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 run_entry_ids.append(instance_id)
                             else:
                                 self._preflight_pipeline_write_schema()
+                                found = None
+                                if is_ephemeral:
+                                    if instance_id not in persistent_lookups:
+                                        try:
+                                            persistent_lookups[instance_id] = (
+                                                self._persistent_result_in_ephemeral_mode(
+                                                    data
+                                                )
+                                            )
+                                        except Exception as exc:
+                                            # The sync path makes this lookup
+                                            # inside the row, after its start:
+                                            # the same events here.
+                                            with keep_database_error(
+                                                exc
+                                                if isinstance(
+                                                    exc,
+                                                    (
+                                                        OrcapodDatabaseError,
+                                                        TypeIdentityError,
+                                                    ),
+                                                )
+                                                else None,
+                                                "Observer on_data_start",
+                                            ):
+                                                ctx_obs.on_data_start(
+                                                    node_label, tag, data
+                                                )
+                                            if not lookup_crashed(tag, data, exc):
+                                                raise
+                                            continue
+                                    found = persistent_lookups[instance_id]
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
                                     tag,
@@ -4652,6 +4744,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 stamped_tag = tag.with_meta_columns(
                                     **{_TAG_NODE_INPUT_REF: correlation_key}
                                 )
+                                if found is not None:
+                                    # Not computed, stored in neither result store
+                                    # again: straight to the record stage.
+                                    ctx_obs.on_data_start(node_label, tag, data)
+                                    ctx_obs.on_data_end(
+                                        node_label, tag, data, found, cached=False
+                                    )
+                                    persistent_hits.add(correlation_key)
+                                    await result_channel.writer.send(
+                                        (stamped_tag, found)
+                                    )
+                                    continue
                                 # The function takes the row without its
                                 # fall-through columns (ITL-1023).
                                 await compute_channel.writer.send(
@@ -4682,7 +4786,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 instance_id,
                                 data_record_id=output_data.datagram_uuid,
                                 computed=result_computed,
-                                is_ephemeral=is_ephemeral,
+                                is_ephemeral=is_ephemeral
+                                and correlation_key not in persistent_hits,
                                 output_data_hash=output_data.content_hash(),
                                 run_id=run_id,
                             )
@@ -4693,6 +4798,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 node_label=node_label, tag=original_tag.as_dict()
                             )
                             raise
+                        persistent_hits.discard(cast(bytes, correlation_key))
                         # The row's data-tag columns fall through onto the stored
                         # result, as on the sync path (ITL-1023).
                         # Not None: the result channel carries only results.
