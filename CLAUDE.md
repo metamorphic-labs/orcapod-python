@@ -1672,6 +1672,8 @@ data. The rules:
   even if currently unbound. Pass the source itself, or use node.as_source()
   for another job's stored results. The job's own slots are allowed with their
   original bindings. A schema-only SourceNode declares a new unbound slot.
+  The ITL-1559 stopgap also refuses prebuilt streams over the job's own slots.
+  Build the step inside the job from the slot, or pass the source itself.
   Call where() once and reuse the resulting object. A source object conflict
   raises InconsistentSourceError before the separate restriction check, which
   can see restrictions beneath wrappers.

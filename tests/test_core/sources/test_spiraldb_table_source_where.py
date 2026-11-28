@@ -1099,10 +1099,13 @@ class TestRunsAndSavedJobs:
 
         events = _source(source_id="events", tag_only_columns=True)
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                first.pod(events.where(subject_id="m1"), label="first")
+        with job:
+            first.pod(events.where(subject_id="m1"), label="first")
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 second.pod(events.where(subject_id="m2"), label="second")
+        assert {"first", "second"} & job.nodes.keys() == {"first"}
 
     def test_streams_built_before_the_capture_are_checked_too(self, project, tmp_path):
         """Streams over differently restricted sources, built outside, are refused."""
@@ -1121,10 +1124,13 @@ class TestRunsAndSavedJobs:
         m1 = events.where(subject_id="m1").select_data_columns(["amplitude"])
         m2 = events.where(subject_id="m2").select_data_columns(["amplitude"])
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                first.pod(m1, label="first")
+        with job:
+            first.pod(m1, label="first")
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 second.pod(m2, label="second")
+        assert {"first", "second"} & job.nodes.keys() == {"first"}
 
     @pytest.mark.parametrize(
         "captured, prebuilt",
@@ -1153,13 +1159,26 @@ class TestRunsAndSavedJobs:
         events = _source(source_id="events", tag_only_columns=True)
         outside = events.where(**prebuilt).select_data_columns(["amplitude"])
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                if prebuilt_first:
+        with job:
+            if prebuilt_first:
+                first.pod(outside, label="first")
+                with pytest.raises(
+                    InconsistentSourceError, match="distinct source objects"
+                ):
+                    events.where(**captured).select_data_columns(
+                        ["amplitude"], label="selected"
+                    )
+            else:
+                events.where(**captured).select_data_columns(
+                    ["amplitude"], label="selected"
+                )
+                with pytest.raises(
+                    InconsistentSourceError, match="distinct source objects"
+                ):
                     first.pod(outside, label="first")
-                events.where(**captured).select_data_columns(["amplitude"])
-                if not prebuilt_first:
-                    first.pod(outside, label="first")
+        assert {"first", "selected"} & job.nodes.keys() == {
+            "first" if prebuilt_first else "selected"
+        }
 
     @pytest.mark.parametrize(
         "prebuilt_first", [False, True], ids=["captured first", "prebuilt first"]
@@ -1223,11 +1242,14 @@ class TestRunsAndSavedJobs:
         """One operator over two differently restricted sources of one table."""
         events = _source(source_id="events", tag_only_columns=True)
         job = PipelineJob(name="two")
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
+        with job:
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 events.where(subject_id="m1").semi_join(
                     events.where(subject_id="m2"), label="both"
                 )
+        assert not job.nodes
 
     @pytest.mark.parametrize("restrict", [False, True])
     def test_one_restriction_twice_in_one_job_is_accepted(
@@ -1291,10 +1313,13 @@ class TestRunsAndSavedJobs:
             return channel
 
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                first.pod(_source(source_id="events", limit=1), label="first")
+        with job:
+            first.pod(_source(source_id="events", limit=1), label="first")
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 second.pod(_source(source_id="events", limit=2), label="second")
+        assert {"first", "second"} & job.nodes.keys() == {"first"}
 
     def test_node_run_reports_the_restriction(self, project, tmp_path):
         """A node's own ``run()`` reports the restriction in the same shape."""
@@ -2099,11 +2124,16 @@ class TestRestrictionThroughWrappers:
         proxy = self._bound_proxy("a condition")  # subject_id='m1'
         other = _events().where(subject_id="m2")
         first, second = (proxy, other) if order == "proxy first" else (other, proxy)
-        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                first.select_data_columns(["amplitude"], label="a")
+        job = PipelineJob(
+            name="two", database=DeltaTableDatabase(tmp_path / "s"), auto_compile=False
+        )
+        with job:
+            first.select_data_columns(["amplitude"], label="a")
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 second.select_data_columns(["channel"], label="b")
+        assert {inv.label for inv in job._invocation_lut.values()} == {"a"}
 
     def test_a_cache_over_a_proxy_bound_later_refuses_to_read(self, project, tmp_path):
         proxy = _proxy_for(_events())
@@ -2180,30 +2210,24 @@ class TestBindOfADatabaseOverARestrictedSlot:
             assert after[0] is before[0] and after[1] is before[1]
 
     @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
-    @pytest.mark.parametrize("inner_name", ["events", "inner"])
     @pytest.mark.parametrize("with_database", [True, False], ids=["db", "no-db"])
-    def test_a_slot_over_a_restricted_slot_is_refused_before_anything_changes(
-        self, project, tmp_path, mode, inner_name, with_database
+    def test_binding_a_restricted_source_is_refused_before_anything_changes(
+        self, project, tmp_path, mode, with_database
     ):
-        """A source to bind that is itself a slot (of another job) bound to a
-        restricted source: its restriction is read, whatever its name. Only the
-        job's own slots take the source being bound (CodeRabbit, PR 435)."""
-        from orcapod.core.nodes.source_node import SourceJobNode
-
+        """Refuse a cache over a prospective restricted binding (PR 435)."""
         store = DeltaTableDatabase(tmp_path / "s")
         job = TestRestrictionThroughWrappers._cached_job(store, mode)
         node, slot = job.nodes["rename"], job.nodes["events"]
-        inner = SourceJobNode.from_stream(_events(), name=inner_name)
-        inner.bound_source = _events().where(subject_id="m1")
+        restricted = _events().where(subject_id="m1")
         before = (job.database, node._pipeline_database, slot.bound_source)  # pyright: ignore[reportPrivateUsage]
         other = DeltaTableDatabase(tmp_path / "other")
 
         for _ in range(2):
             with pytest.raises(ValueError, match="cannot cache a restricted read"):
                 if with_database:
-                    job.bind(sources={"events": inner}, database=other)
+                    job.bind(sources={"events": restricted}, database=other)
                 else:
-                    job.bind(sources={"events": inner})
+                    job.bind(sources={"events": restricted})
             after = (job.database, node._pipeline_database, slot.bound_source)  # pyright: ignore[reportPrivateUsage]
             assert all(a is b for a, b in zip(after, before, strict=True))
 
@@ -2254,10 +2278,14 @@ class TestOneRestrictionPerSource:
             return amplitude
 
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                chains[first_chain](_events().where(subject_id="m1"))
+        with job:
+            chains[first_chain](_events().where(subject_id="m1"))
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 chains[second_chain](second())
+        assert "events" in job.nodes
+        assert len(job.nodes) == (3 if first_chain == "map then select" else 2)
 
     @pytest.mark.parametrize("order", ["m1 first", "m2 first"])
     @pytest.mark.parametrize(
@@ -2279,9 +2307,12 @@ class TestOneRestrictionPerSource:
         m2 = built[chains[1]](_events().where(subject_id="m2"))
         first, second = (m1, m2) if order == "m1 first" else (m2, m1)
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
+        with job:
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 first.semi_join(second, label="both")
+        assert not job.nodes
 
     @pytest.mark.parametrize("order", ["select first", "drop first"])
     def test_one_restriction_through_two_chains_is_accepted(

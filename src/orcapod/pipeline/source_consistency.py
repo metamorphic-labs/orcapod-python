@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, cast
 
-from orcapod.errors import InconsistentSourceError
+from orcapod.errors import InconsistentSourceError, SourceSpecMismatchError
 from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from orcapod.core.sources.base import RootSource
     from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.restrictions import Rebinding
@@ -18,16 +21,50 @@ if TYPE_CHECKING:
 SourceUse = tuple[str, "StreamProtocol"]
 
 
-def invocation_source_uses(invocation: PodInvocation) -> Iterable[SourceUse]:
-    """Name the input streams of a recorded step for diagnostics."""
-    label = invocation.label or getattr(
-        invocation.pod, "label", type(invocation.pod).__name__
-    )
-    for index, stream in enumerate(invocation.input_streams, 1):
-        name = f"step {label!r}"
-        if len(invocation.input_streams) > 1:
-            name += f" input {index}"
-        yield name, stream
+def require_slot_free_binding(name: str, source: StreamProtocol | None) -> None:
+    """Report a proposed binding that reads a bindable job slot."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.pipeline.restrictions import streams_beneath
+
+    # TODO(ITL-1559): live slot references can create cycles or retain an old
+    # slot after recompilation. Stored-result sources end the live-input walk.
+    pending = [] if source is None else [source]
+    visited: set[int] = set()
+    while pending:
+        stream = pending.pop()
+        if id(stream) in visited:
+            continue
+        visited.add(id(stream))
+        if isinstance(stream, SourceJobNode):
+            raise SourceSpecMismatchError(
+                f"Binding source slot {name!r} to a source that depends on source "
+                f"slot {stream.name!r} is not supported yet (ITL-1559)."
+            )
+        pending.extend(streams_beneath(stream))
+
+
+def invocation_source_uses(invocations: Iterable[PodInvocation]) -> Iterable[SourceUse]:
+    """Name each invocation's inputs, numbering occurrences of repeated labels."""
+    labelled = [
+        (
+            invocation.label
+            or getattr(invocation.pod, "label", type(invocation.pod).__name__),
+            invocation,
+        )
+        for invocation in invocations
+    ]
+    counts = Counter(label for label, _ in labelled)
+    occurrences: Counter[str] = Counter()
+    for label, invocation in labelled:
+        step = f"step {label!r}"
+        if counts[label] > 1:
+            occurrences[label] += 1
+            step += f" (occurrence {occurrences[label]})"
+        for index, stream in enumerate(invocation.input_streams, 1):
+            name = step
+            if len(invocation.input_streams) > 1:
+                name += f" input {index}"
+            yield name, stream
 
 
 def root_source_uses(
@@ -79,15 +116,36 @@ def root_source_uses(
 
 
 def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:
-    """Use the live proxy schema for the comparison, even after an unbound read."""
+    """Use a bound proxy's live Arrow types without changing source identity."""
+    from orcapod.core.sources.cached_source import CachedSource
+    from orcapod.core.sources.derived_source import DerivedSource
     from orcapod.core.sources.source_proxy import SourceProxy
     from orcapod.core.streams.base import typed_arrow_schemas
 
-    if isinstance(source, SourceProxy) and source.is_bound:
-        # The cached schema can describe the unbound proxy's Python types.
-        schemas = typed_arrow_schemas(source, own=False)
-    else:
-        schemas = source.arrow_schemas
+    visited: set[int] = set()
+
+    def live_schemas(
+        current: StreamProtocol, from_proxy: bool = False
+    ) -> tuple[pa.Schema, pa.Schema] | None:
+        if id(current) in visited:
+            return None
+        visited.add(id(current))
+        if isinstance(current, CachedSource):
+            return live_schemas(current.cached_source, from_proxy=from_proxy)
+        if (
+            isinstance(current, SourceProxy)
+            and (delegate := current.delegate) is not None
+        ):
+            return live_schemas(delegate, from_proxy=True)
+        if isinstance(current, DerivedSource) and (
+            inputs := current.live_source_inputs
+        ):
+            origin_schemas = live_schemas(inputs[0])
+            if origin_schemas is not None:
+                return current._arrow_schemas_from_origin(*origin_schemas)  # pyright: ignore[reportPrivateUsage]  # source consistency
+        return typed_arrow_schemas(current) if from_proxy else None
+
+    schemas = live_schemas(source) or source.arrow_schemas
     return arrow_schema_identity(*schemas, source.data_context)
 
 

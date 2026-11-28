@@ -985,7 +985,7 @@ class FunctionPod(_FunctionPodBase):
             input_stream=input_stream,
             label=label,
         )
-        return output_stream
+        return output_stream._mark_recorded(self.tracker_manager)
 
     def __call__(
         self,
@@ -2199,7 +2199,7 @@ class FallThroughPod(WrappedFunctionPod):
         )
         return FunctionPodStream(
             function_pod=self, input_stream=input_stream, label=label
-        )
+        )._mark_recorded(self.tracker_manager)
 
     def process_data(
         self,

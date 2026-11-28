@@ -8,6 +8,7 @@ import pytest
 
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 
 
@@ -251,6 +252,59 @@ class TestSourceJobNode:
         )
         job_node.bound_source = src
         assert job_node.bound_source is src
+
+    @pytest.mark.parametrize(
+        "length", [1, 2, 3], ids=["direct", "one_projection", "two_projections"]
+    )
+    def test_slot_binding_refuses_cycles(
+        self, tag_schema: Schema, data_schema: Schema, length: int
+    ) -> None:
+        from orcapod.core.sources.dict_source import DictSource
+        from orcapod.operators import SelectDataColumns
+
+        source = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
+        target = SourceJobNode(
+            name="target",
+            tag_schema=tag_schema,
+            data_schema=data_schema,
+            bound_source=source,
+        )
+        upstream: StreamProtocol = target
+        for _ in range(length - 1):
+            upstream = SelectDataColumns(["value"])(upstream)
+        previous_modified = target.last_modified
+
+        with pytest.raises(
+            SourceSpecMismatchError, match=r"slot 'target'.*slot 'target'.*ITL-1559"
+        ):
+            target.bound_source = upstream
+
+        assert target.bound_source is source
+        assert target.last_modified == previous_modified
+        assert target.as_table().equals(source.as_table())
+
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_slot_binding_accepts_slot_free_source_and_unbinding(
+        self, tag_schema: Schema, data_schema: Schema, cached: bool
+    ) -> None:
+        from orcapod.core.sources.dict_source import DictSource
+        from orcapod.databases import InMemoryArrowDatabase
+
+        source = DictSource(
+            data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
+        )
+        binding = source.cached(InMemoryArrowDatabase()) if cached else source
+        target = SourceJobNode(
+            name="slot", tag_schema=tag_schema, data_schema=data_schema
+        )
+        target.bound_source = binding
+
+        assert target.bound_source is binding
+        assert target.as_table().equals(source.as_table())
+        target.bound_source = None
+        assert target.bound_source is None
 
     def test_bound_source_setter_clears_content_hash_cache(
         self, tag_schema, data_schema

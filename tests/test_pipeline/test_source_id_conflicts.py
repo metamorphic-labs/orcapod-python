@@ -210,6 +210,130 @@ def test_bound_proxy_uses_its_live_arrow_schema_for_collision_checks(
     assert "different schemas" not in message
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cached_bound_proxy_uses_the_live_derived_schema(reverse: bool) -> None:
+    origin = ArrowTableSource(
+        pa.table({"t1": ["a"], "t2": ["b"], "x": pa.array([1], type=pa.int32())}),
+        tag_columns=["t1", "t2"],
+        tag_only_columns=True,
+        infer_nullable=True,
+        source_id="origin",
+    )
+    first = DerivedSource(origin, tags_as_data={"t1": "copy"}, source_id="shared")
+    second = DerivedSource(origin, tags_as_data={"t2": "copy"}, source_id="shared")
+    assert first.content_hash() != second.content_hash()
+    proxy = SourceProxy(
+        first.source_id,
+        first.content_hash().to_string(),
+        first.pipeline_hash().to_string(),
+        *first.output_schema(),
+    )
+    cached = proxy.cached(InMemoryArrowDatabase())
+    assert cached.arrow_schemas[1].field("x").type == pa.int64()
+    proxy.bind(first)
+    assert first.arrow_schemas[1] == second.arrow_schemas[1]
+    assert first.arrow_schemas[1].field("x").type == pa.int32()
+
+    # Prebuilt projections get their own slots, so the two sources are compared
+    # without also colliding on a direct slot name.
+    projected = {
+        "left": cached.map_data({"x": "left_x"}),
+        "right": second.map_data({"x": "right_x"}),
+    }
+    with Pipeline("comparison") as pipeline:
+        for label in ("right", "left") if reverse else ("left", "right"):
+            projected[label].map_data({f"{label}_x": "out"}, label=label)
+    assert {"left", "right"} <= pipeline.nodes.keys()
+
+
+@pytest.mark.parametrize("cached_origin", [False, True])
+@pytest.mark.parametrize("same_arrow_type", [False, True])
+def test_tag_copy_uses_live_arrow_schema_after_proxy_binding(
+    cached_origin: bool, same_arrow_type: bool
+) -> None:
+    def origin(arrow_type: pa.DataType) -> ArrowTableSource:
+        return ArrowTableSource(
+            pa.table(
+                {
+                    "t1": pa.array([1], type=arrow_type),
+                    "t2": pa.array([2], type=arrow_type),
+                    "x": pa.array([3], type=arrow_type),
+                    "y": [4],
+                }
+            ),
+            tag_columns=["t1", "t2"],
+            tag_only_columns=True,
+            infer_nullable=True,
+            source_id="origin",
+        )
+
+    live = origin(pa.int32())
+    proxy = SourceProxy(
+        live.source_id,
+        live.content_hash().to_string(),
+        live.pipeline_hash().to_string(),
+        *live.output_schema(),
+    )
+    wrapped = proxy.cached(InMemoryArrowDatabase()) if cached_origin else proxy
+    first = DerivedSource(wrapped, tags_as_data={"t1": "copy"}, source_id="shared")
+    assert first.arrow_schemas[1].field("x").type == pa.int64()
+    captured_hash = first.content_hash()
+    proxy.bind(live)
+
+    second = DerivedSource(
+        origin(pa.int32() if same_arrow_type else pa.int64()),
+        tags_as_data={"t2": "copy"},
+        source_id="shared",
+    )
+    assert first.content_hash() != second.content_hash()
+    # Prebuilt projections separate the slot names so the guard compares the sources.
+    left = first.map_data({"x": "left_x"})
+    right = second.map_data({"x": "right_x"})
+    with Pipeline("comparison") as pipeline:
+        left.map_data({"left_x": "out"}, label="left")
+        if same_arrow_type:
+            right.map_data({"right_x": "out"}, label="right")
+        else:
+            with pytest.raises(InconsistentSourceError, match="different schemas"):
+                right.map_data({"right_x": "out"}, label="right")
+    assert "left" in pipeline.nodes
+    assert ("right" in pipeline.nodes) == same_arrow_type
+    assert first.content_hash() == captured_hash
+    assert first.arrow_schemas[1].field("x").type == pa.int64()
+
+
+@pytest.mark.parametrize("label", [None, "repeated"])
+def test_capture_distinguishes_repeated_step_labels(label: str | None) -> None:
+    name = label or "increment"
+    with Pipeline("repeated-steps") as pipeline:
+        increment.pod(_dict(1), label=label)
+        with pytest.raises(
+            InconsistentSourceError, match="distinct source objects"
+        ) as error:
+            increment.pod(_dict(2), label=label)
+    assert f"step {name!r} (occurrence 1)" in str(error.value)
+    assert f"step {name!r} (occurrence 2)" in str(error.value)
+    assert name in pipeline.nodes
+
+
+@pytest.mark.parametrize("graph_type", [Pipeline, PipelineJob])
+def test_same_slot_name_describes_distinct_derived_sources_with_equal_rows(
+    graph_type: type[Pipeline] | type[PipelineJob],
+) -> None:
+    origin = DictSource(
+        [{"t1": "a", "t2": "a", "x": 1, "y": 2}],
+        tag_columns=["t1", "t2"],
+        tag_only_columns=True,
+    )
+    first = DerivedSource(origin, tags_as_data={"t1": "copy"}, source_id="shared")
+    second = DerivedSource(origin, tags_as_data={"t2": "copy"}, source_id="shared")
+    assert first.as_table().equals(second.as_table())
+    with pytest.raises(SourceSlotNameCollisionError, match="2 distinct content hashes"):
+        with graph_type("collision"):
+            first.map_data({"x": "left_x"}, label="left")
+            second.map_data({"x": "right_x"}, label="right")
+
+
 def test_implicit_projection_conflict_names_both_function_steps() -> None:
     first = DictSource([{"x": 1, "y": 2}], source_id="shared")
     second = DictSource([{"x": 100, "y": 2}], source_id="shared")

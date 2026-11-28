@@ -1624,6 +1624,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         data_context: Optional data context override.
 
     Raises:
+        SourceSpecMismatchError: If *bound_source* does not fit the slot or depends
+            on a bindable source slot (ITL-1559).
         ValueError: If both *tag_schema* and *data_schema* are omitted and
             *bound_source* is ``None``.
     """
@@ -1637,6 +1639,9 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         data_context: str | contexts.DataContext | None = None,
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
+        from orcapod.pipeline.source_consistency import require_slot_free_binding
+
+        require_slot_free_binding(name, bound_source)
         if tag_schema is None or data_schema is None:
             if bound_source is None:
                 raise ValueError(
@@ -1731,10 +1736,14 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
 
         Raises:
             InconsistentSourceError: If the replacement introduces conflicting sources.
-            SourceSpecMismatchError: If *value* does not fit the declared schema.
+            SourceSpecMismatchError: If *value* does not fit the declared schema or
+                depends on a bindable source slot (ITL-1559).
         """
+        from orcapod.pipeline.source_consistency import require_slot_free_binding
+
         owner = self._binding_owner() if self._binding_owner is not None else None
         if owner is None:
+            require_slot_free_binding(self.name, value)
             self._bind(value)
             self._update_modified_time()
         else:
@@ -1749,7 +1758,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         return self._bound_source
 
     def _bind(self, value: StreamProtocol | None) -> None:
-        """Check and install a binding without a job-wide transaction.
+        """Check and install a binding once its independence from slots is checked.
 
         The binding the setter and ``__init__`` share. Only the setter stamps the slot
         as modified (ITL-1095): a node built with its source is not a rebinding.

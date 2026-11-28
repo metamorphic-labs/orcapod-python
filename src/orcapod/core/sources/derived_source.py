@@ -474,8 +474,14 @@ class DerivedSource(RootSource):
 
     @property
     def live_source_inputs(self) -> tuple[StreamProtocol, ...] | None:
-        """Tag copies over a source read it live. Job nodes give stored results."""
-        return (self._origin,) if isinstance(self._origin, RootSource) else None
+        """Expose live origins while treating stored-result job nodes as leaves."""
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        return (
+            (self._origin,)
+            if isinstance(self._origin, (RootSource, SourceJobNode))
+            else None
+        )
 
     def _origin_records(self) -> "pa.Table | None":
         """Return the origin's rows, or ``None`` when a job node has none stored.
@@ -577,7 +583,21 @@ class DerivedSource(RootSource):
         the origin stores rows. Rows read later must have these types
         (``_origin_records``).
         """
-        table = self._empty_origin_table()
+        return self._arrow_schemas_from_origin_table(self._empty_origin_table())
+
+    def _arrow_schemas_from_origin(
+        self, tags: pa.Schema, data: pa.Schema
+    ) -> tuple[pa.Schema, pa.Schema]:
+        """Apply the tag copies to a live origin's schema for source registration."""
+        fields = {field.name: field for field in (*tags, *data)}
+        return self._arrow_schemas_from_origin_table(
+            pa.schema(fields.values()).empty_table()
+        )
+
+    def _arrow_schemas_from_origin_table(
+        self, table: pa.Table
+    ) -> tuple[pa.Schema, pa.Schema]:
+        """Project the derived tag and data schemas from an origin's empty table."""
         for tag, name in (self._tags_as_data or {}).items():
             table = table.append_column(
                 table.schema.field(tag).with_name(name), table.column(tag)
