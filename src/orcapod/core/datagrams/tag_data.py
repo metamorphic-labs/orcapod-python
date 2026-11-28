@@ -809,7 +809,14 @@ class Data(Datagram):
     ) -> Self:
         """Create a copy with updated source-information entries.
 
-        A Python replacement uses the row's held Arrow type when available.
+        A Python replacement of a token whose column the row holds as Arrow (a
+        row read from a table) is written under that held type, and one that
+        does not fit it is refused: a list for a string, a string for a list, a
+        wrong depth, a null item where the item field is required, and ``None``
+        for a list type (a list token is never null). ``None`` under a held
+        string type is a ``large_string`` null, in ``as_table`` and in
+        ``source_info_table`` alike. Only a row with no Arrow token column for
+        the name types the token from its value.
         A token whose column type is known (an operator that
         derives a token from its input's, as ``Index`` does) is given as an
         Arrow scalar of that type, and keeps it (ITL-1491). If both spellings of
@@ -839,13 +846,14 @@ class Data(Datagram):
                 name = f"{constants.SOURCE_PREFIX}{key}"
                 typed = self._typed_source_info
                 if typed is not None and name in typed.column_names:
-                    typed_given[key] = pa.chunked_array(
-                        [
-                            arrow_utils.source_info_replacement(
-                                token, typed.schema.field(name).type
-                            )
-                        ]
-                    )
+                    try:
+                        replacement = arrow_utils.source_info_replacement(
+                            token, typed.schema.field(name).type
+                        )
+                    except (pa.ArrowInvalid, pa.ArrowTypeError) as error:
+                        error.add_note(f"Replacing source-info column {name!r}")
+                        raise
+                    typed_given[key] = pa.chunked_array([replacement])
             current[key] = token
         new_p = self.copy(include_cache=False)
         new_p._source_info = current

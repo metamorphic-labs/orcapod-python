@@ -1003,8 +1003,15 @@ def source_info_replacement(
         An array of the declared type.
 
     Raises:
-        pa.ArrowTypeError: If a token cannot fit the declaration.
+        pa.ArrowTypeError: If a token cannot fit the declaration, also a null
+            given for a list type: a list token is never null.
     """
+    if token is None and isinstance(
+        kind, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)
+    ):
+        raise pa.ArrowTypeError(
+            f"A list token is never null: no null replacement for type {kind}"
+        )
 
     def require_fit(value: SourceInfoValue, data_type: "pa.DataType") -> None:
         """Check nested nullability and reject strings that Arrow would split."""

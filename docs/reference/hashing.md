@@ -1301,9 +1301,19 @@ type. So a function node reads the same token types from its input on the sync a
 async path, and a row has one instance id whichever path recorded it first.
 
 A token is typed from its value only where it is first created and no Arrow type exists: a
-row built by hand from Python values (`Data(..., source_info=...)`, `with_source_info` given
-a Python value), and the string tokens Orcapod itself creates (a source's, a function
-output's, `Pick`'s, a placeholder's), which are `large_string`.
+row built by hand from Python values (`Data(..., source_info=...)`, or `with_source_info`
+given a Python value for a column the row holds no Arrow token column for), and the string
+tokens Orcapod itself creates (a source's, a function output's, `Pick`'s, a placeholder's),
+which are `large_string`.
+
+A row read from an Arrow table holds its token columns' types, and a Python replacement
+(`Data(table, source_info=...)`, `with_source_info`) is written under the held type: the
+list item's name, nullability and metadata are kept, and the type is never worked out again
+from the value. A replacement that does not fit the held type is refused: a string for a
+list, a list for a string, a wrong depth, a null item where the item field is required, and
+`None` for a list type (a list token is never null). `None` under a held string type is a
+`large_string` null, in `as_table(columns={"source": True})` and in `source_info_table()`
+alike.
 
 #### The shape of a source-info token column
 
@@ -1398,7 +1408,11 @@ the user's, whatever it looks like.
 
 Record batches of one stream declare one token type, compared strictly (list kind, depth,
 and each item field's name, nullability and metadata), so the order of the batches never
-decides a type.
+decides a type. The token type the stream of an output channel declares binds every batch
+sent into it, the first batch and an empty batch included: a batch that declares another
+type for that column (other item metadata is enough) is refused, never taken as the
+stream's new type. The first batch settles a token column's type only where the stream
+declares none for it.
 
 The placeholder of an ephemeral result that is gone (`EmptyData`) carries tokens too: for each
 output of the function, a real output's token with the sentinel `EPHEMERAL_RESULT_GONE`

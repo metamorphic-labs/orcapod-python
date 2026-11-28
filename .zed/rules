@@ -1130,9 +1130,16 @@ these preimages anywhere else.
   list layer removed, as an Arrow scalar (`with_source_info` keeps a scalar's type). The
   one exception: a token is typed from its value (`arrow_utils.source_info_arrow_type`)
   only where it is first created and no Arrow type exists: a `Data` built by hand from
-  Python values or given a Python value by `with_source_info`, and the string tokens
-  Orcapod itself creates (a source's, a function output's, `Pick`'s, `Index`'s over a
-  string token, a placeholder's).
+  Python values, or given a Python value by `with_source_info` for a column it holds no
+  Arrow token column for, and the string tokens Orcapod itself creates (a source's, a
+  function output's, `Pick`'s, `Index`'s over a string token, a placeholder's). A Python
+  replacement on an Arrow-backed row (`Data(table, source_info=...)`, `with_source_info`)
+  is written under the token type the row holds, item name, nullability and metadata
+  kept, never typed from its value (ITL-1557; one rule,
+  `arrow_utils.source_info_replacement`): a value that does not fit is refused (a string
+  for a list, a list for a string, a wrong depth, a null item under a required item
+  field, and `None` for a list type, since a list token is never null); `None` under a
+  held string type is a `large_string` null, in `as_table` and `source_info_table` alike.
 - **A token's shape is its data's shape** (developer, November 27, 2026, ITL-1491). A token
   column's type is some list layers on top of `large_string`. Those layers must match
   EXACTLY the outer list layers of its data column's type, kind for kind: a `large_list`
@@ -1210,7 +1217,11 @@ these preimages anywhere else.
   type, compared strictly (`settle_token_types`: list kind, depth, and each item field's
   name, nullability and metadata), so the order of the batches never decides a type; a
   batch that declares another is refused, and a streaming-join kernel holds every batch to
-  its input stream's token type. A token column may carry metadata on a list's item field,
+  its input stream's token type. The first-batch rule (ITL-1557): the token type an output
+  channel's stream declares (`declared_token_types`) binds every batch sent into it, the
+  first and an empty one included, so a batch never replaces a declared token type (item
+  metadata included); the first batch settles a token column's type only where the stream
+  declares none for it. A token column may carry metadata on a list's item field,
   as its stream declares it.
 - The instance id reads a row's tokens through `DataProtocol.source_info_table()`: the typed
   columns the row carries, every field nullable; a null token is a `large_string` null, for

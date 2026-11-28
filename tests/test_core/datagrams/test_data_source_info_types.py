@@ -120,3 +120,34 @@ def test_python_token_replacement_uses_the_held_type(
         pa.field("_source_x", kind, nullable=True), check_metadata=True
     )
     assert updated["_source_x"].to_pylist() == [replacement]
+
+
+def test_a_null_replacement_agrees_with_the_held_string_type() -> None:
+    """Fifth review of PR #607, finding 2: ``with_source_info(x=None)`` on an
+    Arrow-backed row whose token column is a string gives one declaration, a
+    ``large_string`` null, in ``as_table`` and in ``source_info_table``."""
+    table = pa.table({"x": [1], "_source_x": pa.array(["old"], type=pa.large_string())})
+    cleared = Data(table).with_source_info(x=None)
+    expected = pa.field("_source_x", pa.large_string(), nullable=True)
+    shown = cleared.as_table(columns={"source": True})
+    for held in (shown, cleared.source_info_table()):
+        assert held.schema.field("_source_x").equals(expected, check_metadata=True)
+        assert held["_source_x"].to_pylist() == [None]
+
+
+def test_a_null_replacement_of_a_held_list_token_is_refused() -> None:
+    """Fifth review of PR #607, finding 2: a list token is never null, so
+    ``with_source_info(x=None)`` on an Arrow-backed row whose token column is a
+    list is refused. It used to give the row two declarations: a null list in
+    ``as_table`` and a ``large_string`` null in ``source_info_table``."""
+    kind = pa.large_list(
+        pa.field("leaf", pa.large_string(), nullable=True, metadata={b"u": b"t"})
+    )
+    table = pa.table({"x": [[1]], "_source_x": pa.array([["old"]], type=kind)})
+    row = Data(table)
+    with pytest.raises(pa.ArrowTypeError, match="list token is never null"):
+        _ = row.with_source_info(x=None)
+    # The row is unchanged, and its two forms agree with the held type.
+    for held in (row.as_table(columns={"source": True}), row.source_info_table()):
+        assert held.schema.field("_source_x").type.equals(kind, check_metadata=True)
+        assert held["_source_x"].to_pylist() == [["old"]]
