@@ -139,6 +139,18 @@ class ListLogicalType(BaseLogicalType):
 
     binds_python_type: bool = True
 
+    # These fixed encoders return sortable strings or bytes. Keep their native
+    # sort, including the existing behavior for aliases of the same stored value.
+    _NATIVE_SORT_TYPES = frozenset(
+        (
+            "orcapod.path",
+            "orcapod.upath",
+            "orcapod.uuid",
+            "orcapod.file",
+            "orcapod.directory",
+        )
+    )
+
     def __init__(
         self,
         element_logical_type: "LogicalTypeProtocol | ArrowElement",
@@ -146,6 +158,10 @@ class ListLogicalType(BaseLogicalType):
         is_set: bool = False,
     ) -> None:
         self._is_set = is_set
+        self._uses_native_sort = (
+            not isinstance(element_logical_type, ArrowElement)
+            and element_logical_type.logical_type_name in self._NATIVE_SORT_TYPES
+        )
         self._arrow_ext: pa.ExtensionType | None = None
         self._polars_ext: pl.BaseExtension | None = None
 
@@ -336,16 +352,15 @@ class ListLogicalType(BaseLogicalType):
 
     def python_to_storage(
         self, value: Any, converter: TypeConverterProtocol | None
-    ) -> list:
+    ) -> list | pa.Array[Any]:
         """Convert a Python list or set to its Arrow storage representation.
 
         Delegates per-element conversion to ``converter.python_to_storage`` using
         the element Python type. If ``value`` is ``None``, returns an empty list.
 
-        For ``set[T]`` (``is_set=True``), the storage values are put in the canonical
-        order of ``canonical_order.sort_set_elements``, whatever order the set iterates
-        in. Struct fields are compared in declared order and list items in sequence,
-        recursively (ITL-922).
+        A set of user-registered logical values is ordered after encoding into
+        Arrow storage. Struct fields are compared in declared order and list
+        items in sequence, recursively (ITL-922).
 
         Args:
             value: A Python list (or set) of elements of type ``element_python_type``,
@@ -353,8 +368,8 @@ class ListLogicalType(BaseLogicalType):
             converter: The active ``TypeConverterProtocol`` for per-element delegation.
 
         Returns:
-            A plain Python list of storage values suitable for Arrow large_list storage.
-            For set semantics the list is sorted.
+            A Python list or Arrow array suitable for Arrow large_list storage.
+            For set semantics the elements are sorted.
 
         Raises:
             CanonicalOrderError: For a NaN at any depth, elements that cannot be
@@ -369,11 +384,18 @@ class ListLogicalType(BaseLogicalType):
                 converter.python_to_storage(item, self._element_python_type)
                 for item in value
             ]
-        if self._is_set:
+        if not self._is_set:
+            return elements
+        if self._uses_native_sort:
+            return sorted(elements)
+        if self._element_logical_type is None:
             from orcapod.semantic_types.canonical_order import sort_set_elements
 
-            return sort_set_elements(elements, self._storage_type.value_type)
-        return elements
+            return sort_set_elements(elements)
+
+        from orcapod.semantic_types.canonical_order import ordered_set_storage
+
+        return ordered_set_storage(elements, self._storage_type.value_type)
 
     def storage_to_python(
         self, storage_value: Any, converter: TypeConverterProtocol | None

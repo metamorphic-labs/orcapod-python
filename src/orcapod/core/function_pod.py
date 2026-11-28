@@ -1576,9 +1576,7 @@ class FunctionPodStream(StreamBase):
             all_data, python_schema=python_schema
         )
         all_tags_as_tables = arrow_utils.concat_tables_by_name(tag_tables)
-        all_data_as_tables: pa.Table = pa.Table.from_pylist(
-            struct_data, schema=data_schema
-        )
+        all_data_as_tables = arrow_utils.table_from_storage(struct_data, data_schema)
         return arrow_utils.hstack_tables(all_tags_as_tables, all_data_as_tables)
 
     def as_table(

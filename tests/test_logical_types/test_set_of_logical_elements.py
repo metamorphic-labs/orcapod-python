@@ -20,9 +20,13 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from random import Random
+from typing import Any, Never, cast
 
+import numpy as np
 import polars as pl
 import pyarrow as pa
 import pydantic
@@ -39,6 +43,10 @@ from orcapod.logical_types.protocols import TypeConverterProtocol
 from orcapod.logical_types.registry import (
     make_arrow_extension_type,
     make_polars_extension_type,
+)
+from orcapod.semantic_types.canonical_order import (
+    ordered_set_storage,
+    sort_set_elements,
 )
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 from orcapod.sources import DictSource
@@ -581,3 +589,224 @@ print(json.dumps([_stored(source), _row_hashes(source)]))
     ]
     assert results[0] == results[1]
     assert results[0][0] == {"site0": _SAMPLE_STORAGE}
+
+
+@dataclasses.dataclass(frozen=True)
+class StoredDay:
+    """Datetime inputs to this class lose their time of day on write."""
+
+    z: date
+    a: str
+
+
+@dataclasses.dataclass(frozen=True)
+class StoredSingle:
+    """Different Python floats can round to the same float32."""
+
+    z: np.float32
+    a: str
+
+
+@pytest.mark.parametrize(
+    "element, first, second",
+    [
+        (StoredDay, datetime(2026, 1, 1, 1), datetime(2026, 1, 1, 2)),
+        (StoredSingle, float(2**24), float(2**24 + 1)),
+    ],
+)
+def test_duplicates_after_arrow_coercion_are_refused(
+    element: Any, first: Any, second: Any
+) -> None:
+    """Refuse values that only become equal once written into the declared type."""
+    values = {element(first, "a"), element(second, "a")}
+    assert len(values) == 2
+    with pytest.raises(CanonicalOrderError, match=r"Column 's': .*duplicate"):
+        _source([values], element).as_table()
+
+
+def test_ties_after_arrow_coercion_use_the_next_field_and_keep_the_hash() -> None:
+    """Re-encoding the stored float32 values preserves both order and content hash."""
+    values = {
+        StoredSingle(cast(Any, float(2**24)), "z"),
+        StoredSingle(cast(Any, float(2**24 + 1)), "a"),
+    }
+    source = _source([values], StoredSingle)
+    _, row = next(iter(source.iter_data()))
+    assert row.update(s=row["s"]).content_hash() == row.content_hash()
+    assert [item["a"] for item in _stored(source)["site0"]] == ["a", "z"]
+
+
+def test_stored_string_order_ignores_a_subclass_comparator() -> None:
+    """Compare the stored text in code point order even if the inputs disagree."""
+
+    comparisons = 0
+
+    class ReverseText(str):
+        @override
+        def __lt__(self, other: str) -> bool:
+            nonlocal comparisons
+            comparisons += 1
+            return str.__gt__(self, other)
+
+    original = _source(
+        [{ExactPoint(1, ReverseText(s)) for s in ("a", "z")}], ExactPoint
+    )
+    plain = _source([{ExactPoint(1, s) for s in ("a", "z")}], ExactPoint)
+    assert _stored(original) == _stored(plain)
+    assert _row_hashes(original) == _row_hashes(plain)
+    assert comparisons == 0
+
+
+def test_builtin_scalar_sets_skip_generic_ordering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The five built-ins keep the single native sort of their storage values."""
+
+    def unexpected(*_args: object, **_kwargs: object) -> Never:
+        pytest.fail("a built-in scalar set entered generic canonical ordering")
+
+    monkeypatch.setattr(
+        "orcapod.semantic_types.canonical_order.sort_set_elements", unexpected
+    )
+    for name in ("b", "a"):
+        (tmp_path / name).write_text(name)
+        (tmp_path / f"{name}-dir").mkdir()
+    for element, values in (
+        (Path, {Path("/b"), Path("/a")}),
+        (UPath, {UPath("s3://b/x"), UPath("s3://a/y")}),
+        (uuid.UUID, {uuid.UUID(int=2), uuid.UUID(int=1)}),
+        (op.File, {op.File(tmp_path / name) for name in ("a", "b")}),
+        (op.Directory, {op.Directory(tmp_path / name) for name in ("a-dir", "b-dir")}),
+    ):
+        stored = _stored(_source([values], element))["site0"]
+        assert len(stored) == 2
+        assert stored == sorted(stored)
+
+
+@pytest.mark.parametrize(
+    "storage_type, kind",
+    [
+        (pa.bool_(), "bool"),
+        *((type_(), "signed") for type_ in (pa.int8, pa.int16, pa.int32, pa.int64)),
+        *(
+            (type_(), "unsigned")
+            for type_ in (pa.uint8, pa.uint16, pa.uint32, pa.uint64)
+        ),
+        *((type_(), "float") for type_ in (pa.float16, pa.float32, pa.float64)),
+        *(
+            (type_(8, 2), "decimal")
+            for type_ in (pa.decimal32, pa.decimal64, pa.decimal128, pa.decimal256)
+        ),
+        *((type_(), "text") for type_ in (pa.string, pa.large_string, pa.string_view)),
+        *(
+            (type_(), "binary")
+            for type_ in (pa.binary, pa.large_binary, pa.binary_view)
+        ),
+        (pa.binary(4), "binary"),
+        (pa.date32(), "date"),
+        (pa.date64(), "date"),
+        (pa.time32("ms"), "time"),
+        (pa.time64("ns"), "time"),
+        (pa.timestamp("ms"), "timestamp"),
+        (pa.timestamp("ns", "America/New_York"), "zoned timestamp"),
+        (pa.duration("us"), "duration"),
+        (pa.duration("ns"), "duration"),
+        (pa.null(), "null"),
+    ],
+    ids=lambda value: str(value),
+)
+def test_arrow_scalar_storage_order_matches_primitive_order(
+    storage_type: pa.DataType, kind: str
+) -> None:
+    """Arrow's sort on each scalar storage kind follows the primitive order."""
+    random = Random(922)
+    numbers = random.sample(range(1, 120), 40)
+    if kind == "bool":
+        values = [False, True]
+    elif kind == "signed":
+        values = [n - 60 for n in numbers]
+    elif kind == "unsigned":
+        values = numbers
+    elif kind == "float":
+        # Half-floats need NumPy scalars on the input path.
+        values = [np.float16((n - 60) / 7) for n in numbers]
+        values.extend([np.float16(-np.inf), np.float16(np.inf)])
+    elif kind == "decimal":
+        values = [Decimal(n - 60).scaleb(-2) for n in numbers]
+    elif kind == "text":
+        values = [random.choice("éÅ𝄞𐀀aZ\x00") + chr(n) for n in numbers]
+        values.extend(["", "a", "a\x00", "e\u0301", "é"])
+    elif kind == "binary":
+        values = [n.to_bytes(2, "big") + random.randbytes(2) for n in numbers]
+        values.extend([b"\x00\x00\x00\x00", b"\xff\xff\xff\xff"])
+    elif kind == "date":
+        values = [date(2026, 1, 1) + timedelta(days=n - 60) for n in numbers]
+    elif kind == "time":
+        values = [time(n % 24, n % 60, microsecond=n * 1000) for n in numbers]
+    elif kind == "timestamp" or kind == "zoned timestamp":
+        start = datetime(2026, 11, 1, 4)
+        if kind == "zoned timestamp":
+            start = start.replace(tzinfo=timezone.utc)
+        # Span a repeated local hour in the zoned Arrow storage.
+        values = [start + timedelta(minutes=n * 3) for n in numbers]
+    elif kind == "duration":
+        values = [timedelta(microseconds=n - 60) for n in numbers]
+    else:
+        assert kind == "null"
+        values = []
+    shuffled: list[Any] = [*values, None]
+    random.shuffle(shuffled)
+    array = cast("pa.Array[Any]", pa.array(shuffled, type=storage_type))
+    stored = array.to_pylist()
+    expected = sort_set_elements(stored)
+    assert ordered_set_storage(shuffled, storage_type).to_pylist() == expected
+
+
+def test_arrow_struct_null_is_distinct_from_a_struct_of_nulls() -> None:
+    """Flattening a struct preserves the validity of the struct itself."""
+    shape = pa.struct([("z", pa.struct([("n", pa.int64())])), ("a", pa.string())])
+    values = [
+        {"z": {"n": 0}, "a": "a"},
+        {"z": {"n": None}, "a": "a"},
+        {"z": None, "a": "z"},
+        None,
+    ]
+    assert ordered_set_storage(values, shape).to_pylist() == values[::-1]
+
+
+def test_nested_list_order_preserves_arrow_temporal_precision() -> None:
+    """List comparison keys use stored nanoseconds even below Python's precision."""
+    shape = pa.struct([("z", pa.list_(pa.time64("ns"))), ("a", pa.string())])
+    values = [{"z": [3], "a": "a"}, {"z": [2], "a": "z"}]
+    assert ordered_set_storage(values, shape).equals(pa.array(values[::-1], type=shape))
+
+
+def test_arrow_set_order_ties_signed_zero_in_nested_lists() -> None:
+    """Zeros with opposite signs are equal storage keys even inside lists."""
+    shape = pa.struct([("z", pa.list_(pa.float64()))])
+    with pytest.raises(CanonicalOrderError, match="duplicate"):
+        ordered_set_storage([{"z": [-0.0]}, {"z": [0.0]}], shape)
+
+
+def test_encoded_struct_set_column_keeps_null_and_empty_rows() -> None:
+    """Assemble typed set storage directly while keeping row offsets and validity."""
+    converter = get_default_context().type_converter
+    values = [
+        None,
+        {ExactPoint(10, "a"), ExactPoint(2, "z")},
+        set(),
+        {ExactPoint(3, "b")},
+    ]
+    table = converter.python_dicts_to_arrow_table(
+        [{"s": value, "i": i} for i, value in enumerate(values)],
+        python_schema={"s": set[ExactPoint] | None, "i": int},
+    )
+    array = table["s"].combine_chunks()
+    assert isinstance(array, pa.ExtensionArray)
+    assert array.storage.to_pylist() == [
+        None,
+        [{"a": 2, "b": "z"}, {"a": 10, "b": "a"}],
+        [],
+        [{"a": 3, "b": "b"}],
+    ]
+    assert table["i"].to_pylist() == [0, 1, 2, 3]

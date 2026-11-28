@@ -1245,3 +1245,24 @@ class TestSubclassOnlyFieldsDownstream:
         store = InMemoryArrowDatabase()
         assert self._run(store, (20,), AsyncPipelineOrchestrator) == {"r20": 20}
         assert self._run(store, (20, 99), second_cls) == {"r20": 20, "r99": 20}
+
+
+@pytest.mark.parametrize(
+    "annotation, value, container, declared",
+    [
+        (dict[float, int], {float("nan"): 1}, "dict", "dict[float, int]"),
+        (set[float], {float("nan")}, "set", "set[float]"),
+    ],
+)
+def test_primitive_unordered_output_keeps_output_type_error(
+    annotation: Any, value: Any, container: str, declared: str
+) -> None:
+    """An unordered primitive output retains its public conversion diagnostic."""
+    stream = make_pod(annotation, value, name="nan_output").pod(make_source())
+    with pytest.raises(errors.OutputTypeError) as raised:
+        list(stream.iter_data())
+    assert str(raised.value) == (
+        f"Function 'nan_output' returned {container} for output 'y', "
+        f"which is declared {declared}: CanonicalOrderError. "
+        "The output does not conform; convert the value in the function."
+    )

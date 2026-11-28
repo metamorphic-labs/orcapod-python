@@ -29,7 +29,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
 )
 from orcapod.core.result_cache import ResultCache
 from orcapod.errors import (
-    CanonicalOrderError,
+    LogicalSetCanonicalOrderError,
     NoOutputsDeclaredError,
     OutputContainerTypeError,
     OutputTypeError,
@@ -1109,7 +1109,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             The one-row table, typed by the declared schema.
 
         Raises:
-            CanonicalOrderError: If an output's unordered container has no canonical
+            LogicalSetCanonicalOrderError: If an output's logical set has no canonical
                 storage order. The converter names the column.
             OutputTypeError: If an output cannot be converted, for example an integer
                 out of range for its declared width, a ``datetime`` without a time zone
@@ -1120,7 +1120,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             return converter.python_dicts_to_arrow_table(
                 [output_data], python_schema=output_schema
             )
-        except CanonicalOrderError:
+        except LogicalSetCanonicalOrderError:
             raise
         except Exception as exc:
             # Find the output that fails on its own, so the error can name it.

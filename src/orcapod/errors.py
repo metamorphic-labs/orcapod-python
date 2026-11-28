@@ -77,6 +77,10 @@ class CanonicalOrderError(ValueError):
     """
 
 
+class LogicalSetCanonicalOrderError(CanonicalOrderError):
+    """Raised when the Arrow storage of a logical set has no canonical order."""
+
+
 class UnsupportedValueError(ValueError):
     """A value cannot be stored by the logical type of its column.
 

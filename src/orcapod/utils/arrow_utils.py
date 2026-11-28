@@ -37,6 +37,68 @@ def make_empty_table(
     return pa.Table.from_batches([], schema=arrow_schema)
 
 
+def table_from_storage(
+    rows: list[dict[str, Any]], schema: pa.Schema | None
+) -> pa.Table:
+    """Build a table, reusing the encoded elements of top-level logical sets.
+
+    Rows otherwise follow Arrow's ``Table.from_pylist`` conventions. Building a
+    large-list column from offsets avoids passing each encoded element back
+    through a Python scalar when Arrow appends a list value.
+    """
+    if schema is None:
+        return pa.Table.from_pylist(rows)
+    encoded_columns: dict[int, pa.Array[Any]] = {}
+    for index, field in enumerate(schema):
+        kind = field.type
+        if not isinstance(kind, pa.ExtensionType) or not kind.extension_name.startswith(
+            "set["
+        ):
+            continue
+        storage_type = kind.storage_type
+        if not isinstance(storage_type, pa.LargeListType):
+            continue
+        first = next(
+            (value for row in rows if (value := row.get(field.name)) is not None),
+            None,
+        )
+        if not isinstance(first, pa.Array) or first.type != storage_type.value_type:
+            continue
+        values = [row.get(field.name) for row in rows]
+        if not all(
+            value is None
+            or (isinstance(value, pa.Array) and value.type == storage_type.value_type)
+            for value in values
+        ):
+            continue
+        arrays: list[pa.Array[Any]] = []
+        offsets = [0]
+        for value in values:
+            if value is not None:
+                arrays.append(value)
+            offsets.append(offsets[-1] + (len(value) if value is not None else 0))
+        elements = arrays[0] if len(arrays) == 1 else pa.concat_arrays(arrays)
+        mask = pa.array([value is None for value in values])
+        storage = pa.LargeListArray.from_arrays(
+            pa.array(offsets, type=pa.int64()), elements, type=storage_type, mask=mask
+        )
+        encoded_columns[index] = pa.ExtensionArray.from_storage(kind, storage)
+
+    if not encoded_columns:
+        return pa.Table.from_pylist(rows, schema=schema)
+    other_schema = pa.schema(
+        field for index, field in enumerate(schema) if index not in encoded_columns
+    )
+    other_columns = iter(pa.Table.from_pylist(rows, schema=other_schema).itercolumns())
+    return pa.Table.from_arrays(
+        [
+            encoded_columns[index] if index in encoded_columns else next(other_columns)
+            for index in range(len(schema))
+        ],
+        schema=schema,
+    )
+
+
 def schema_select(
     arrow_schema: "pa.Schema",
     column_names: Collection[str],

@@ -1296,9 +1296,7 @@ class UniversalTypeConverter:
                         converted_record[field_name] = converter(record[field_name])
                     except CanonicalOrderError as exc:
                         # The ordering rule cannot say which column it was in.
-                        raise CanonicalOrderError(
-                            f"Column {field_name!r}: {exc}"
-                        ) from exc
+                        raise type(exc)(f"Column {field_name!r}: {exc}") from exc
                     except UnsupportedValueError as exc:
                         # The value's own type cannot say which column it was in.
                         raise UnsupportedValueError(
@@ -1400,7 +1398,7 @@ class UniversalTypeConverter:
         )
 
         # TODO: add more helpful message here
-        return pa.Table.from_pylist(struct_dicts, schema=arrow_schema)
+        return arrow_utils.table_from_storage(struct_dicts, arrow_schema)
 
     def arrow_table_to_python_dicts(
         self, arrow_table: pa.Table
