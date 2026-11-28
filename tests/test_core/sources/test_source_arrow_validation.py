@@ -247,7 +247,7 @@ def test_refuses_field_metadata_on_custom_system_tags(
         _source(kind, table, tmp_path, monkeypatch, system_tag_columns=names)
 
 
-def test_metadata_free_custom_system_tag_keeps_its_existing_row_ids() -> None:
+def test_metadata_free_custom_system_tag_pins_its_row_ids() -> None:
     schema = pa.schema(
         [
             pa.field("k", pa.int64(), False),
@@ -281,17 +281,17 @@ def test_metadata_free_custom_system_tag_keeps_its_existing_row_ids() -> None:
         instance = instance_id(hasher, tag, data)
         record = record_id(hasher, source.content_hash(), instance, UUID(int=40))
         actual.append((entry.to_hex(), instance.to_hex(), record.to_hex()))
-    # The metadata-free source's hashes at 969ed093.
+    # The entry IDs predate pdb_v3. The instance and record IDs use its input fields.
     assert actual == [
         (
             "00000266ff2e58dd5c1cb957ac9ff249ae13e17918a263847f8e2f65d756f746b3f561",
-            "000002e9be964a36d499b5a1efe697c53d9b7e2e0103b79be7b0e2d489c1be8f7b8636",
-            "00000279f295215ecb6c92fc49cf4ec41df41327a43c3b351f0baac467b4f45a0f33d2",
+            "000002901df30a2ba140f32dbf43fec67d5d05b93d43bdb713c5ee9da604df0fba61fe",
+            "00000230cd4fe35505c96c89980db40437e444042e52df8f0117521f7f55ceb651db3b",
         ),
         (
             "0000029689a4a738cf93bbcfde75085dc43bac31570b0b368eff34b0f3d0fa427769c1",
-            "000002b6b64a14a2bb8cc662759a15839f8e4e730c89a03230bb8cac2f951fbe8f2002",
-            "000002fb3fc3affffe0e390dcfb5695db61b332eb2d38f83c2cfab5570c8a956371e18",
+            "0000023448cf6a0cceaa94adcfbf1b67e743d3cb08b4dc57f8dc43e2f26a7cc266bfa6",
+            "00000230008bd2bc72708ead139fe14cac0fe8107521cfc70089cc44c3b43e0d7a9df9",
         ),
     ]
 
