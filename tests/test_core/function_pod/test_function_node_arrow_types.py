@@ -22,6 +22,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.contexts import resolve_context
+from orcapod.core.function_pod import _token_rows  # pyright: ignore[reportPrivateUsage]  # test the row-to-table boundary
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.pipeline import AsyncPipelineOrchestrator
@@ -30,6 +31,21 @@ from orcapod.utils import arrow_utils
 
 _T0 = dt.datetime(2026, 3, 24, 17, 54, 17)
 _DAYS = [_T0 + dt.timedelta(days=i) for i in range(3)]
+
+
+def test_function_table_refuses_conflicting_token_item_metadata() -> None:
+    item = pa.field("item", pa.large_string(), metadata={b"origin": b"declared"})
+    declared = pa.large_list(item)
+    different = pa.large_list(item.remove_metadata())
+    first = pa.table({"_source_x": pa.array([["a"]], type=declared)})
+    second = pa.table({"_source_x": pa.array([["b"]], type=different)})
+    with pytest.raises(InputValidationError, match=r"disagree on token '_source_x'"):
+        _ = _token_rows([first, second])
+    assert (
+        _token_rows([first, first])
+        .schema.field("_source_x")
+        .type.equals(declared, check_metadata=True)
+    )
 
 
 def _logical(py_type: type, values: list[Any]) -> pa.Array[Any]:

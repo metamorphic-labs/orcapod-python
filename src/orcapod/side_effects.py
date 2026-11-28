@@ -330,12 +330,12 @@ def _table_of_rows(
         )
         if column_config.context:
             parts.append(pa.schema([context_key_field()]).empty_table())
-        # A row's data table declares every source-info field nullable
-        # (``Data.as_table``), and the rows' table is those tables concatenated.
         source_table = typed.select(source_info)
-        nullable = pa.schema([f.with_nullable(True) for f in source_table.schema])
-        # Same arrays, new field flags: no cast.
-        parts.append(pa.Table.from_arrays(source_table.columns, schema=nullable))
+        source_schema = pa.schema(
+            arrow_utils.source_info_field(field.name, field.type)
+            for field in source_table.schema
+        )
+        parts.append(pa.Table.from_arrays(source_table.columns, schema=source_schema))
         full = arrow_utils.hstack_tables(*parts)
     else:
         # No rows and no Arrow types without them: the declared columns, with the

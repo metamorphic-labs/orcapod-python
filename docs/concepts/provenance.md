@@ -130,6 +130,44 @@ print([(label, run.computed_here) for label, run in trace.function_runs()])
 # [('per_animal', True), ('scores', False), ('scores', True)]
 ```
 
+## The shape of a token
+
+A value's token has the shape of the value. You see tokens in the `_source_<column>`
+columns (`stream.as_table(columns={"source": True})`).
+
+- **A plain token fits any value.** A source gives every value one token, a string
+  (`large_string`), whatever the value is: a number, a text, a list, an array. A function
+  gives each value it returns one token too. A plain token may be missing (null).
+- **A list of tokens needs a list of values.** `Batch`, `GroupBy` and `MergeJoin` put
+  several rows' values into one list, and their tokens into a list beside it, one token per
+  member, in the same order: values `[0.8, 0.3]` with tokens
+  `["scores::...::accuracy", "scores::...::accuracy"]`. After two such steps both are lists
+  of lists.
+- **The values may be deeper than their tokens.** A source column that holds lists has one
+  plain token per value, so after a `Batch` its values are lists of lists and its tokens a
+  list of plain tokens.
+- **A list of tokens is never missing, at any level; only a token inside the innermost
+  list may be.** A batch of three rows of which one has no token gives
+  `["a::row_0::x", null, "a::row_2::x"]`. In a list of lists of tokens, `[null, ["a"]]` is
+  not valid: the missing inner list would have to be a list, `[[], ["a"]]` or
+  `[[null], ["a"]]`.
+
+Orcapod's sources, operators and functions always keep these rules. They matter when you
+build a table with `_source_*` columns by hand and hand it to `ArrowTableStream`: a list
+token over a value that is not a list, a list of another kind (a fixed-size list of tokens
+needs a fixed-size list of values of the same size), more list levels in the token than in
+the value, a token that is not text, or a missing list of tokens at any level is refused with
+`InputValidationError`, which names the token column, its data column and both types.
+
+One case reaches ordinary pipelines. A `Batch` of single values and a source that already
+holds lists of them have the same values but different tokens: a list of tokens (one per
+member) in the first, one plain token per list in the second. A `Join` on such a column as
+a data-tag, or a `MergeJoin` of it, refuses the two inputs and names the token column and
+both types. Bring both inputs to one form before the join: batch both, or neither.
+Whether the two forms should join is an open question (ITL-1522). The Arrow types, with a table of what is
+accepted and refused, are in
+[the hashing reference](../reference/hashing.md#the-shape-of-a-source-info-token-column).
+
 ## When there is nothing to trace
 
 An operator or function node shows only the rows of its run in this process (see

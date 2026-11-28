@@ -8,6 +8,7 @@ from typing import Any, TYPE_CHECKING, cast
 
 import pyarrow as pa
 
+from orcapod.hashing.schema_cleaner import clean_schema_for_hashing
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, SourceInfoValue
 
@@ -1053,6 +1054,64 @@ def _source_info_arrow_type_and_depth_known(
     return pa.large_list(fallback), False
 
 
+def source_info_field(name: str, kind: "pa.DataType") -> "pa.Field[Any]":
+    """Declare a nullable Arrow field for a source-info token.
+
+    Stream construction separately validates token values. Only string leaves
+    may be null. Every list layer of a list-valued token must be present.
+
+    Args:
+        name: The prefixed column name.
+        kind: The token's Arrow type, including any list item fields.
+
+    Returns:
+        A field whose top-level nullability is always true.
+    """
+    return pa.field(name, kind, nullable=True)
+
+
+def source_info_replacement(
+    token: SourceInfoValue, kind: "pa.DataType", num_rows: int = 1
+) -> "pa.Array[Any]":
+    """Write a Python replacement under an existing token type.
+
+    Args:
+        token: The replacement token.
+        kind: The declared Arrow type, including any list item fields.
+        num_rows: The number of rows to fill with the replacement.
+
+    Returns:
+        An array of the declared type.
+
+    Raises:
+        pa.ArrowTypeError: If a token cannot fit the declaration, also a null
+            given for a list type: a list token is never null.
+    """
+
+    def require_fit(value: SourceInfoValue, data_type: "pa.DataType") -> None:
+        """Check nested nullability and reject strings that Arrow would split."""
+        if not isinstance(
+            data_type, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)
+        ):
+            return
+        if value is None:
+            raise pa.ArrowTypeError(
+                f"A list token is never null: no null replacement for type {data_type}"
+            )
+        if not isinstance(value, list):
+            raise pa.ArrowTypeError(f"Expected a list token for type {data_type}")
+        child = data_type.value_field
+        for item in value:
+            if item is None and not child.nullable:
+                raise pa.ArrowTypeError(
+                    f"Token item {child.name!r} does not allow nulls"
+                )
+            require_fit(item, child.type)
+
+    require_fit(token, kind)
+    return pa.array([token] * num_rows, type=kind)
+
+
 def prepare_prefixed_columns(
     table: "pa.Table | pa.RecordBatch",
     prefix_info: Collection[str]
@@ -1093,8 +1152,7 @@ def prepare_prefixed_columns(
         assigned to any prefix group, and ``prefixed_tables`` is a dictionary
         mapping each recognized prefix to its constructed ``pyarrow.Table``.
 
-        Nullability is preserved from the source columns for columns copied
-        directly from ``table``.
+        Ordinary fields keep their nullability. Source-info fields are always nullable.
     """
     all_prefix_info = {}
     if isinstance(prefix_info, Mapping):
@@ -1134,7 +1192,6 @@ def prepare_prefixed_columns(
 
     prefixed_column_names = defaultdict(list)
     prefixed_columns = defaultdict(list)
-    prefixed_column_nullables: dict[str, list[bool]] = defaultdict(list)
 
     target_column_names = [
         c
@@ -1146,7 +1203,6 @@ def prepare_prefixed_columns(
     for prefix, value_lut in all_prefix_info.items():
         target_prefixed_column_names = prefixed_column_names[prefix]
         target_prefixed_columns = prefixed_columns[prefix]
-        target_nullables = prefixed_column_nullables[prefix]
 
         for col_name in target_column_names:
             prefixed_col_name = f"{prefix}{col_name}"
@@ -1158,35 +1214,25 @@ def prepare_prefixed_columns(
                 value = value_lut
 
             if value is not None:
-                # Concrete token supplied as a Python value — column is never
-                # null. No Arrow type is attached, so the source-info rule
+                # No Arrow type is attached, so the source-info rule
                 # types it (a list token, nested or not, keeps its depth).
                 # Every caller passes source-info tokens here.
                 token = cast(SourceInfoValue, value)
                 column_values = pa.array(
                     [token] * num_rows, type=source_info_arrow_type(token)
                 )
-                col_nullable = False
             elif col_name in existing_columns:
-                # Pass-through from the source table — inherit its nullable flag.
                 existing_col = table[prefixed_col_name]
                 if existing_col.type == pa.string():
                     # Convert to large_string
                     column_values = pa.compute.cast(existing_col, pa.large_string())  # type: ignore
                 else:
                     column_values = existing_col
-                col_nullable = table.schema.field(prefixed_col_name).nullable
             else:
                 # No value available — column is genuinely all-null.
                 column_values = pa.array([None] * num_rows, type=pa.large_string())
-                col_nullable = True
-            # Safety: never declare non-nullable when the data actually has nulls
-            # (e.g. a pass-through column from a source that was non-nullable can
-            # gain nulls after a join populates only one side of the result).
-            col_nullable = col_nullable or bool(column_values.null_count > 0)
             target_prefixed_column_names.append(prefixed_col_name)
             target_prefixed_columns.append(column_values)
-            target_nullables.append(col_nullable)
 
     # Step 3: Create the final table, preserving nullable flags from the source table
     data_fields = [table.schema.field(name) for name in data_column_names]
@@ -1196,11 +1242,9 @@ def prepare_prefixed_columns(
     for prefix in all_prefix_info:
         schema = pa.schema(
             [
-                pa.field(name, col.type, nullable=nullable)
-                for name, col, nullable in zip(
-                    prefixed_column_names[prefix],
-                    prefixed_columns[prefix],
-                    prefixed_column_nullables[prefix],
+                source_info_field(name, col.type)
+                for name, col in zip(
+                    prefixed_column_names[prefix], prefixed_columns[prefix], strict=True
                 )
             ]
         )
@@ -1322,6 +1366,18 @@ def make_schema_non_nullable(schema: "pa.Schema") -> "pa.Schema":
     return pa.schema(
         [pa.field(f.name, f.type, nullable=False, metadata=f.metadata) for f in schema],
         metadata=schema.metadata,
+    )
+
+
+def contains_null_type(arrow_type: "pa.DataType") -> bool:
+    """Return whether an Arrow type contains the Null type at any depth."""
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return contains_null_type(arrow_type.storage_type)
+    if pa.types.is_dictionary(arrow_type):
+        return contains_null_type(arrow_type.value_type)
+    return pa.types.is_null(arrow_type) or any(
+        contains_null_type(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
     )
 
 
@@ -1744,24 +1800,46 @@ def _parse_system_tag_column(
 
 def _system_tag_position_groups(
     names: Collection[str],
-) -> dict[str, dict[str, dict[str, str]]]:
-    """Group system-tag columns by provenance path, position, and field kind."""
-    groups: dict[str, dict[str, dict[str, str]]] = {}
+    tied_positions: Sequence[Sequence[int]],
+) -> dict[tuple[str, int], dict[str, dict[str, str]]]:
+    """Group system-tag columns by path within each full pipeline hash tie."""
+    tie_by_position = {position: tie[0] for tie in tied_positions for position in tie}
+    groups: dict[tuple[str, int], dict[str, dict[str, str]]] = {}
     for name in names:
         if (parsed := _parse_system_tag_column(name)) is not None:
             field_type, provenance_path, position = parsed
-            groups.setdefault(provenance_path, {}).setdefault(position, {})[
-                field_type
-            ] = name
+            if (tie := tie_by_position.get(int(position))) is not None:
+                groups.setdefault((provenance_path, tie), {}).setdefault(position, {})[
+                    field_type
+                ] = name
     return groups
+
+
+def require_matching_system_tag_fields(
+    first: Collection[str], second: Collection[str]
+) -> None:
+    """Refuse a tie that could move a value into an undeclared field."""
+    if set(first) != set(second):
+        raise TypeError(
+            "Join inputs with the same pipeline hash must declare the same system-tag fields"
+        )
 
 
 def sorted_system_tag_nullability(
     nullable_by_name: Mapping[str, bool],
+    tied_positions: Sequence[Sequence[int]],
 ) -> dict[str, bool]:
-    """Give each movable system-tag field the nullability of all its inputs."""
-    nullable = dict(nullable_by_name)
-    for positions in _system_tag_position_groups(nullable).values():
+    """Return nullability for the source/record fields rebuilt by a tied sort."""
+    nullable: dict[str, bool] = {}
+    ties = {tie[0]: tie for tie in tied_positions}
+    for (_, tie), positions in _system_tag_position_groups(
+        nullable_by_name.keys(), tied_positions
+    ).items():
+        declarations = list(positions.values())
+        for position in ties[tie]:
+            require_matching_system_tag_fields(
+                declarations[0], positions.get(str(position), {})
+            )
         if len(positions) <= 1:
             continue
         for prefix in (
@@ -1769,30 +1847,37 @@ def sorted_system_tag_nullability(
             constants.SYSTEM_TAG_RECORD_ID_PREFIX,
         ):
             kind = prefix.removeprefix(constants.SYSTEM_TAG_PREFIX)
-            names = [fields[kind] for fields in positions.values() if kind in fields]
-            can_hold_null = len(names) != len(positions) or any(
-                nullable_by_name[name] for name in names
-            )
+            names = [fields[kind] for fields in declarations if kind in fields]
+            can_hold_null = any(nullable_by_name[name] for name in names)
             nullable.update(dict.fromkeys(names, can_hold_null))
     return nullable
 
 
-def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
-    """Sort paired system tag values for columns that share the same provenance path.
+def sorted_system_tag_field(field: "pa.Field[Any]", nullable: bool) -> "pa.Field[Any]":
+    """Declare a tied field without metadata from any one operand."""
+    return field.with_nullable(nullable).remove_metadata()
 
-    System tag columns come in (source_id, record_id) pairs. Columns that differ
-    only by their canonical position (the final :N) represent streams with the same
-    pipeline_hash that were joined. For commutativity, paired (source_id, record_id)
-    tuples must be sorted together per row so that the result is independent of
-    input order.
 
-    Algorithm:
-    1. Parse each system tag column into (field_type, provenance_path, position)
-    2. Group by provenance_path — source_id and record_id at the same path+position
-       are paired
-    3. For each group with >1 position, sort per-row by (source_id, record_id) tuples
-    4. Assign sorted values back to both columns at each position
+def sort_system_tag_values(
+    table: "pa.Table",
+    *,
+    tied_positions: Sequence[Sequence[int]],
+    keep_custom_with_ids: bool = False,
+) -> "pa.Table":
+    """Canonicalize system tags within each explicit full pipeline hash tie.
+
+    Sort the (source_id, record_id) pairs per row within each provenance path. A printed path can include a shortened hash,
+    so matching paths alone never make positions eligible to exchange IDs.
+    Tied operands must declare the same system-tag names. Standalone row
+    channels pass a one-row table and keep custom values on the same path
+    with their IDs, as in the original row sorter. A custom field keeps the
+    declaration at its output position when the declarations differ only
+    in metadata ignored by hashing.
     """
+    assert not keep_custom_with_ids or table.num_rows == 1
+    if not tied_positions:
+        return table
+
     sys_tag_cols = [
         c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
     ]
@@ -1800,9 +1885,12 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
     if not sys_tag_cols:
         return table
 
-    groups = _system_tag_position_groups(sys_tag_cols)
     nullable = sorted_system_tag_nullability(
-        {name: table.schema.field(name).nullable for name in sys_tag_cols}
+        {name: table.schema.field(name).nullable for name in sys_tag_cols},
+        tied_positions,
+    )
+    groups = _system_tag_position_groups(
+        sys_tag_cols if keep_custom_with_ids else nullable.keys(), tied_positions
     )
 
     source_id_field = constants.SYSTEM_TAG_SOURCE_ID_PREFIX[
@@ -1850,13 +1938,37 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
 
         for row_idx in range(table.num_rows):
             row_tuples = [
-                (sid_values[pos_idx][row_idx], rid_values[pos_idx][row_idx])
+                (sid_values[pos_idx][row_idx], rid_values[pos_idx][row_idx], pos_idx)
                 for pos_idx in range(n_positions)
             ]
-            row_tuples.sort()
-            for pos_idx, (sid_val, rid_val) in enumerate(row_tuples):
-                sorted_sid[pos_idx].append(sid_val)
-                sorted_rid[pos_idx].append(rid_val)
+            row_tuples.sort(
+                key=lambda pair: (pair[0] is None, pair[0], pair[1] is None, pair[1])
+            )
+            original = table
+            for destination, (sid_val, rid_val, origin) in enumerate(row_tuples):
+                sorted_sid[destination].append(sid_val)
+                sorted_rid[destination].append(rid_val)
+                if not keep_custom_with_ids or destination == origin:
+                    continue
+                from_fields = positions[sorted_positions[origin]]
+                to_fields = positions[sorted_positions[destination]]
+                for kind, name in to_fields.items():
+                    if kind in (source_id_field, record_id_field):
+                        continue
+                    column = from_fields[kind]
+                    source_field = original.schema.field(column).with_name(name)
+                    declared_field = original.schema.field(name)
+                    field = source_field
+                    if not source_field.equals(
+                        declared_field, check_metadata=True
+                    ) and clean_schema_for_hashing(pa.schema([source_field])).equals(
+                        clean_schema_for_hashing(pa.schema([declared_field])),
+                        check_metadata=True,
+                    ):
+                        field = declared_field
+                    table = table.set_column(
+                        table.schema.get_field_index(name), field, original[column]
+                    )
 
         # Replace columns with sorted values
         for pos_idx, (sid_col, rid_col) in enumerate(paired_cols):
@@ -1866,8 +1978,8 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
             ):
                 if name is not None:
                     index = table.schema.get_field_index(name)
-                    field = pa.field(
-                        name, table.schema.field(index).type, nullable=nullable[name]
+                    field = sorted_system_tag_field(
+                        table.schema.field(index), nullable[name]
                     )
                     table = table.set_column(
                         index, field, pa.array(values, type=field.type)
@@ -1912,11 +2024,8 @@ def add_source_info(
             [f"{source_val}::{col}" for source_val in base_source],
             type=pa.large_string(),
         )
-        # Source info columns are always computed strings, never null.
         table = table.append_column(
-            pa.field(
-                f"{constants.SOURCE_PREFIX}{col}", pa.large_string(), nullable=False
-            ),
+            source_info_field(f"{constants.SOURCE_PREFIX}{col}", col_source.type),
             col_source,
         )
 

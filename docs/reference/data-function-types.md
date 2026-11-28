@@ -156,11 +156,9 @@ output of the result is refused the same way, before anything is written.
 
 The stored field is the declared one whatever the written row's own field says: a row
 whose token field is non-nullable is stored under the nullable field, with its values
-unchanged. The type that is checked is the one the row carries
-(`DataProtocol.source_info_table`), so a token column that is dictionary-encoded or
-binary is refused too. One case is not refused yet: a null token in a column declared
-with another type, which a row gives as a `large_string` null and which is stored as
-one.
+unchanged. The cache checks the type in both the serialized row and its
+`DataProtocol.source_info_table`. A list, dictionary-encoded, or binary token
+column is refused even when its value is null.
 
 A result table that already holds a list token column, written before this rule by a
 custom `record_data`, is not rewritten: its path and column type stay, and every later

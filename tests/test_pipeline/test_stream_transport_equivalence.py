@@ -549,18 +549,25 @@ def test_a_poller_that_fetched_describes_its_rows_order() -> None:
     )
 
 
-def test_a_value_decided_source_info_depth_is_a_named_exception() -> None:
-    """L7: ``Batch`` over null list tokens; the description and the rows agree but for it.
+def test_a_source_info_depth_is_the_declared_one_in_the_description_and_the_rows() -> (
+    None
+):
+    """L7, restated for ITL-1491: ``Batch`` over empty token lists; the description
+    and the rows agree on the token type.
 
-    The rows give ``[None, None]`` one list level (``large_list<large_string>``); the
-    description states the declared token type. A source-info type is decided by the
-    values of a complete table and is one of the description's named exceptions.
+    Empty token lists show no level below them. The rows used to type each token
+    from its value, so the table built from rows had fewer list levels than the
+    description (a "value-decided" source-info type, a named exception of the
+    description). A token column's type is now the one the pipeline determines, in
+    the rows as in the description. (The earlier form of this test used null list
+    tokens, which are not valid tokens: ``test_token_shape.py``.)
     """
     from orcapod.core.streams import ArrowTableStream
-    from orcapod.sources import DictSource
+    from orcapod.sources import ArrowTableSource
 
-    table = DictSource(
-        [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
+    lists = pa.large_list(pa.int64())
+    table = ArrowTableSource(
+        pa.table({"k": pa.array([1, 2], pa.int64()), "x": pa.array([[], []], lists)}),
         tag_columns=["k"],
         tag_only_columns=True,
         source_id="s",
@@ -571,14 +578,15 @@ def test_a_value_decided_source_info_depth_is_a_named_exception() -> None:
         table.set_column(
             position,
             pa.field("_source_x", strings, nullable=True),
-            pa.array([None, None], strings),
+            pa.array([[], []], strings),
         ),
         tag_columns=["k"],
     )
     batched = Batch(batch_size=2)(raw)
     built, _, _ = StaticOutputOperatorPod._rows_to_table(list(batched.iter_data()))  # pyright: ignore[reportPrivateUsage]  # the rows
     declared = batched.arrow_schema()
-    assert declared.field("_source_x").type != built.schema.field("_source_x").type
+    assert declared.field("_source_x").type == pa.large_list(strings)
+    assert declared.field("_source_x").type == built.schema.field("_source_x").type
     assert _without_exceptions(declared) == _without_exceptions(built.schema)
 
 

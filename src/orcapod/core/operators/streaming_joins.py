@@ -62,11 +62,8 @@ How a kernel stays equal to the sync path:
   position, field flags, merged source info, system-tag value sorting, merged lists),
   with the sync path's helpers. Each of them works row by row, so applying them per
   batch of pairs gives the sync rows.
-- **Field flags.** A batch's flags are the sync result's, except the system-tag and
-  source-info fields: a complete table decides those by its values (``StaticOutputOperatorPod._flag_by_values``,
-  the last step of F). The input layout declares these fields nullable and the stream
-  made from the batches settles them. Join's sorted system-tag fields are already
-  declared non-nullable when the kernel emits them.
+- **Field flags.** Source-info fields are always nullable. Each kernel keeps the
+  declared system-tag nullability using the sync operator's rules.
 
 A kernel holds only what can still match: a side's rows are dropped when the other side
 closes (nothing can arrive to match them), and an arriving row is not kept once the
@@ -93,14 +90,18 @@ from orcapod.core.operators.join import (
     _COMMON_JOIN_KEY,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     _MERGED_SOURCE_PREFIX,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     Join,
+    NullTokenListError,
     _matched_pairs,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     _with_common_key,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+    null_token_list_error,
+    tied_pipeline_positions,
 )
 from orcapod.core.operators.base import require_shared_arrow_type
-from orcapod.core.operators.key_nullability import key_nullable
 from orcapod.core.operators.merge_join import (
     MergeJoin,
     _merged_list,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
+    _output_nullability,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
+    _output_schema,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
     _output_types,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
 )
 from orcapod.core.operators.rejoin import (
@@ -112,10 +113,8 @@ from orcapod.core.operators.semijoin import (
     _has_whole_key,  # pyright: ignore[reportPrivateUsage]  # SemiJoin's one rule
 )
 from orcapod.core.operators.static_output_pod import (
-    RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
     settle_token_types,
-    tokens_as,
 )
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -131,26 +130,7 @@ TRANSPORT_COLUMNS: dict[str, bool] = {"source": True, "system_tags": True}
 _ROW = ("__streaming_left_row", "__streaming_right_row")
 
 
-def _settled_by_values(schema: pa.Schema, *, system_tags: bool = True) -> pa.Schema:
-    """``schema`` with source-info and, optionally, system-tag fields nullable.
-
-    What a kernel declares for the fields a complete table decides by its values
-    (``StaticOutputOperatorPod._flag_by_values``): one record batch of many cannot.
-    """
-    prefixes = (constants.SOURCE_PREFIX,)
-    if system_tags:
-        prefixes = (*prefixes, constants.SYSTEM_TAG_PREFIX)
-    return pa.schema(
-        [
-            field.with_nullable(True) if field.name.startswith(prefixes) else field
-            for field in schema
-        ]
-    )
-
-
-def _row_built_zero_rows(
-    stream: StreamProtocol, *, keep_system_tag_flags: bool = False
-) -> tuple[StreamProtocol, bool]:
+def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
     """``stream`` with no rows, as an input rebuilt from rows of it reads.
 
     The zero-row input (``_materialize_upstream`` with no rows) put through F: what
@@ -158,7 +138,6 @@ def _row_built_zero_rows(
 
     Args:
         stream: An input stream (its description).
-        keep_system_tag_flags: Use the input's declared system-tag nullability.
 
     Returns:
         The zero-row stream in the row-built form, and whether its Arrow types differ
@@ -168,15 +147,7 @@ def _row_built_zero_rows(
     pod = StaticOutputOperatorPod
     zero = pod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the operators' one form of an input
     table = zero.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-    row_built = pod._flag_by_values(row_built_columns(table, stream.keys()))  # pyright: ignore[reportPrivateUsage]  # F's last step
-    if keep_system_tag_flags:
-        fields = [
-            field.with_nullable(table.schema.field(field.name).nullable)
-            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
-            else field
-            for field in row_built.schema
-        ]
-        row_built = pa.Table.from_arrays(row_built.columns, schema=pa.schema(fields))
+    row_built = row_built_columns(table, stream.keys()).replace_schema_metadata(None)
     differs = any(
         field.type != table.schema.field(field.name).type for field in row_built.schema
     )
@@ -424,7 +395,6 @@ class StreamingJoinKernel(ABC):
 
     # How many inputs the operator takes; ``None`` for one or more.
     ARITY: ClassVar[int | None] = None
-    KEEP_SYSTEM_TAG_FLAGS: ClassVar[bool] = False
 
     def __init__(
         self, operator: StaticOutputOperatorPod, inputs: Sequence[StreamProtocol]
@@ -439,21 +409,12 @@ class StreamingJoinKernel(ABC):
         self.inputs: tuple[StreamProtocol, ...] = tuple(inputs)
         # Each input as the sync path reads rows of it, with no rows (the row-built
         # form), and whether that differs from how it reads the input with none.
-        built = [
-            _row_built_zero_rows(
-                stream, keep_system_tag_flags=self.KEEP_SYSTEM_TAG_FLAGS
-            )
-            for stream in self.inputs
-        ]
+        built = [_row_built_zero_rows(stream) for stream in self.inputs]
         self._zero_rows: tuple[StreamProtocol, ...] = tuple(z for z, _ in built)
         self._null_typed: tuple[bool, ...] = tuple(d for _, d in built)
-        # The schema of every batch of an input, in its row-built layout; the fields a
-        # complete table decides by values declared nullable.
+        # Every batch uses its input's declared fields in the row-built layout.
         self._layouts: tuple[pa.Schema, ...] = tuple(
-            _settled_by_values(
-                stream.as_table(columns=TRANSPORT_COLUMNS).schema,
-                system_tags=not self.KEEP_SYSTEM_TAG_FLAGS,
-            )
+            stream.as_table(columns=TRANSPORT_COLUMNS).schema
             for stream in self._zero_rows
         )
         self._closed: list[bool] = [False] * len(self.inputs)
@@ -607,9 +568,10 @@ class StreamingJoinKernel(ABC):
         """Return a batch's columns in the input's layout, under one schema per input.
 
         The schema is the input's row-built form (``null`` columns as ``large_string``,
-        ITL-1319), every system-tag and source-info field nullable (a complete table
-        decides those). A batch with no rows may also carry a column in the type of the
-        input's zero-row form (``null``): it holds no value.
+        ITL-1319), with nullable source-info fields and system-tag flags from the
+        input layout. A batch with no rows may also carry a column in the type of the
+        input's zero-row form (``null``). A token field can use that exception only
+        when the stream declares that token field as ``null``.
         """
         layout = self._layouts[input_index]
         # Tokens that cannot make one table with the input's earlier batches are
@@ -625,21 +587,23 @@ class StreamingJoinKernel(ABC):
         table = pa.Table.from_batches([batch]).select(layout.names)
         columns = list(table.columns)
         for index, (field, actual) in enumerate(zip(layout, table.schema)):
-            if field.type == actual.type:
+            # The pipeline declares token types including nested item fields.
+            if field.type.equals(
+                actual.type,
+                check_metadata=field.name.startswith(constants.SOURCE_PREFIX),
+            ):
                 continue
             if not table.num_rows and pa.types.is_null(actual.type):
-                continue
-            if table.num_rows and field.name.startswith(constants.SOURCE_PREFIX):
-                # A batch's token type follows its own tokens and can be shallower
-                # than the layout's (a null or an empty list fixes fewer list
-                # levels): the tokens are converted, every value kept.
-                try:
-                    columns[index] = pa.chunked_array(
-                        [tokens_as(table.column(index).combine_chunks(), field.type)]
-                    )
+                if not field.name.startswith(constants.SOURCE_PREFIX):
                     continue
-                except RowBuiltFormUnavailable:
-                    pass
+                declared = self.inputs[input_index].arrow_schema()
+                if field.name in declared.names and pa.types.is_null(
+                    declared.field(field.name).type
+                ):
+                    continue
+            # A source-info column is held to its stream's type like any other
+            # column: the pipeline determines it, and a batch never brings its own
+            # (ITL-1491).
             raise ValueError(
                 f"{type(self).__name__}: column {field.name!r} of input "
                 + f"{input_index} is {actual.type} in a batch, but "
@@ -669,19 +633,14 @@ class StreamingJoinKernel(ABC):
     def _emitted(self, tables: list[pa.Table]) -> list[pa.RecordBatch]:
         """The record batches of the output tables, holding ``output_columns``.
 
-        A source-info field is nullable until the complete table settles its flag
-        (``StaticOutputOperatorPod._flag_by_values``). System tags keep the field
-        from the kernel so Join's sorted tags retain their non-nullable declaration.
+        System tags keep the kernel's fields so Join's sorted tags retain their
+        declared nullability.
         """
         batches: list[pa.RecordBatch] = []
         for table in tables:
             if table.num_rows:
                 self._emitted_any = True
                 table = table.select(list(self.output_columns)).combine_chunks()
-                table = pa.Table.from_arrays(
-                    table.columns,
-                    schema=_settled_by_values(table.schema, system_tags=False),
-                )
                 batches.extend(table.to_batches())
         return batches
 
@@ -707,14 +666,12 @@ class StreamingJoin(StreamingJoinKernel):
         inputs: Its input streams, in call order.
     """
 
-    KEEP_SYSTEM_TAG_FLAGS: ClassVar[bool] = True
-
     def __init__(self, operator: Join, inputs: Sequence[StreamProtocol]) -> None:
         super().__init__(operator, inputs)
         self._join = operator
-        order = sorted(
-            range(len(inputs)), key=lambda i: inputs[i].pipeline_hash().to_hex()
-        )
+        hashes = [stream.pipeline_hash() for stream in inputs]
+        order = sorted(range(len(inputs)), key=lambda i: hashes[i].to_hex())
+        self._tied_positions = tied_pipeline_positions(hashes)
         self._position = {index: position for position, index in enumerate(order)}
         self._renames: dict[int, dict[str, str]] = {}
         self._links: list[_BinaryLink] = []
@@ -771,12 +728,19 @@ class StreamingJoin(StreamingJoinKernel):
                 table, left_schema, right_schema, keys
             )
             for left_name, right_name in rename.items():
-                table = Join._merge_source_columns(table, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+                try:
+                    table = Join._merge_source_columns(table, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+                except NullTokenListError as error:
+                    raise null_token_list_error(
+                        "Join", left_name, table.schema.field(left_name).type
+                    ) from error
             if not final:
                 return table
             for name in sorted(self._merged_source):
                 table = Join._fold_source_column(table, name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
-            return arrow_utils.sort_system_tag_values(table)
+            return arrow_utils.sort_system_tag_values(
+                table, tied_positions=self._tied_positions
+            )
 
         return finish
 
@@ -885,9 +849,6 @@ class StreamingMergeJoin(StreamingJoinKernel):
             if f"{constants.SOURCE_PREFIX}{name}" in right_names
         }
         self._colliding = (set(left_data) & set(right_data)) - merged
-        self._captured = (
-            set(left_tags) | set(left_data) | set(right_tags) | set(right_data)
-        )
         # The left input's converter, as the sync path takes it.
         self._type_converter = StaticOutputOperatorPod._upstream_context(  # pyright: ignore[reportPrivateUsage]  # the operators' one rule
             left
@@ -956,33 +917,18 @@ class StreamingMergeJoin(StreamingJoinKernel):
             {f.name: f.type for f in left_schema},
             {f.name: f.type for f in right_schema},
         )
-        left_nullable = {
-            f.name: f.nullable for f in left_schema if f.name in self._captured
-        }
-        right_nullable = {
-            f.name: f.nullable for f in right_schema if f.name in self._captured
-        }
-        output_nullable = {**right_nullable, **left_nullable}
-        for name in self._shared_tags:
-            output_nullable[name] = key_nullable(
-                left_nullable[name], right_nullable[name]
-            )
-        for name in self._colliding:
-            output_nullable[name] = False
-            source_name = f"{constants.SOURCE_PREFIX}{name}"
-            if source_name in output_nullable:
-                output_nullable[source_name] = False
-        # The columns the sync path does not capture (system tags and source info) are
-        # flagged by their values over the complete table; a batch declares them
-        # nullable (module docstring).
-        for schema in (right_schema, left_schema):
-            for field in schema:
-                if field.name not in self._captured:
-                    output_nullable.setdefault(field.name, True)
+        output_nullable = _output_nullability(
+            left_schema, right_schema, self._shared_tags, self._colliding
+        )
         left_names = set(left_schema.names)
         suffixed = (set(right_schema.names) & left_names) - self._shared_tags
         for left_name, right_name in self._rename.items():
-            joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            try:
+                joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            except NullTokenListError as error:
+                raise null_token_list_error(
+                    "MergeJoin", left_name, joined.schema.field(left_name).type
+                ) from error
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
         for name in sorted(self._colliding):
             source_name = f"{constants.SOURCE_PREFIX}{name}"
@@ -1014,11 +960,11 @@ class StreamingMergeJoin(StreamingJoinKernel):
                 joined = joined.add_column(index, base_name, column_data)
             else:
                 joined = joined.drop_columns([suffixed_name])
-        schema = pa.schema(
-            [
-                pa.field(name, output_types[name], nullable=output_nullable[name])
-                for name in joined.column_names
-            ]
+        schema = _output_schema(
+            joined.column_names,
+            output_types,
+            output_nullable,
+            (right_schema, left_schema),
         )
         return pa.Table.from_arrays(
             [

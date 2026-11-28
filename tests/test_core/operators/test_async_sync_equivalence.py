@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import decimal
+import itertools
+import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypeAlias, cast
 
@@ -25,9 +28,15 @@ import pyarrow as pa
 import pytest
 
 from orcapod.channels import Channel
-from orcapod.contexts import get_default_context, get_default_type_converter
+from orcapod.config import HashingConfig, OrcapodConfig
+from orcapod.contexts import (
+    get_default_arrow_hasher,
+    get_default_context,
+    get_default_type_converter,
+)
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.datagrams import Tag
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import (
     AddTags,
@@ -35,8 +44,8 @@ from orcapod.core.operators import (
     DropColumns,
     DropDataColumns,
     DropNulls,
-    Filter,
     DropTagColumns,
+    Filter,
     GroupBy,
     Index,
     Join,
@@ -44,9 +53,9 @@ from orcapod.core.operators import (
     MapData,
     MapTags,
     MergeJoin,
-    Rejoin,
     Pick,
     PolarsFilter,
+    Rejoin,
     SelectColumns,
     SelectDataColumns,
     SelectTagColumns,
@@ -54,6 +63,8 @@ from orcapod.core.operators import (
     TagBy,
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.operators.streaming_joins import TRANSPORT_COLUMNS, StreamingJoin
+from orcapod.core.row_ids import entry_id
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
@@ -63,7 +74,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
-from orcapod.types import Condition, col
+from orcapod.types import Condition, ContentHash, col
 from orcapod.utils import arrow_utils
 
 # The ``semijoin_shared_data_column`` case shares a data column name on purpose; SemiJoin
@@ -1016,6 +1027,478 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
     assert_equivalent(
         sync_rows(case.make_op(), *sources), async_rows(case.make_op(), *sources)
     )
+
+
+@pytest.mark.parametrize("reverse_columns", [False, True])
+@pytest.mark.parametrize("metadata", ["none", "same", "different"])
+def test_standalone_async_join_rows_keep_declared_system_tag_fields(
+    reverse_columns: bool,
+    metadata: str,
+) -> None:
+    source_id = "_tag_source_id::seed"
+    record_id = "_tag_record_id::seed"
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("g", pa.large_string(), False),
+            pa.field(source_id, pa.large_string(), False),
+            pa.field(record_id, pa.large_string(), True),
+        ]
+    )
+    inputs = []
+    empty_inputs = []
+    for source, records in (("a", [None, "q"]), ("b", ["r", "t"]), ("c", ["s", "u"])):
+        field_metadata: dict[bytes | str, bytes | str] | None = (
+            None
+            if metadata == "none"
+            else {b"owner": b"a" if metadata == "same" else source.encode()}
+        )
+        fields = pa.schema(
+            [
+                field.with_metadata(field_metadata)
+                if field_metadata is not None and field.name in (source_id, record_id)
+                else field
+                for field in schema
+            ]
+        )
+        table = pa.Table.from_pylist(
+            [
+                {"k": i, "g": group, source_id: source, record_id: record}
+                for i, (group, record) in enumerate(
+                    zip(("x", "y"), records, strict=True)
+                )
+            ],
+            schema=fields,
+        )
+        if reverse_columns:
+            table = table.select(list(reversed(schema.names)))
+        inputs.append(
+            ArrowTableStream(table, tag_columns=("k", "g"), data_tags=("k", "g"))
+        )
+        empty_inputs.append(
+            ArrowTableStream(
+                table.slice(0, 0), tag_columns=("k", "g"), data_tags=("k", "g")
+            )
+        )
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    columns = {"system_tags": True}
+    for positions in itertools.permutations(range(len(inputs))):
+        ordered = [inputs[i] for i in positions]
+        empty = [empty_inputs[i] for i in positions]
+        join = Join()
+        stream = join(*ordered)
+        table = stream.as_table(columns=columns)
+        empty_table = join(*empty).as_table(columns=columns)
+        assert empty_table.num_rows == 0
+        assert empty_table.schema.equals(table.schema, check_metadata=True)
+        tags, _ = join.output_schema(*ordered, columns=columns)
+        tag_names = [name for name in tags if name.startswith("_tag_")]
+        assert len(tag_names) == 6
+        for name in tag_names:
+            field = table.schema.field(name)
+            assert field.metadata is None
+            assert field.nullable == name.startswith(record_id)
+            assert tags[name] == (str | None if field.nullable else str)
+        for rows in (list(stream.iter_data()), async_rows(join, *ordered)):
+            assert len(rows) == table.num_rows == 2
+            for tag, data in rows:
+                tag_table = tag.as_table(columns=columns)
+                assert tag_table.schema.equals(
+                    table.select(tag_table.column_names).schema, check_metadata=True
+                )
+                data_table = data.as_table()
+                assert data_table.schema.equals(
+                    table.select(data_table.column_names).schema, check_metadata=True
+                )
+
+
+@pytest.mark.parametrize("arity", [2, 3])
+def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
+    arity: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_id, record_id = "_tag_source_id::seed", "_tag_record_id::seed"
+    inputs = [
+        ArrowTableStream(
+            pa.table(
+                {
+                    "k": [1],
+                    "g": ["same"],
+                    source_id: pa.array([source], pa.large_string()),
+                    record_id: pa.array([record], pa.large_string()),
+                }
+            ),
+            tag_columns=["k", "g"],
+            data_tags=["k", "g"],
+        )
+        for source, record in (("same", None), ("same", "r"), ("z", "other"))[:arity]
+    ]
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    columns = {"system_tags": True}
+    join = Join()
+    expected = join(*inputs).as_table(columns=columns)
+
+    def position_names(prefix: str) -> list[str]:
+        return sorted(name for name in expected.column_names if name.startswith(prefix))
+
+    source_names, record_names = position_names(source_id), position_names(record_id)
+    assert [expected[n][0].as_py() for n in source_names] == ["same", "same", "z"][
+        :arity
+    ]
+    assert [expected[n][0].as_py() for n in record_names] == ["r", None, "other"][
+        :arity
+    ]
+
+    calls: list[int] = []
+    sort_system_tags = arrow_utils.sort_system_tag_values
+
+    def observe(
+        table: pa.Table,
+        *,
+        tied_positions: Sequence[Sequence[int]],
+        keep_custom_with_ids: bool = False,
+    ) -> pa.Table:
+        calls.append(sum(name.startswith(record_id) for name in table.column_names))
+        return sort_system_tags(
+            table,
+            tied_positions=tied_positions,
+            keep_custom_with_ids=keep_custom_with_ids,
+        )
+
+    monkeypatch.setattr(arrow_utils, "sort_system_tag_values", observe)
+    [(tag, _)] = async_rows(join, *reversed(inputs))
+    names = [*source_names, *record_names]
+    assert (
+        tag.as_table(columns=columns)
+        .select(names)
+        .equals(expected.select(names), check_metadata=True)
+    )
+    assert calls == [arity]
+
+
+def _tied_join_inputs(
+    arity: int,
+    *,
+    missing: str | None = None,
+    matching: bool = True,
+    distinct_revisions: bool = False,
+) -> list[ArrowTableStream]:
+    names = ["k", "_tag_source_id", "_tag_record_id", "_tag_rev"]
+    schema = pa.schema(
+        [pa.field("k", pa.int64(), nullable=False)]
+        + [pa.field(name, pa.large_string(), nullable=False) for name in names[1:]]
+    )
+    inputs = []
+    pairs = (
+        ("az", "record-a"),
+        ("z", "record-z"),
+        ("zzzz", "record-last"),
+        ("z", "record-b"),
+    )
+    for index, (source_id, record_id) in enumerate(pairs[:arity]):
+        key = 1 if matching else index
+        revision = f"revision-{index}" if distinct_revisions else "shared"
+        table = pa.Table.from_pylist(
+            [dict(zip(names, (key, source_id, record_id, revision), strict=True))],
+            schema=schema,
+        )
+        if len(inputs) == arity - 1 and missing is not None:
+            table = table.drop([missing])
+        inputs.append(ArrowTableStream(table, tag_columns=["k"], data_tags=["k"]))
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    return inputs
+
+
+def _tied_join_outputs(
+    mode: str, join: Join, inputs: Sequence[ArrowTableStream]
+) -> tuple[pa.Table, list[Row]]:
+    columns = {"system_tags": True}
+    if mode == "rows":
+        rows = async_rows(join, *inputs)
+        return pa.concat_tables(
+            [tag.as_table(columns=columns) for tag, _ in rows]
+        ), rows
+    if mode == "sync":
+        stream = join(*inputs)
+        return stream.as_table(columns=columns), list(stream.iter_data())
+    kernel = StreamingJoin(join, inputs)
+    table = pa.Table.from_batches(
+        [
+            result
+            for i, operand in enumerate(inputs)
+            for packet in operand.as_table(columns=TRANSPORT_COLUMNS).to_batches()
+            for result in kernel.push(i, packet)
+        ]
+    )
+    stream = ArrowTableStream(table, tag_columns=["k"], data_tags=["k"])
+    return stream.as_table(columns=columns), list(stream.iter_data())
+
+
+def _symmetric_tie_snapshot(arity: int, mode: str) -> tuple[str, ...]:
+    """Digest the Arrow IPC tables and collect the entry IDs in permutation order."""
+    hasher = get_default_arrow_hasher()
+    snapshot = []
+    for order in itertools.permutations(_tied_join_inputs(arity)):
+        table, rows = _tied_join_outputs(mode, Join(), order)
+        output = pa.BufferOutputStream()
+        with pa.ipc.new_stream(output, table.schema) as writer:
+            writer.write_table(table.combine_chunks())
+        snapshot.append(sha256(output.getvalue().to_pybytes()).hexdigest())
+        snapshot.extend(entry_id(hasher, tag, data).to_string() for tag, data in rows)
+    return tuple(snapshot)
+
+
+# Captured from origin/main at 37f78431, where all permutations and modes agree.
+@pytest.mark.parametrize(
+    ("arity", "table_digest", "expected_entry_id"),
+    [
+        (
+            2,
+            "da59e70321d0172c50fe3e828b4a1889ce7bab343e24e1c288405a43056b061e",
+            "arrow_v1:0000029a37059d124668f54cd4a141a99266d84c5ba57f4007947f0ac0bee1e88eadbf",
+        ),
+        (
+            3,
+            "c0745b28e9bfcb112a8ef786e01e9188de67c1f8c9bd15c9dc633dc6ce031bb4",
+            "arrow_v1:000002b259085d031998a9850c2a998f2e41a76e931410be81f8b1f5198dd1416d5170",
+        ),
+        (
+            4,
+            "e1f1b75a17ac2d9006a7c3bf606050703a8216db58901cb0e515c3da84e90f4a",
+            "arrow_v1:00000278a840e460fa1d24285bfec361a11ac9a3efc5d0ddea290a6683cdaec5c119fc",
+        ),
+    ],
+)
+@pytest.mark.parametrize("mode", ["sync", "rows", "batches"])
+def test_symmetric_tied_join_matches_main(
+    arity: int, mode: str, table_digest: str, expected_entry_id: str
+) -> None:
+    assert _symmetric_tie_snapshot(arity, mode) == (
+        table_digest,
+        expected_entry_id,
+    ) * math.factorial(arity)
+
+
+@pytest.mark.parametrize("arity", [2, 3, 4])
+def test_standalone_tied_join_keeps_custom_tags_with_ids(arity: int) -> None:
+    inputs = _tied_join_inputs(arity, distinct_revisions=True)
+    suffix = inputs[0].pipeline_hash().to_hex()
+    expected = {}
+    names = ("_tag_source_id", "_tag_record_id", "_tag_rev")
+    bundles = [
+        tuple(table[name][0].as_py() for name in names)
+        for table in (
+            stream.as_table(columns={"system_tags": True}) for stream in inputs
+        )
+    ]
+    for position, values in enumerate(sorted(bundles)):
+        for name, value in zip(names, values, strict=True):
+            expected[f"{name}::{suffix}:{position}"] = value
+
+    for order in itertools.permutations(inputs):
+        [(tag, _)] = async_rows(Join(), *order)
+        assert tag.system_tags() == expected
+
+
+@pytest.mark.parametrize("arity", [2, 3])
+def test_standalone_tied_join_keeps_custom_field_metadata_by_position(
+    arity: int,
+) -> None:
+    inputs = []
+    for position in range(arity):
+        schema = pa.schema(
+            [
+                pa.field("k", pa.int64(), nullable=False),
+                pa.field("_tag_source_id", pa.large_string(), nullable=False),
+                pa.field("_tag_record_id", pa.large_string(), nullable=False),
+                pa.field(
+                    "_tag_rev",
+                    pa.large_string(),
+                    nullable=False,
+                    metadata={"owner": str(position)},
+                ),
+            ]
+        )
+        source_ids = [f"source-{position}", f"source-{arity - position - 1}"]
+        table = pa.Table.from_pydict(
+            {
+                "k": [0, 1],
+                "_tag_source_id": source_ids,
+                "_tag_record_id": [f"record-{source_id}" for source_id in source_ids],
+                "_tag_rev": ["shared", "shared"],
+            },
+            schema=schema,
+        )
+        inputs.append(ArrowTableStream(table, tag_columns=["k"], data_tags=["k"]))
+
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    columns = {"system_tags": True}
+    hasher = get_default_arrow_hasher()
+    for order in (inputs, inputs[::-1]):
+        join = Join()
+        result = join(*order)
+        expected = result.as_table(columns=columns).schema
+        assert {field.metadata[b"owner"] for field in expected if field.metadata} == {
+            str(position).encode() for position in range(arity)
+        }
+        async_output = async_rows(join, *order)
+        assert len(async_output) == 2
+        for (async_tag, async_data), (sync_tag, sync_data) in _paired(
+            list(result.iter_data()), async_output
+        ):
+            actual = async_tag.as_table(columns=columns).schema
+            assert actual.names == expected.names
+            for field in expected:
+                assert actual.field(field.name).equals(field, check_metadata=True)
+            assert entry_id(hasher, async_tag, async_data) == entry_id(
+                hasher, sync_tag, sync_data
+            )
+
+
+@pytest.mark.parametrize("arity", [2, 3, 4])
+@pytest.mark.parametrize("mode", ["sync", "rows", "batches"])
+@pytest.mark.parametrize("missing", ["_tag_source_id", "_tag_record_id", "_tag_rev"])
+@pytest.mark.parametrize("matching", [True, False])
+def test_tied_join_rejects_asymmetric_system_tag_declarations(
+    arity: int, mode: str, missing: str, matching: bool
+) -> None:
+    inputs = _tied_join_inputs(arity, missing=missing, matching=matching)
+    for order in itertools.permutations(inputs):
+        join = Join()
+        if mode == "rows":
+            with pytest.raises(ExceptionGroup) as excinfo:
+                _tied_join_outputs(mode, join, order)
+            assert excinfo.group_contains(TypeError, match="same system-tag fields")
+        else:
+            with pytest.raises(TypeError, match="same system-tag fields"):
+                _tied_join_outputs(mode, join, order)
+        with pytest.raises(TypeError, match="same system-tag fields"):
+            join.output_schema(*order, columns={"system_tags": True})
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_distinct_join_inputs_keep_id_pairs_when_short_hashes_collide(
+    reverse: bool,
+) -> None:
+    source_id, record_id, custom = "_tag_source_id", "_tag_record_id", "_tag_rev"
+    left, right = [
+        ArrowTableStream(
+            pa.table(
+                {
+                    "k": [1],
+                    data: [1],
+                    source_id: [owner],
+                    record_id: [f"{owner}-record"],
+                    custom: [f"{owner}-revision"],
+                }
+            ),
+            tag_columns=["k"],
+        )
+        for data, owner in (("left_data", "left"), ("right_data_5", "right"))
+    ]
+    left_hash, right_hash = (
+        left.pipeline_hash().to_hex(),
+        right.pipeline_hash().to_hex(),
+    )
+    assert left_hash[0] == right_hash[0]
+    assert right_hash < left_hash
+    operands = (right, left) if reverse else (left, right)
+    join = Join(config=OrcapodConfig(hashing=HashingConfig(system_tag_n_char=1)))
+    columns = {"system_tags": True}
+    suffix = left_hash[0]
+    expected = {
+        f"{field}::{suffix}:{index}": value
+        for index, owner in enumerate(("right", "left"))
+        for field, value in (
+            (source_id, owner),
+            (record_id, f"{owner}-record"),
+            (custom, f"{owner}-revision"),
+        )
+    }
+    stream = join(*operands)
+    [(tag, _)] = async_rows(join, *operands)
+    kernel = StreamingJoin(join, operands)
+    batches = [
+        result
+        for index, operand in enumerate(operands)
+        for batch in operand.as_table(columns=TRANSPORT_COLUMNS).to_batches()
+        for result in kernel.push(index, batch)
+    ]
+    for result in (
+        stream.as_table(columns=columns),
+        tag.as_table(columns=columns),
+        pa.Table.from_batches(batches),
+    ):
+        assert result.select(list(expected)).to_pylist() == [expected]
+
+
+def test_distinct_join_inputs_keep_custom_tags_when_short_hashes_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom = "_tag_rev"
+    streams = [
+        ArrowTableStream(
+            pa.table({"k": [1], custom: pa.array([value], pa.large_string())}),
+            tag_columns=["k"],
+            data_tags=["k"],
+        )
+        for value in ("alpha", "omega")
+    ]
+    hashes = [ContentHash("semantic_v1", bytes([n]) * 32) for n in (16, 17)]
+    join = Join(config=OrcapodConfig(hashing=HashingConfig(system_tag_n_char=1)))
+    columns = {"system_tags": True}
+    names = [f"{custom}::1:{i}" for i in range(2)]
+    for ordered in (streams, streams[::-1]):
+        for stream, digest in zip(ordered, hashes, strict=True):
+            monkeypatch.setattr(stream, "pipeline_hash", lambda digest=digest: digest)
+        expected = [
+            stream.as_table(columns=columns)[custom][0].as_py() for stream in ordered
+        ]
+        result = join(*reversed(ordered)).as_table(columns=columns)
+        assert [result[name][0].as_py() for name in names] == expected
+        [(tag, _)] = async_rows(join, *reversed(ordered))
+        assert (
+            tag.as_table(columns=columns)
+            .select(names)
+            .equals(result.select(names), check_metadata=True)
+        )
+
+
+@pytest.mark.parametrize("reverse_columns", [False, True])
+def test_raw_stream_rows_keep_system_tag_width_flags_and_metadata(
+    reverse_columns: bool,
+) -> None:
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("g", pa.large_string(), False),
+            pa.field("x", pa.int16(), False),
+            pa.field("y", pa.large_string(), True),
+            pa.field("_tag_rank", pa.int8(), False, metadata={b"purpose": b"rank"}),
+            pa.field("_tag_label", pa.large_string(), True),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"k": 1, "g": "a", "x": 4, "y": "x", "_tag_rank": 7, "_tag_label": "a"},
+            {"k": 2, "g": "b", "x": 5, "y": None, "_tag_rank": 8, "_tag_label": None},
+        ],
+        schema=schema,
+    )
+    if reverse_columns:
+        table = table.select(list(reversed(schema.names)))
+    stream = ArrowTableStream(table, tag_columns=("k", "g"))
+    columns = {"system_tags": True}
+    for tag, data in stream.iter_data():
+        assert isinstance(tag, Tag)
+        for row in (tag, tag.copy(include_cache=False)):
+            got = row.as_table(columns=columns)
+            assert got.schema.equals(
+                table.select(got.column_names).schema, check_metadata=True
+            )
+        got_data = data.as_table()
+        assert got_data.schema.equals(
+            table.select(got_data.column_names).schema, check_metadata=True
+        )
 
 
 # ── inputs that are not root sources (ITL-906) ──────────────────────────────
@@ -2417,3 +2900,169 @@ def test_strict_selection_naming_a_meta_column_raises_alike(
     ) as async_error:
         _ = async_rows(make_op(), source)
     assert str(async_error.value) == str(sync_error.value)
+
+
+# ── source-info token columns keep the pipeline's type (ITL-1491) ───────────
+
+_TOKENS = pa.large_list(pa.large_string())
+_TOKEN_LISTS = pa.large_list(_TOKENS)
+_FIXED_TOKENS = pa.list_(pa.large_string(), 2)
+# Per layout: the token column of ``a`` and of ``b``, each with values that show
+# fewer list levels than the column has, a null inside a list, or a type no value
+# gives. A token with a list layer is never null itself, and its data column has
+# the same list layers (the token-shape rule): ``_token_stream`` shapes the data.
+_TOKEN_LAYOUTS: dict[str, dict[str, tuple[list[Any], pa.DataType]]] = {
+    "one_level": {
+        "a": ([[None], [], ["s::0::a", None]], _TOKENS),
+        "b": ([[], ["u", "v"], [None, None]], _TOKENS),
+    },
+    "two_levels": {
+        "a": ([[[None]], [[]], [["a"], []]], _TOKEN_LISTS),
+        "b": ([[[]], [[None], []], [[None, "c"]]], _TOKEN_LISTS),
+    },
+    "fixed_size_and_strings": {
+        "a": ([["p", "q"], ["r", "s"], ["t", "u"]], _FIXED_TOKENS),
+        "b": (["s::0::b", None, "s::2::b"], pa.large_string()),
+    },
+}
+_TOKEN_TAG_ORDERS = {"g_then_k": ("g", "k"), "k_then_g": ("k", "g")}
+
+
+def _token_stream(
+    layout: str,
+    tags: Sequence[str],
+    data: Sequence[str] = ("a", "b"),
+    source_id: str = "t",
+) -> ArrowTableStream:
+    """Three rows, two tags and two data columns, with the layout's token columns.
+
+    The stream is a source's table (so it has the source's system tags) whose
+    ``_source_*`` columns are replaced; ``data`` renames the two data columns.
+    """
+    from tests.token_shapes import with_token_column
+
+    first, second = data
+    columns = {
+        "g": pa.array(["m", "m", "n"], pa.large_string()),
+        "k": pa.array([1, 2, 1], pa.int64()),
+        first: pa.array([10, 20, 30], pa.int64()),
+        second: pa.array([0.5, 1.5, 2.5], pa.float64()),
+    }
+    names = [*tags, first, second]
+    source = ArrowTableSource(
+        pa.table({name: columns[name] for name in names}),
+        tag_columns=list(tags),
+        tag_only_columns=True,
+        source_id=source_id,
+    )
+    table = source.as_table(columns={"source": True, "system_tags": True})
+    for name, (values, kind) in zip(data, _TOKEN_LAYOUTS[layout].values()):
+        table = with_token_column(table, name, values, kind)
+    return ArrowTableStream(table, tag_columns=list(tags))
+
+
+def _listed(kind: pa.DataType, levels: int) -> pa.DataType:
+    """``kind`` under ``levels`` more list levels."""
+    for _ in range(levels):
+        kind = pa.large_list(kind)
+    return kind
+
+
+# The operator, its inputs' data names, and the list levels it adds to a token column.
+_TOKEN_OPERATORS: dict[
+    str, tuple[Callable[[], StaticOutputOperatorPod], tuple[tuple[str, str], ...], int]
+] = {
+    "select": (lambda: SelectDataColumns(["b", "a"]), (("a", "b"),), 0),
+    "map_data": (lambda: MapData({"a": "a", "b": "b"}), (("a", "b"),), 0),
+    "join": (Join, (("a", "b"), ("c", "d")), 0),
+    "semi_join": (SemiJoin, (("a", "b"), ("c", "d")), 0),
+    "batch": (lambda: Batch(batch_size=2), (("a", "b"),), 1),
+    "group_by": (lambda: GroupBy(by=["g"]), (("a", "b"),), 1),
+    "merge_join": (MergeJoin, (("a", "b"), ("a", "b")), 1),
+}
+
+
+@pytest.mark.parametrize("tags", list(_TOKEN_TAG_ORDERS))
+@pytest.mark.parametrize("layout", list(_TOKEN_LAYOUTS))
+@pytest.mark.parametrize("operator", list(_TOKEN_OPERATORS))
+def test_token_columns_keep_the_pipelines_type_on_both_paths(
+    operator: str, layout: str, tags: str
+) -> None:
+    """A token column's type is the pipeline's on the sync and on the async path.
+
+    The inputs' token columns are lists whose values show fewer levels than the
+    column has, hold nulls, or are fixed-size lists: no value gives their type. Each
+    operator here determines the output's token type from its input's: unchanged
+    (select, map, ``Join`` and ``SemiJoin`` over plain tags) or one list level more
+    (``Batch``, a non-key column under ``GroupBy``, a colliding column under
+    ``MergeJoin``). The async path yields the sync path's rows, types, hashes and
+    source info (ITL-1491: the async ``Join`` and the table built from rows typed
+    each token again from its value, so a null token lost its column's type).
+    """
+    make_op, inputs, levels = _TOKEN_OPERATORS[operator]
+    order = _TOKEN_TAG_ORDERS[tags]
+
+    def sources() -> tuple[StreamProtocol, ...]:
+        return tuple(
+            _token_stream(layout, order, data, source_id=f"t{index}")
+            for index, data in enumerate(inputs)
+        )
+
+    expected = sync_rows(make_op(), *sources())
+    actual = async_rows(make_op(), *sources())
+    assert expected
+    assert_equivalent(expected, actual)
+    assert_same_provenance(expected, actual)
+    declared = {
+        name: kind
+        for data in inputs[: 1 if operator == "semi_join" else None]
+        for name, (_, kind) in zip(data, _TOKEN_LAYOUTS[layout].values())
+    }
+    for rows in (expected, actual):
+        for _, data in rows:
+            in_transit = data.as_table(columns={"source": True})
+            for_the_id = data.source_info_table()
+            for name, kind in declared.items():
+                column = f"_source_{name}"
+                wanted = _listed(kind, levels)
+                # In transit a token keeps its column's type, a null token too.
+                assert in_transit.schema.field(column).type == wanted
+                # For the instance id a null token is a ``large_string`` null.
+                token = for_the_id.column(column)
+                assert token.type == (pa.large_string() if token.null_count else wanted)
+                assert token.to_pylist() == in_transit.column(column).to_pylist()
+
+
+@pytest.mark.parametrize("layout", list(_TOKEN_LAYOUTS))
+@pytest.mark.parametrize("operator", list(_TOKEN_OPERATORS))
+def test_tag_order_changes_no_token_of_a_row(operator: str, layout: str) -> None:
+    """The two tag orders give the same tokens and token types, row for row."""
+    make_op, inputs, _ = _TOKEN_OPERATORS[operator]
+    seen = []
+    for order in _TOKEN_TAG_ORDERS.values():
+        rows = async_rows(
+            make_op(),
+            *(
+                _token_stream(layout, order, data, source_id=f"t{index}")
+                for index, data in enumerate(inputs)
+            ),
+        )
+        seen.append(
+            sorted(
+                (
+                    repr(sorted(tag.as_dict().items(), key=repr)),
+                    repr(
+                        sorted(
+                            (f.name, str(f.type), repr(c.to_pylist()))
+                            for f, c in zip(
+                                data.as_table(columns={"source": True}).schema,
+                                data.as_table(columns={"source": True}).columns,
+                            )
+                            if f.name.startswith("_source_")
+                        )
+                    ),
+                )
+                for tag, data in rows
+            )
+        )
+    assert seen[0] == seen[1]

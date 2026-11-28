@@ -100,7 +100,7 @@ def _join_job(
 
 
 def _operator_table(store: ArrowDatabaseProtocol) -> pa.Table:
-    """The one stored operator cache table (``odb_v2``)."""
+    """The one stored operator cache table (``odb_v3``)."""
     paths = [p for p in store.list_table_paths() if p[-1] == OPERATOR_DB_SCHEMA_VERSION]
     assert len(paths) == 1, paths
     table = store.get_all_records(paths[0])
@@ -428,3 +428,207 @@ def test_a_plain_operator_or_an_uncached_one_asks_nothing_of_the_database() -> N
     with_data_tags.attach_databases(
         pipeline_database=database, cache_mode=CacheMode.OFF
     )
+
+
+@STORES
+@pytest.mark.parametrize("mode", ["sync", "async", "run"])
+@pytest.mark.parametrize("mixed_first", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_operator_storage_keeps_one_declared_token_schema(
+    make_store: Callable[[Path], ArrowDatabaseProtocol],
+    tmp_path: Path,
+    mode: str,
+    mixed_first: bool,
+    nested: bool,
+) -> None:
+    """A repeated row has the same stored key in both batches."""
+    import asyncio
+
+    from orcapod.channels import Channel
+    from orcapod.operators import Filter
+    from orcapod.streams import ArrowTableStream
+    from orcapod.types import col
+
+    op_filter = Filter(col("k") >= 0)
+    origin = op.sources.DictSource(
+        [{"k": 0, "x": 1}], tag_columns=["k"], tag_only_columns=True, source_id="seed"
+    )
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field(
+                "x",
+                pa.large_list(pa.large_list(pa.int64())) if nested else pa.int64(),
+                nullable=False,
+            ),
+            pa.field(
+                "_source_x",
+                pa.large_list(pa.large_list(pa.large_string()))
+                if nested
+                else pa.large_string(),
+            ),
+        ]
+    )
+
+    def stream(mixed: bool) -> ArrowTableStream:
+        rows: list[dict[str, int | str | list[list[int]] | list[list[str]] | None]] = [
+            {
+                "k": 0,
+                "x": [[1]] if nested else 1,
+                "_source_x": [["seed::0::x"]] if nested else "seed::0::x",
+            }
+        ]
+        if mixed:
+            rows.append(
+                {
+                    "k": 1,
+                    "x": [[2]] if nested else 2,
+                    "_source_x": [] if nested else None,
+                }
+            )
+        return ArrowTableStream(
+            pa.Table.from_pylist(rows, schema=schema),
+            tag_columns=["k"],
+            producer=op_filter,
+            upstreams=(origin,),
+        )
+
+    class Snapshots(ArrowTableStream):
+        """Keep the producer identity while a source snapshot is replaced."""
+
+        current: ArrowTableStream = stream(mixed_first)
+
+        def as_table(self, **kwargs):
+            return self.current.as_table(**kwargs)
+
+        def iter_data(self):
+            return self.current.iter_data()
+
+    stream_value = Snapshots(
+        schema.empty_table(), tag_columns=["k"], producer=op_filter, upstreams=(origin,)
+    )
+    store = make_store(tmp_path)
+    node = OperatorJobNode(
+        op_filter, [stream_value], pipeline_database=store, cache_mode=CacheMode.LOG
+    )
+
+    async def execute_async() -> None:
+        incoming, outgoing = Channel(buffer_size=8), Channel(buffer_size=8)
+        for row in stream_value.iter_data():
+            await incoming.writer.send(row)
+        await incoming.writer.close()
+        await node.async_execute([incoming.reader], outgoing.writer)
+        _ = await outgoing.reader.collect()
+
+    for mixed in (mixed_first, not mixed_first):
+        stream_value.current = stream(mixed)
+        node.clear_cache()
+        if mode == "run":
+            node.run()
+        elif mode == "sync":
+            node.execute(stream_value)
+        else:
+            asyncio.run(execute_async())
+        store.flush()
+
+    assert len(store.list_table_paths()) == 1
+    path = store.list_table_paths()[0]
+    assert path[-1] == "odb_v3"
+    stored = store.get_all_records(path, record_id_column="_record_hash")
+    assert stored is not None
+    assert stored.num_rows == 2
+    assert stored.schema.field("_source_x") == schema.field("_source_x")
+    preimage = stored.select([*schema.names, constants.NODE_CONTENT_HASH_COL])
+    for i, saved in enumerate(stored["_record_hash"].to_pylist()):
+        assert (
+            node.data_context.arrow_hasher.hash_table(
+                preimage.slice(i, 1)
+            ).to_prefixed_digest()
+            == saved
+        )
+    assert node.as_source().as_table().sort_by("k").to_pylist() == [
+        {"k": 0, "x": [[1]] if nested else 1},
+        {"k": 1, "x": [[2]] if nested else 2},
+    ]
+    node.attach_databases(pipeline_database=store, cache_mode=CacheMode.REPLAY)
+    replayed = node.execute(stream_value).as_table(columns={"source": True})
+    assert replayed.schema.field("_source_x") == schema.field("_source_x")
+
+
+@STORES
+@pytest.mark.parametrize("reverse", [False, True])
+def test_merge_join_cache_keeps_declared_system_tag_fields(
+    make_store: Callable[[Path], ArrowDatabaseProtocol], tmp_path: Path, reverse: bool
+) -> None:
+    """Every match subset stores the same fields and reproduces its record keys."""
+    from orcapod.operators import MergeJoin
+    from orcapod.streams import ArrowTableStream
+
+    left = ArrowTableStream(
+        pa.table({"k": [1, 2], "x": [3, 4], "_tag_custom": ["one", None]}),
+        tag_columns=["k"],
+    )
+    right = ArrowTableStream(pa.table({"k": [1, 2], "y": [5, 6]}), tag_columns=["k"])
+    subset = ArrowTableStream(right.as_table().slice(0, 1), tag_columns=["k"])
+    store = make_store(tmp_path)
+    node = OperatorJobNode(
+        MergeJoin(), [left, right], pipeline_database=store, cache_mode=CacheMode.LOG
+    )
+    [system_tag] = [
+        field for field in node.arrow_schema() if field.name.startswith("_tag_custom")
+    ]
+    assert system_tag.nullable
+    for delivery in (right, subset) if reverse else (subset, right):
+        node.clear_cache()
+        node.execute(left, delivery)
+        store.flush()
+    [path] = store.list_table_paths()
+    stored = store.get_all_records(path, record_id_column="_record_hash")
+    assert stored is not None
+    assert sorted(cast("list[int]", stored["k"].to_pylist())) == [1, 2]
+    assert stored.schema.field(system_tag.name).equals(system_tag, check_metadata=True)
+    preimage = stored.select(
+        [*node.arrow_schema().names, constants.NODE_CONTENT_HASH_COL]
+    )
+    assert [
+        node.data_context.arrow_hasher.hash_table(
+            preimage.slice(i, 1)
+        ).to_prefixed_digest()
+        for i in range(stored.num_rows)
+    ] == stored["_record_hash"].to_pylist()
+
+
+def test_operator_cache_refuses_output_field_that_disagrees_with_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cache must reject a changed field before writing record keys."""
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.operators import Filter
+    from orcapod.types import col
+
+    source = op.sources.DictSource([{"k": 1, "x": 2}], tag_columns=["k"])
+    store = InMemoryArrowDatabase()
+    node = OperatorJobNode(
+        Filter(col("x") > 0),
+        [source],
+        pipeline_database=store,
+        cache_mode=CacheMode.LOG,
+    )
+    original = StaticOutputOperatorPod._keep_output_table  # pyright: ignore[reportPrivateUsage]
+    declared = node.arrow_schema().field("x")
+
+    def wrong_flag(table, result):
+        pos = table.schema.get_field_index("x")
+        return original(
+            table.set_column(
+                pos, declared.with_nullable(not declared.nullable), table.column(pos)
+            ),
+            result,
+        )
+
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_keep_output_table", staticmethod(wrong_flag)
+    )
+    with pytest.raises(InputValidationError, match=r"output.*'x'.*nullab"):
+        node.run()
+    assert not store.list_table_paths()

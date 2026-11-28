@@ -10,6 +10,7 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
+    declare_native_custom_system_tags,
     require_supported_nullable_types,
 )
 from orcapod.types import DataValue, SchemaLike
@@ -76,6 +77,9 @@ class DictSource(RootSource):
                 python_schema=data_schema,
             )
             if data_schema is None:
+                arrow_table = declare_native_custom_system_tags(
+                    arrow_table, system_tag_columns
+                )
                 # No explicit schema — infer nullable from actual values.
                 # The type converter defaults all fields to nullable=True; derive
                 # the correct flags here so the builder can trust the schema as-is.

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import pandas as pd
 import polars as pl
 import pyarrow as pa
 
@@ -12,14 +13,21 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
+    declare_native_custom_system_tags,
     require_custom_system_tags,
+    require_custom_system_tags_values,
     require_supported_nullable_types,
 )
+from orcapod.errors import InputValidationError
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
-    from polars._typing import FrameInitTypes
+    from polars._typing import (
+        ArrowArrayExportable,
+        ArrowStreamExportable,
+        FrameInitTypes,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +73,43 @@ class DataFrameSource(RootSource):
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
 
-        df = pl.DataFrame(data)
+        arrow_input_schema = None
+        # Keep pandas and Polars on their native paths even if they export Arrow.
+        # For Arrow inputs, materialize once before Polars drops field metadata.
+        if not isinstance(data, (pd.DataFrame, pl.DataFrame, pl.Series)) and (
+            hasattr(data, "__arrow_c_stream__") or hasattr(data, "__arrow_c_array__")
+        ):
+            # Like Polars, prefer the array export when both are available.
+            if hasattr(data, "__arrow_c_array__"):
+                batch = pa.record_batch(cast("ArrowArrayExportable", data))
+                arrow_input = pa.Table.from_batches([batch])
+            else:
+                arrow_input = pa.table(cast("ArrowStreamExportable", data))
+            if schema is None:
+                require_custom_system_tags(arrow_input, system_tag_columns)
+            else:
+                require_custom_system_tags_values(arrow_input, system_tag_columns)
+                require_custom_system_tags(
+                    arrow_input, system_tag_columns, schema=schema
+                )
+            arrow_input_schema = arrow_input.schema
+            # Polars rechunks native tables but preserves chunks on exporter inputs.
+            df = cast(
+                pl.DataFrame,
+                pl.from_arrow(arrow_input, rechunk=isinstance(data, pa.Table)),
+            )
+        else:
+            df = pl.DataFrame(data)
 
         # Convert any Object-dtype columns to Arrow-compatible types.
         object_columns = [c for c in df.columns if df[c].dtype == pl.Object]
+        for name in object_columns:
+            if name in system_tag_columns:
+                raise InputValidationError(
+                    f"Custom system-tag column {name!r} has type {pl.Object}. "
+                    "Declare a non-nullable string column with no null values "
+                    "and convert its values to text first."
+                )
         if object_columns:
             logger.info(
                 f"Converting {len(object_columns)} object column(s) to Arrow format"
@@ -92,15 +133,26 @@ class DataFrameSource(RootSource):
         arrow_table = df.to_arrow()
         if schema is not None:
             require_supported_nullable_types(schema)
-            require_custom_system_tags(arrow_table, system_tag_columns, schema=schema)
+            if arrow_input_schema is None:
+                require_custom_system_tags_values(arrow_table, system_tag_columns)
+                require_custom_system_tags(
+                    arrow_table, system_tag_columns, schema=schema
+                )
             arrow_table = arrow_table.cast(schema)
-        else:
-            # Polars defaults all fields to nullable=True; infer the correct
-            # flags from the actual data before passing to the builder.
-            require_supported_nullable_types(arrow_table.schema)
-            arrow_table = arrow_table.cast(
-                arrow_utils.infer_schema_nullable(arrow_table)
+        elif arrow_input_schema is not None:
+            arrow_table = arrow_utils.restore_schema_nullability(
+                arrow_table, arrow_input_schema
             )
+        else:
+            arrow_table = declare_native_custom_system_tags(
+                arrow_table, system_tag_columns
+            )
+            require_supported_nullable_types(arrow_table.schema)
+            # Native frames carry no Arrow nullability declarations.
+            inferred = arrow_utils.infer_schema_nullable(
+                arrow_table.drop_columns(list(system_tag_columns))
+            )
+            arrow_table = arrow_utils.restore_schema_nullability(arrow_table, inferred)
 
         self._key_columns = normalize_record_id_columns(record_id_columns) or ()
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)

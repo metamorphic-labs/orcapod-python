@@ -532,8 +532,7 @@ def test_a_typed_arrow_token_column_is_refused_by_the_type_the_row_carries(
     stored_first: bool,
     tmp_path: Path,
 ) -> None:
-    """Review finding 2: ``as_table`` types a token from its value; the row's own
-    token columns (``source_info_table``) are what is checked."""
+    """Reject the Arrow type the row carries, even if a view normalizes it."""
     type_text, array = TYPED_TOKENS[kind]
     function = _function(_database(backend, tmp_path), keys)
     if stored_first:
@@ -576,10 +575,6 @@ def test_a_small_string_arrow_token_column_is_stored_as_large_string(
     assert found.source_info() == dict.fromkeys(keys, "custom::id::small")
 
 
-# A NULL token in a column declared with another type: a row gives it as a
-# ``large_string`` null on every view today (``source_info_table``: "a null token is a
-# large_string null whatever type its column declares"), so the declared type never
-# reaches ``ResultCache.store``.
 NULL_TYPED_TOKENS: dict[str, pa.Array[Any]] = {
     "list": pa.nulls(1, pa.large_list(pa.large_string())),
     "dictionary": pa.array([None], type=pa.large_string()).dictionary_encode(),
@@ -587,46 +582,19 @@ NULL_TYPED_TOKENS: dict[str, pa.Array[Any]] = {
 }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=pytest.fail.Exception,
-    reason=(
-        "ITL-1563, open until PR 607: a row gives a null token as a large_string "
-        "null whatever Arrow type its column declares, so the declared type of an "
-        "all-null token column does not reach ResultCache.store and the row is "
-        "stored with a null large_string token. PR 607 makes a row keep its token "
-        "columns' Arrow types; remove this mark then."
-    ),
-)
 @pytest.mark.parametrize("keys", KEY_ORDERS)
 @pytest.mark.parametrize("kind", sorted(NULL_TYPED_TOKENS))
 def test_a_null_token_in_a_typed_arrow_column_is_refused(
     keys: tuple[str, ...], kind: str
 ) -> None:
+    """The Arrow type survives table transport even when the token is null."""
     function = _function(InMemoryArrowDatabase(), keys)
-    output = _table_output(keys, {"total": NULL_TYPED_TOKENS[kind]})
-    with pytest.raises(InputValidationError):
+    array = NULL_TYPED_TOKENS[kind]
+    output = _table_output(keys, {"total": array})
+    with pytest.raises(InputValidationError) as error:
         function.record_data(Data({"x": 3, "y": 4}), output)
-
-
-@pytest.mark.parametrize("keys", KEY_ORDERS)
-@pytest.mark.parametrize("kind", sorted(NULL_TYPED_TOKENS))
-def test_a_null_token_in_a_typed_arrow_column_is_stored_as_a_large_string_null(
-    keys: tuple[str, ...], kind: str
-) -> None:
-    """What the open route does today: the value and the stored type are sound."""
-    function = _function(InMemoryArrowDatabase(), keys)
-    output = _table_output(keys, {"total": NULL_TYPED_TOKENS[kind]})
-    function.record_data(Data({"x": 3, "y": 4}), output)
-    assert function.call(Data({"x": 1, "y": 2})) is not None
-    table = function.get_all_cached_outputs()
-    assert table is not None and table.num_rows == 2
-    for key in keys:
-        field = table.schema.field(f"{constants.SOURCE_PREFIX}{key}")
-        assert (field.type, field.nullable) == (pa.large_string(), True)
-    found = function.get_cached_output_for_data(Data({"x": 3, "y": 4}))
-    assert found is not None
-    assert found.source_info()["total"] is None
+    assert f"'{constants.SOURCE_PREFIX}total' is {array.type}" in str(error.value)
+    assert function.get_all_cached_outputs() is None
 
 
 @pytest.mark.parametrize("keys", KEY_ORDERS)

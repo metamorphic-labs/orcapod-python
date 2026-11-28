@@ -978,8 +978,8 @@ generation of hashing; rows of the current data context are the current entries.
   Function pipeline — pdb_v2 (PIPELINE_DB_SCHEMA_VERSION)
   Function result   — rdb_v1, after the type's revision rev1 (RESULT_DB_SCHEMA_VERSION)
   Side-effect log   — tdb_v2 (TRACKING_DB_SCHEMA_VERSION)
-  Operator cache    — odb_v2 (OPERATOR_DB_SCHEMA_VERSION)
-  Cached source     — sdb_v1 (SOURCE_DB_SCHEMA_VERSION)
+  Operator cache    — odb_v3 (OPERATOR_DB_SCHEMA_VERSION)
+  Cached source     — sdb_v2 (SOURCE_DB_SCHEMA_VERSION)
 
 - The layout version is the last component of a table path. Every layout marker started at v1
   for the first release, 0.4.0 (developer, November 18, 2026, ITL-1259; 0.3.0 was withdrawn).
@@ -1028,7 +1028,7 @@ generation of hashing; rows of the current data context are the current entries.
   hashes in a path differ between builds. find_stale_tables(..., name_path=...) lists the
   store under the hash-free beginning of the node's path (ArrowDatabaseProtocol.list_table_paths;
   <function>, side_effect_function/<function>, side_effects/<pod>, relative to the node's
-  database; <prefix>/source for a cached source) and every table there whose last component
+  database; the explicit cache_path or <prefix>/source for a cached source) and every table there whose last component
   is not in contexts/stored.CURRENT_LAYOUTS is of another layout (tables_of_another_layout).
   A new layout constant must be added to CURRENT_LAYOUTS. A store that cannot list raises
   TableListingNotSupportedError: side-effecting nodes then warn and proceed (developer,
@@ -1100,30 +1100,151 @@ these preimages anywhere else.
   in the result store by the input hash, calls nothing and writes no pipeline row (developer,
   November 26, 2026; FunctionJobNode._empty_data_cache_hit is the one place that holds that
   choice, to be reconsidered in ITL-1475).
-- The instance id reads a row's tokens through `DataProtocol.source_info_table()`: one column
-  per data column, a data column with no token having a null token. THE INTENDED RULE
-  (developer, November 27, 2026): the type of every source-info token column is fixed by the
-  pipeline, like every other column type, and is not meant to be taken from values: each
-  source and operator determines its output token columns' types from its inputs' types, by
-  its own rule, in its own module. A data-tag that falls through a function pod is meant to
-  keep its source-info token with its type unchanged; a column a function returns is never a
-  pass-through, even with an input's name and value (its token points to the function).
-  TODAY (ITL-1471), in `source_info_table()`: a null token is a `large_string` null whatever
-  type its column declares; a non-null token of a row read from an Arrow table (a stream's
-  row) keeps the type that table declares, with a nullable field; a token given as a Python
-  value is typed from its value (`arrow_utils.source_info_arrow_type`). STOPGAP, not the
-  proper solution: today a token's declared type is, in some places, inferred again from its
-  value (`Data.as_table(columns={"source": True})` and so `_rows_to_table`, the row-built
-  form, and `with_columns_of`). It can narrow a declared type (example: `[None]` in a token
-  column a `Batch` declares with two list levels infers one). ITL-1491 removes it. Never
-  build on the re-typing, and never write "a function passes a column through". A rename
-  moves a column's token with it; a token held for the destination name before is dropped. A pipeline table keeps one type per token column: a row whose token column
-  has another type than the rows recorded (a list token beside a string or null token) is
-  refused, naming the column and both types (_require_one_type_per_token_column), and the write
-  fails as a database write error. A lookup must never fail on a row its stream holds as valid Arrow. The pipeline row
-  stores that same table (_add_pipeline_record), never the columns of
-  as_table(columns={"source": True}): every stored row gives its instance and record id again
-  from its own columns.
+- The Arrow type of every source-info token column is determined by the pipeline, like
+  every other column type; it is never taken from values (developer, November 27, 2026,
+  ITL-1491). A source builds plain `large_string` tokens, and each operator determines its
+  output's token column types from its inputs' types, as it does for every column: the
+  types are those of its result over its inputs' zero-row tables (`typed_zero_row_table`),
+  defined where the operator builds its output (a list of tokens by
+  `arrow_utils.aggregated_list_type`, as for a data list). Never summarize this as a rule
+  per operator family: the operators differ (one keeps a column's token type, one adds a
+  list level to some columns and folds others into one token, one removes a level, one
+  makes a new string token). A row read from an Arrow table carries its typed token
+  columns, and every route keeps them, sync and async alike:
+  `Data.as_table(columns={"source": True})` (so the row-built table at the edge between two
+  nodes, `_rows_to_table`), `Data.schema(columns={"source": True})` (the Python type of that
+  Arrow type), the row-built form of a whole table (which only normalizes a token column to
+  large types, like any column, drops the field's own metadata as a row does, and sets its
+  field flag), every change of a row (a selection, a drop, a rename, added columns), a
+  function pod's stream outside a job (`_table_from_pairs` takes each row's token columns)
+  and a function node, which takes the token types from its input's rows. A data-tag that
+  falls through a function pod keeps its token with its type unchanged
+  (`Data.with_columns_of`); a column a function returns is never a pass-through, even with
+  an input's name and value: its token points to the function. Never write "a function
+  passes a column through", and never type a token from its value where an Arrow type
+  exists. An operator that derives a token from its input's gives it the derived type:
+  `Join` writes the token it merges for a data-tag both inputs hold with the type the
+  inputs declare for that token column, on both paths (through `join._token_array`, which
+  refuses to write a token that does not fit its column: pyarrow stores a string given for
+  a list type as its characters); `Index` gives the element's token the token type with one
+  list layer removed, as an Arrow scalar (`with_source_info` keeps a scalar's type). The
+  one exception: a token is typed from its value (`arrow_utils.source_info_arrow_type`)
+  only where it is first created and no Arrow type exists: a `Data` built by hand from
+  Python values, or given a Python value by `with_source_info` for a column it holds no
+  Arrow token column for, and the string tokens Orcapod itself creates (a source's, a
+  function output's, `Pick`'s, `Index`'s over a string token, a placeholder's).
+  `with_source_info` writes a Python replacement under the row's held token type and
+  preserves the item name, nullability and metadata (`arrow_utils.source_info_replacement`,
+  ITL-1557). It refuses a string for a list, a list for a string, a wrong depth, a null item
+  under a required item field, and `None` for a list type at any depth. Under a held string type,
+  `with_source_info(x=None)` writes a `large_string` null in both `as_table` and
+  `source_info_table`. The `Data` constructor also checks non-`None` replacements against
+  the held type. `Data(table, source_info={"x": None})` keeps the token the table already
+  holds for `x`.
+- **A token's shape is its data's shape** (developer, November 27, 2026, ITL-1491). A token
+  column's type is some list layers on top of `large_string`. Those layers must match
+  EXACTLY the outer list layers of its data column's type, kind for kind: a `large_list`
+  layer needs a `large_list` layer, a fixed-size list a fixed-size list of the same size
+  (compared after large normalization, so a plain `list` is a large list). Under its layers
+  a token is a string: any other leaf (an integer, a binary, also as a plain scalar token
+  column) is refused. The data may be deeper than its token
+  (`large_list<large_list<int64>>` under a `large_list<large_string>` token), and a plain
+  `large_string` token has no layer, so it fits any data. A data column of a logical list
+  type (the extension type built for a list of a logical element, such as a list of `Path`)
+  is read as its storage: one large-list layer per list level, which is what `Batch`,
+  `GroupBy` and `MergeJoin` build over a logical element. A token's list is never null AT ANY
+  LEVEL (developer, November 27, 2026): a null is allowed only at the innermost level,
+  where the element is a string (`["a::row_0::x", null]` is valid; `[null, ["a"]]` under
+  a two-level token type is not); a plain string token may be null. Valid: `large_list<large_string>` over `large_list<int64>`;
+  `fixed_size_list<large_string>[2]` over `fixed_size_list<int64>[2]`; `large_string` over
+  anything. Invalid: `large_list<large_string>` over `int64`; a large list over a
+  fixed-size list or the reverse; two list levels over one; a null list token;
+  `large_list<int64>` as a token. Only lists are layers today: a token type with a nested
+  layer of another kind (a struct, a map) is refused, and no code is written for layers
+  that do not exist yet. A layer's item field (name, nullability, metadata) is NOT compared
+  between a token and its data, nor between two inputs' declarations of one token column
+  beyond what `require_shared_arrow_type` compares (ITL-1519 decides a consistent
+  treatment); never add a refusal for it. The rule is checked where a stream is built from
+  a table (`ArrowTableStream.__init__`, so every source, operator result, table built from
+  rows, typed zero-row input and the sync orchestrator's held-rows stream), from the
+  columns' types and the token column's null count only: no value is read and nothing is
+  computed. The error lists the violating columns in name order (`token_shape_error`
+  sorts them). KNOWN LIMIT (ITL-1534): the rule is checked where a stream is built, and
+  the async orchestrator hands a held node's rows on without building one, so a
+  hand-built held row with an invalid token shape is refused on sync and accepted on
+  async (pinned by `test_rows_on_read.py::test_held_rows_that_break_the_token_shape_rule_differ_by_route_itl_1534`).
+  A check of held rows on the async route was tried in this PR and taken out (developer,
+  November 27, 2026): never add one back here, ITL-1534 decides it. Whatever is done
+  there, NEVER hash an Arrow type object or use one as a dict or set key: an extension
+  type need not be hashable (Orcapod's own `list[Path]` type is not), which made a held
+  batch of such lists fail on replay
+  (`test_token_types_review_4.py::test_a_replay_over_logical_lists_reuses_its_rows`).
+  The type rule is the pure function
+  `schema_utils.token_layers_fit`; `token_shape_violations` lists the violating columns and
+  `token_shape_error` words the `InputValidationError`, which names the token column, the
+  data column and both types. Never loosen it. NOT covered: a record batch sent into an
+  `OutputChannel` (the channels are not wired into nodes; the stream `result()` builds is
+  checked; the follow-up is ITL-1526), and a `Data` built by hand outside a stream. The null check reads the
+  validity of EVERY list level of a list-typed token column (`schema_utils.null_list_level`:
+  the null count of each level's arrays, no value), and the error says at which level (0 is the
+  token itself). A typed zero-row table and a plain string token are unaffected. No
+  source, operator or function builds a violating stream. The operators that need an
+  inner list keep a guard for input no stream can hold any more (rows built by hand and
+  sent over a bare row channel, hand-built record batches): `Index` on a null inner list,
+  and `Join` / `MergeJoin` and the streaming-join kernels merging the tokens of a shared
+  data-tag (`join.NullTokenListError`, which says what it found, worded for the user by
+  `join.null_token_list_error`). Each guard has a unit test; never remove one, and never
+  raise a blank internal exception from one.
+- Two inputs that declare one token column with two types are refused, on the sync and the
+  async path, with `require_shared_arrow_type`'s error naming the column and both types
+  (developer, November 27, 2026): a column that collides under `MergeJoin`, and the token
+  column of a data-tag both inputs of a `Join` or a `MergeJoin` hold (compared before
+  `MergeJoin` renames the second input's column, so the outcome never depends on whether a
+  row matches). ORDINARY sources reach this: `Batch(1)` over a source of scalars gives list
+  data with LIST tokens, a source that already holds such lists has STRING tokens, and
+  joining the two on that data-tag (or merging that column) is refused; the remedy is to
+  bring both inputs to one form before the join (it is a known limitation in the
+  changelog; keep refusing; the follow-up is ITL-1522). The decision comes from the declared
+  types: the sync path reads its inputs' tables; the async `Join` takes each input's first
+  row as its declaration and compares it with every other input's as it arrives, whether
+  or not any row matches. An input that sends NO row over a bare row channel
+  (`Join().async_execute` called directly) declares nothing there, as for the shared-key
+  type check (a stated limit, never fix it here: ITL-1527); in a job the node knows its inputs' types and both orchestrators refuse.
+  `MergeJoin` reports its first disagreement in name order (`_output_types` iterates
+  sorted names, never a set). The async `Join` folds only the tokens of columns it merged
+  (`merged_so_far`, one set per join, shared by the steps of a staggered chain): a
+  column's own token that happens to start like the join's internal pending marker is the
+  user's and is kept, as on the sync path. Record batches of one stream declare one token
+  type, compared strictly (`settle_token_types`: list kind, depth, and each item field's
+  name, nullability and metadata), so the order of the batches never decides a type; a
+  batch that declares another is refused, and a streaming-join kernel holds every batch to
+  its input stream's token type. The first-batch rule (ITL-1557): the token type an output
+  channel's stream declares (`declared_token_types`) binds every batch sent into it, the
+  first and an empty one included, so a batch never replaces a declared token type (item
+  metadata included); the first batch settles a token column's type only where the stream
+  declares none for it. A token column may carry metadata on a list's item field,
+  as its stream declares it.
+- The instance id reads a row's tokens through `DataProtocol.source_info_table()`: the typed
+  columns the row carries, every field nullable; a null token is a `large_string` null, for
+  the id and for the stored column (developer decision of November 26, 2026). A stream's
+  rows have a null token only in a `large_string` column (the token-shape rule); the
+  rewrite of a null in a column declared otherwise matters only for a `Data` built by hand
+  from a table outside a stream. A rename moves a column's token with it; a token held for
+  the destination name before is dropped. There is one column per data column: a data
+  column with no token has a null token, so a row built from values and the same row read
+  from a table have one instance id whenever the values' own types
+  (`source_info_arrow_type`) are the table's: always for string and null tokens, and for a
+  list token that shows every list level of its column. A hand-built row whose list token
+  shows fewer levels than a table declares for it (`[[]]` in a three-level column) is typed
+  from that value and is another instance. Ids are a function of the row alone, never of
+  the order sessions ran in. A pipeline table keeps one type per token column: a row whose
+  token column has another type than the rows recorded (a list token beside a string or
+  null token) is refused, naming the column and both types
+  (`_require_one_type_per_token_column`), and the write fails as a database write error; it
+  is the safety net for a hand-built row given straight to a node and for an
+  implementation bug. A lookup must never fail on a row its stream holds as valid Arrow.
+  The pipeline row stores that same table (`_add_pipeline_record`): every stored row gives
+  its instance and record id again from its own columns.
 - A trace resolves a held row by its instance id, on every branch of a function step (over a
   source and over another node): a function node says which instance it holds each row under
   (FunctionJobNode.held_instance_ids), and provenance._entries_for keeps the stored records of
@@ -1317,6 +1438,7 @@ data. The rules:
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on
   every execution path (sync and async).
+  Something that used to complete may be changed to a refusal when the behaviour that let it complete was erroneous: a result reached through a bug (a silently changed type, a value that is not what it claims to be) is not protected by "nothing that completes may stop completing". The refusal stands until a proper fix exists, and is often the proper permanent answer. (Developer, November 27, 2026.)
   Function-output rule (developer, November 12, 2026): the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base.
   What is stored for a subclass instance is decided by the logical type of the declared
   class (developer, November 12, 2026, ITL-871): a plain user class is stored as the base
@@ -1344,9 +1466,25 @@ data. The rules:
   changed, so `int8` stays `int8`. Sources refuse Arrow type `null` at any depth, including
   in reserved raw columns. Declare a supported nullable type for missing values.
   A source's custom system-tag names must each identify an existing non-nullable text
-  column with no null values. When Join sorts tied system tags, an output field is
-  nullable if any of the corresponding input fields can hold a null.
+  column with no null values and no Arrow field metadata. Remove field metadata before
+  building the source. This restriction is a stopgap pending ITL-1561. System-tag fields on
+  a raw ArrowTableStream keep their metadata. DataFrameSource uses an explicit schema for
+  custom system-tag nullability and validates the raw values, types and metadata before casting.
+  Join sorts tied source and record IDs together, with null IDs last, and declares the
+  rebuilt fields without operand metadata. A rebuilt field is nullable if any of the
+  corresponding input fields can hold a null. Tied operands must declare the same set of
+  system-tag names. Sync and record batches keep custom system tags in input order.
+  Standalone row channels carry custom tags on the same provenance path with their IDs,
+  preserving their Arrow fields. Sorting happens only within a full pipeline hash tie,
+  on the final link.
   A raw `ArrowTableStream` still preserves `null` in its table in ITL-1543 part A.
+  A row's system-tag fields come from its stream, including raw streams. Join
+  uses those declarations on the async row path as well as in its tables.
+  Streams, rows and record batches declare every `_source_*` token field nullable (ITL-1557).
+  The top-level flag comes from `arrow_utils.source_info_field` and is independent
+  of the token values and of any list item fields. CachedSource writes these fields
+  and their record hashes under `sdb_v2`. The operator cache stores and hashes the
+  output stream's declared fields under `odb_v3` (ITL-1562).
   A row built by `Data` still gives an untyped null the `large_string` type.
   PolarsFilter is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (arrow_utils.restore_column_types and
@@ -1822,15 +1960,16 @@ data. The rules:
   (`arrow_keys.polars_key_frame`, `arrow_keys.sort_key`) and the rows are taken from the
   table, so no value passes through Polars. A tag type with no rule (a map, an interval, a
   union, a list view) raises `TypeError` naming the column.
-- `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; for a
-  token supplied as a Python value the Arrow and Python types are derived from the value, with
-  `None` mapping to `large_string`. That rule has one definition,
-  `arrow_utils.source_info_arrow_type`. `ArrowTableStream.iter_data` hands each row's source
-  info to `Data` as Arrow columns, and `source_info_table()` keeps the type the stream
-  declares for a non-null token. Today a declared type is, in some places, inferred again
-  from the value, a stopgap ITL-1491 removes (above, "Row ids"). A many→one operator must
-  emit a list for EVERY row of a list-valued column — mixing in a bare None makes per-row
-  as_table() schemas diverge and pa.concat_tables fail on the barrier path.
+- Data source-info values may be str, None, or list[...], nested to any depth; Arrow/Python
+  types are derived from the value, with None mapping to large_string. That rule has one
+  definition, arrow_utils.source_info_arrow_type, and applies only to tokens supplied as
+  Python values: ArrowTableStream.iter_data hands each row's source info to Data as Arrow
+  columns, so a type the stream already has is never re-inferred. A
+  many→one operator must emit a list for **every** row of a list-valued column: a token
+  has no null list at any level (the token-shape rule, ITL-1491), and a stream that
+  holds one is refused when it is built. Rows read from a table keep its column type, so
+  they always make one table; only rows built from Python values, where a bare `None` is
+  typed `large_string` and a list a list, give per-row `as_table()` schemas that diverge.
 - Operators that build lists (Batch, GroupBy, MergeJoin) build every list-valued column
   with arrow_utils.aggregated_list_array (member values in member order, lists from offsets),
   never from Python values and never pa.list_(field.type). Its type comes from

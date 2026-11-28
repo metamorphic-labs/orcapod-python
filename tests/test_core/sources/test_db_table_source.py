@@ -581,3 +581,40 @@ class TestQueryOverride:
             tag_only_columns=True,
         )
         assert src.as_table().num_rows == 2  # only s2, s3 have trial > 1
+
+
+@pytest.mark.parametrize("nullable", [True, False])
+def test_db_source_checks_the_batch_system_tag_declaration_without_column_info(
+    nullable: bool,
+) -> None:
+    """A null-free batch cannot supply the missing non-nullable tag declaration."""
+    from orcapod.errors import InputValidationError
+
+    class BatchSchemaConnector(MockDBConnector):
+        def get_column_info(self, table_name: str) -> list[ColumnInfo]:
+            return []
+
+    table = pa.table(
+        {"id": [1], "extra": ["tag"]},
+        schema=pa.schema(
+            [
+                pa.field("id", pa.int64(), nullable=False),
+                pa.field("extra", pa.large_string(), nullable=nullable),
+            ]
+        ),
+    )
+    conn = BatchSchemaConnector({"rows": table}, {"rows": ["id"]})
+    if nullable:
+        with pytest.raises(InputValidationError, match="extra.*nullable"):
+            _ = DBTableSource(
+                conn, "rows", source_id="db", system_tag_columns=["extra"]
+            )
+    else:
+        source = DBTableSource(
+            conn, "rows", source_id="db", system_tag_columns=["extra"]
+        )
+        assert (
+            not source.as_table(columns={"system_tags": True})
+            .schema.field("_tag_extra")
+            .nullable
+        )

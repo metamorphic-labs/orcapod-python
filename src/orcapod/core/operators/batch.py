@@ -189,7 +189,11 @@ class Batch(UnaryOperator):
             list_type = arrow_utils.aggregated_list_type(
                 field.type, type_converter, column=field.name
             )
-            fields.append(pa.field(field.name, list_type, nullable=False))
+            fields.append(
+                arrow_utils.source_info_field(field.name, list_type)
+                if field.name.startswith(constants.SOURCE_PREFIX)
+                else pa.field(field.name, list_type, nullable=False)
+            )
             arrays.append(arrow_utils.aggregated_list_array(column, offsets, list_type))
         batched_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
@@ -336,8 +340,8 @@ class Batch(UnaryOperator):
                 full = rows - rows % self.batch_size
                 if not full:
                     continue
-                # Arrived batches may differ in their provenance fields: put them
-                # under one another as a complete table settles them.
+                # Arrived batches may differ in their provenance fields' flags: put
+                # them under one another, under one schema.
                 arrived = concatenate_batches(waiting)
                 assert arrived is not None  # they hold rows
                 await self._send_processed(

@@ -14,7 +14,10 @@ from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import parse_source_id
-from orcapod.core.sources.stream_builder import require_supported_nullable_types
+from orcapod.core.sources.stream_builder import (
+    require_supported_nullable_types,
+    validate_source_table,
+)
 from orcapod.errors import (
     CachedSourceIdMismatchError,
     InputValidationError,
@@ -296,7 +299,7 @@ class CachedSource(RootSource):
     def cache_path(self) -> tuple[str, ...]:
         """Cache table path: scoped to the source's content hash, then the layout version.
 
-        The layout version (``sdb_v1``) is always the last component, also when an
+        The layout version (``sdb_v2``) is always the last component, also when an
         explicit ``cache_path`` was given.
         """
         return self._unversioned_cache_path + (SOURCE_DB_SCHEMA_VERSION,)
@@ -307,8 +310,8 @@ class CachedSource(RootSource):
         Without an explicit ``cache_path`` the path holds a hash that can differ between
         builds, so caches of another layout are looked for anywhere under
         ``<cache_path_prefix>/source`` (ITL-954): those are caches of any source stored
-        there, and they are reported without a number of rows. They are not read and
-        are left unchanged.
+        there, and they are reported without a number of rows. With an explicit path,
+        list the layouts under that path. Older layouts are left untouched.
         """
         if self._stale_tables_checked:
             return
@@ -316,7 +319,7 @@ class CachedSource(RootSource):
         account_for_stale_tables(
             find_stale_tables(
                 self._cache_database,
-                name_path=None
+                name_path=self._unversioned_cache_path
                 if self._explicit_cache_path is not None
                 else self._cache_path_prefix + ("source",),
             ),
@@ -363,7 +366,7 @@ class CachedSource(RootSource):
         live_table = self._source.as_table(
             columns={"source": True, "system_tags": True, "meta": True}
         )
-        require_supported_nullable_types(live_table.schema)
+        validate_source_table(live_table)
         live_table = live_table.drop(
             [
                 name
@@ -423,9 +426,7 @@ class CachedSource(RootSource):
     def _cached_record_hashes(self) -> set[bytes]:
         """The record hashes of the rows cached under the current data context."""
         self._account_for_stale_tables()
-        records = self._cache_database.get_all_records(
-            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
-        )
+        records = self._read_cache_table()
         if records is None:
             return set()
         records = keep_rows_of_data_context(records, self.data_context_key)
@@ -495,6 +496,17 @@ class CachedSource(RootSource):
         self._update_modified_time()
         return True
 
+    def _read_cache_table(self) -> pa.Table | None:
+        """Read and validate the physical cache before using any of its columns."""
+        records = self._cache_database.get_all_records(
+            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        return (
+            None
+            if records is None
+            else validate_source_table(records, stored_cache=True)
+        )
+
     def _read_cached_records(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context.
 
@@ -526,12 +538,9 @@ class CachedSource(RootSource):
             InputValidationError: If a cached column reads back as another Arrow type.
         """
         self._account_for_stale_tables()
-        records = self._cache_database.get_all_records(
-            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
-        )
+        records = self._read_cache_table()
         if records is None:
             return None
-        require_supported_nullable_types(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)
         if records.num_rows < stored_rows and not self._skipped_rows_reported:
@@ -559,9 +568,7 @@ class CachedSource(RootSource):
         """
         if self._source_ids_checked:
             return
-        records = self._cache_database.get_all_records(
-            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
-        )
+        records = self._read_cache_table()
         if records is None:
             return
         self._require_source_ids(
@@ -731,9 +738,7 @@ class CachedSource(RootSource):
         See ``typed_zero_row_table``; neither the cache nor the source is read.
         """
         table = typed_zero_row_table(self._source)
-        if table is not None:
-            require_supported_nullable_types(table.schema)
-        return table
+        return None if table is None else validate_source_table(table)
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the wrapped source."""

@@ -7,8 +7,10 @@ member.  `Data` must represent those without collapsing or crashing.
 from __future__ import annotations
 
 import pyarrow as pa
+import pytest
 
 from orcapod.core.datagrams import Data
+from orcapod.types import SourceInfoValue
 
 
 def _data_with_mixed_source_info() -> Data:
@@ -85,3 +87,84 @@ class TestListValuedSourceInfo:
         assert data.as_table(columns={"source": True}).column(
             "_source_path"
         ).to_pylist() == [["s0", "s1"]]
+
+
+@pytest.mark.parametrize("via_constructor", [True, False])
+@pytest.mark.parametrize(
+    "replacement",
+    [["new"], "wrong depth", [None]],
+    ids=["preserves-item-field", "refuses-scalar", "refuses-null-item"],
+)
+def test_python_token_replacement_uses_the_held_type(
+    via_constructor: bool, replacement: SourceInfoValue
+) -> None:
+    """Replacements use the declared list item name, metadata and nullability."""
+    kind = pa.large_list(
+        pa.field(
+            "leaf", pa.large_string(), nullable=False, metadata={b"unit": b"token"}
+        )
+    )
+    table = pa.table({"x": [[1]], "_source_x": pa.array([["old"]], type=kind)})
+
+    def replace() -> Data:
+        if via_constructor:
+            return Data(table, source_info={"x": replacement})
+        return Data(table).with_source_info(x=replacement)
+
+    if replacement != ["new"]:
+        with pytest.raises((pa.ArrowInvalid, pa.ArrowTypeError)):
+            _ = replace()
+        return
+    updated = replace().as_table(columns={"source": True})
+    assert updated.schema.field("_source_x").equals(
+        pa.field("_source_x", kind, nullable=True), check_metadata=True
+    )
+    assert updated["_source_x"].to_pylist() == [replacement]
+
+
+def test_a_null_replacement_agrees_with_the_held_string_type() -> None:
+    """Fifth review of PR #607, finding 2: ``with_source_info(x=None)`` on an
+    Arrow-backed row whose token column is a string gives one declaration, a
+    ``large_string`` null, in ``as_table`` and in ``source_info_table``."""
+    table = pa.table({"x": [1], "_source_x": pa.array(["old"], type=pa.large_string())})
+    cleared = Data(table).with_source_info(x=None)
+    expected = pa.field("_source_x", pa.large_string(), nullable=True)
+    shown = cleared.as_table(columns={"source": True})
+    for held in (shown, cleared.source_info_table()):
+        assert held.schema.field("_source_x").equals(expected, check_metadata=True)
+        assert held["_source_x"].to_pylist() == [None]
+
+
+def test_a_null_replacement_of_a_held_list_token_is_refused() -> None:
+    """Fifth review of PR #607, finding 2: a list token is never null, so
+    ``with_source_info(x=None)`` on an Arrow-backed row whose token column is a
+    list is refused. It used to give the row two declarations: a null list in
+    ``as_table`` and a ``large_string`` null in ``source_info_table``."""
+    kind = pa.large_list(
+        pa.field("leaf", pa.large_string(), nullable=True, metadata={b"u": b"t"})
+    )
+    table = pa.table({"x": [[1]], "_source_x": pa.array([["old"]], type=kind)})
+    row = Data(table)
+    with pytest.raises(pa.ArrowTypeError, match="list token is never null"):
+        _ = row.with_source_info(x=None)
+    # The row is unchanged, and its two forms agree with the held type.
+    for held in (row.as_table(columns={"source": True}), row.source_info_table()):
+        assert held.schema.field("_source_x").type.equals(kind, check_metadata=True)
+        assert held["_source_x"].to_pylist() == [["old"]]
+
+
+@pytest.mark.parametrize("via_constructor", [False, True])
+def test_a_replacement_cannot_put_a_null_inside_nested_token_lists(
+    via_constructor: bool,
+) -> None:
+    kind = pa.large_list(pa.large_list(pa.large_string()))
+    table = pa.table({"x": [[[1]]], "_source_x": pa.array([[["old"]]], type=kind)})
+    row = Data(table)
+    with pytest.raises(pa.ArrowTypeError, match="list token is never null"):
+        if via_constructor:
+            _ = Data(table, source_info={"x": [None]})
+        else:
+            _ = row.with_source_info(x=[None])
+    assert row.with_source_info(x=[[None]]).source_info_table()[
+        "_source_x"
+    ].to_pylist() == [[[None]]]

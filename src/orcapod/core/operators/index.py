@@ -254,6 +254,33 @@ class Index(UnaryOperator):
     # Per-packet processing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _element_token_type(token_type: pa.DataType) -> pa.DataType:
+        """The token type of an element, given the token type of its list.
+
+        One list layer removed (a large or a fixed-size list); a token with no
+        layer keeps its type (the element's token is then a new string).
+
+        Args:
+            token_type: The Arrow type of the indexed column's token column.
+
+        Returns:
+            The Arrow type of the element's token column.
+        """
+        if (
+            pa.types.is_large_list(token_type)
+            or pa.types.is_list(token_type)
+            or pa.types.is_fixed_size_list(token_type)
+        ):
+            return token_type.value_type  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a list type has a value type
+        return token_type
+
+    def _token_type(self, data: DataProtocol) -> pa.DataType | None:
+        """The Arrow type ``data`` carries for the indexed column's token, if any."""
+        name = f"{constants.SOURCE_PREFIX}{self.column}"
+        schema = data.arrow_schema(columns={"source": True})
+        return schema.field(name).type if name in schema.names else None
+
     def _process_one(
         self,
         tag: TagProtocol,
@@ -317,13 +344,34 @@ class Index(UnaryOperator):
             )
 
         old_src = data.source_info().get(self.column)
-        new_src: SourceInfoValue
+        new_src: "SourceInfoValue | pa.Scalar[Any]"
         if isinstance(old_src, list):
             # A many->one operator (Batch, GroupBy) left one token per member: the
             # element's provenance is its own token, one list level removed (the
             # inner list after two aggregations). ``effective_i`` is in range for
             # the value, and a token list holds one entry per member.
-            new_src = old_src[effective_i] if effective_i < len(old_src) else None
+            element = old_src[effective_i] if effective_i < len(old_src) else None
+            # The element's token has the type of the token list's items: the
+            # pipeline determines it, and it is never taken from the value
+            # (ITL-1491).
+            new_src = element
+            token_type = self._token_type(data)
+            if token_type is not None:
+                remaining = self._element_token_type(token_type)
+                if (
+                    element is None
+                    and remaining != token_type
+                    and (remaining != pa.large_string())
+                ):
+                    target = f"{constants.SOURCE_PREFIX}{self.out or self.column}"
+                    raise InputValidationError(
+                        f"Index: element {self.i} of the source-info token of column "
+                        + f"{self.column!r} is null in the row with tag {tag}, and "
+                        + f"the token column {target!r} it would give has type "
+                        + f"{remaining}: a source-info token that has a list layer "
+                        + "is never null."
+                    )
+                new_src = pa.scalar(element, type=remaining)
         else:
             new_src = f"{old_src}[{self.i}]" if old_src else None
 
@@ -410,15 +458,10 @@ class Index(UnaryOperator):
             token_name = f"{constants.SOURCE_PREFIX}{self.column}"
             input_token = input_schema.field(token_name)
             input_token_type = input_token.type
-            token_type = (
-                input_token_type.value_type
-                if pa.types.is_large_list(input_token_type)
-                else input_token_type
-            )
-            token_field = pa.field(
+            token_type = self._element_token_type(input_token_type)
+            token_field = arrow_utils.source_info_field(
                 f"{constants.SOURCE_PREFIX}{self.out or self.column}",
                 token_type,
-                nullable=input_token.nullable,
             )
             if self.out is None:
                 position = input_schema.get_field_index(self.column)
@@ -430,7 +473,7 @@ class Index(UnaryOperator):
                 output_schema = input_schema.append(element_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
                 output_schema = output_schema.append(token_field)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
             return ArrowTableStream(
-                self._as_row_built_table(output_schema.empty_table(), tag_columns),
+                self._in_row_order(output_schema.empty_table(), tag_columns),
                 tag_columns=tag_columns,
                 data_context=stream.data_context,
                 data_tags=stream_data_tags(stream),

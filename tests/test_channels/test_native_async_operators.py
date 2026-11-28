@@ -49,6 +49,7 @@ from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash, DataType, DataValue
+from orcapod.utils.arrow_utils import sort_system_tag_values
 
 
 # ---------------------------------------------------------------------------
@@ -2343,8 +2344,8 @@ class TestJoinSystemTagEquivalence:
         assert sync_sys == async_sys
 
 
-class TestSortMergedSystemTags:
-    """Unit tests for Join._sort_merged_system_tags."""
+class TestSortSystemTagValues:
+    """Unit tests for the sorter shared by both Join paths."""
 
     def test_sorts_same_provenance_path_by_value(self):
         """System tag values at different positions within the same provenance
@@ -2357,7 +2358,9 @@ class TestSortMergedSystemTags:
             "_tag_source_id::abc123:1": "a_source",
             "_tag_record_id::abc123:1": "a_record",
         }
-        result = Join._sort_merged_system_tags(merged_sys)
+        result = sort_system_tag_values(
+            pa.Table.from_pylist([merged_sys]), tied_positions=((0, 1),)
+        ).to_pylist()[0]
 
         # After sorting, position 0 should have the smaller values
         assert result["_tag_source_id::abc123:0"] == "a_source"
@@ -2371,7 +2374,9 @@ class TestSortMergedSystemTags:
             "_tag_source_id::abc123:0": "only_source",
             "_tag_record_id::abc123:0": "only_record",
         }
-        result = Join._sort_merged_system_tags(merged_sys)
+        result = sort_system_tag_values(
+            pa.Table.from_pylist([merged_sys]), tied_positions=()
+        ).to_pylist()[0]
         assert result == merged_sys
 
     def test_non_system_tag_keys_ignored(self):
@@ -2381,7 +2386,9 @@ class TestSortMergedSystemTags:
             "_tag_source_id::abc123:0": "src0",
             "_tag_record_id::abc123:0": "rec0",
         }
-        result = Join._sort_merged_system_tags(merged_sys)
+        result = sort_system_tag_values(
+            pa.Table.from_pylist([merged_sys]), tied_positions=()
+        ).to_pylist()[0]
         assert result["regular_key"] == "value"
 
 

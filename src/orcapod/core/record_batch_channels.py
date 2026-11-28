@@ -22,6 +22,7 @@ import pyarrow.compute as pc
 
 from orcapod.channels import ChannelClosed
 from orcapod.core.operators.static_output_pod import (
+    declared_token_types,
     settle_token_types,
     stream_from_batches,
 )
@@ -150,9 +151,9 @@ class OutputChannel:
         # batch's when the stream cannot say its Arrow types without rows.
         self._schema: pa.Schema | None = None
         self._schema_known = False
-        # Each source-info column's token type as the batches accepted so far settle it
-        # (``settle_token_types``): a later batch must settle with it.
+        # Concrete token types, or the types settled by the populated batches.
         self._token_types: dict[str, pa.DataType] = {}
+        self._has_declared_tokens = False
         # The column order of the channel's batches: the first batch with rows'.
         self._order: list[str] | None = None
         self._changed = asyncio.Event()
@@ -209,6 +210,8 @@ class OutputChannel:
             )
         if not self._schema_known:
             self._schema = _description(self._stream)
+            self._token_types = declared_token_types(self._stream, self._schema)
+            self._has_declared_tokens = bool(self._token_types)
             self._schema_known = True
         schema = self._schema
         if schema is None:
@@ -230,9 +233,23 @@ class OutputChannel:
                 f"A record batch sent as {_named(self._stream)} does not have that "
                 + f"stream's columns: {mismatch}."
             )
-        token_types = settle_token_types(batch, self._token_types)
+        token_types = settle_token_types(
+            batch, self._token_types, check_empty=self._has_declared_tokens
+        )
         self._schema = schema
         self._token_types = token_types
+        fields = []
+        for field in batch.schema:
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
+                field = schema.field(field.name)
+            elif field.name.startswith(constants.SOURCE_PREFIX):
+                field = arrow_utils.source_info_field(field.name, field.type)
+            fields.append(field)
+        if any(
+            field.nullable != sent.nullable
+            for field, sent in zip(fields, batch.schema, strict=True)
+        ):
+            batch = pa.RecordBatch.from_arrays(batch.columns, schema=pa.schema(fields))
         if batch.num_rows:
             if self._order is None:
                 self._order = names
@@ -377,7 +394,9 @@ class OutputChannel:
                 + "is a stream only once it is complete."
             )
         if self._result is None:
-            self._result = stream_from_batches(self._stream, self._batches)
+            self._result = stream_from_batches(
+                self._stream, self._batches, declared_schema=self._schema
+            )
         return self._result
 
 
@@ -405,6 +424,19 @@ def _named(stream: Any) -> str:  # pyright: ignore[reportExplicitAny]  # any str
     return repr(label) if label else repr(stream)
 
 
+def _is_token_type(kind: pa.DataType) -> bool:
+    """Whether ``kind`` is a source-info token type: ``large_string``, or a list of one.
+
+    The list may be a large list (what ``Batch``, ``GroupBy`` and ``MergeJoin``
+    build) or a fixed-size list (a hand-built stream's, kept as declared: ITL-1491).
+    """
+    if pa.types.is_large_string(kind):
+        return True
+    if isinstance(kind, (pa.LargeListType, pa.FixedSizeListType)):
+        return _is_token_type(kind.value_type)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    return False
+
+
 def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     """Say how a record batch's columns differ from a channel's, or ``None``.
 
@@ -414,26 +446,26 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     converted: type strictness), the same nullability (and no null where the
     description's field is not nullable) and the same field metadata. A
     ``null`` type of the description (anywhere in a column's type) is carried as
-    ``large_string``, as a row's datagram stores it, and only null values are taken
-    there. Whether a system-tag or source-info field is nullable is not compared: it
-    follows the values of the complete table (``_flag_by_values``). Nor is a
-    source-info column's type, which follows its tokens over the complete table
-    (``_type_source_info_by_values``): it must only be a token type (``large_string``,
-    or ``large_list`` of a token type).
+    ``large_string`` outside system tags, and only null values are taken there.
+    System-tag field metadata must match the description. Source-info fields in
+    transit are nullable. The channel checks token types separately against the
+    concrete stream, or settles them across batches when no type is declared.
     """
     sent = batch.schema
     if sorted(declared.names) != sorted(sent.names):
         return f"it has {sent.names}, the stream has {declared.names}"
-    provenance = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     for index, column in enumerate(sent):
         expected = declared.field(column.name)
-        carried = arrow_utils.normalize_to_large_types(expected.type)
+        system_tag = column.name.startswith(constants.SYSTEM_TAG_PREFIX)
+        carried = arrow_utils.normalize_to_large_types(
+            expected.type, keep_null=system_tag
+        )
         if column.name.startswith(constants.SOURCE_PREFIX):
             if not _is_token_type(column.type):
                 return f"column {column.name!r} is {column.type}, not a token type"
-            if column.metadata or not column.type.equals(
-                _without_metadata(column.type), check_metadata=True
-            ):
+            # A row builds the field anew, so the field itself has no metadata; its
+            # type is the stream's, the metadata of a list's item field included.
+            if column.metadata:
                 return f"column {column.name!r} carries field metadata"
             continue
         if column.type != carried:
@@ -445,14 +477,7 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 f"column {column.name!r} holds values where the stream's type "
                 + f"{expected.type} holds only nulls"
             )
-        if column.name.startswith(provenance):
-            # A row builds these from its values: no field metadata at any depth.
-            if column.metadata or not column.type.equals(
-                _without_metadata(column.type), check_metadata=True
-            ):
-                return f"column {column.name!r} carries field metadata"
-            continue
-        if expected.nullable != column.nullable:
+        if not system_tag and expected.nullable != column.nullable:
             flags = {True: "nullable", False: "not nullable"}
             return (
                 f"column {column.name!r} is {flags[column.nullable]}, the stream's is "
@@ -470,6 +495,8 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
         if (expected.metadata or None) != (column.metadata or None) or not (
             column.type.equals(carried, check_metadata=True)
         ):
+            if system_tag:
+                return f"column {column.name!r} carries field metadata that differs from its stream"
             return (
                 f"column {column.name!r} has field metadata {column.metadata} (or in "
                 + f"its type {column.type}), the stream's is {expected.metadata}"
@@ -560,18 +587,6 @@ def _map_entries(array: pa.MapArray) -> tuple[pa.Array[Any], pa.Array[Any]]:  # 
     ]
     taken = pa.array(indices, pa.int64())
     return array.keys.take(taken), array.items.take(taken)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-
-
-def _is_token_type(kind: pa.DataType) -> bool:
-    """Whether ``kind`` is a source-info token type: ``large_string``, or a list of one.
-
-    The types ``arrow_utils.source_info_arrow_type`` gives a token.
-    """
-    if pa.types.is_large_string(kind):
-        return True
-    if isinstance(kind, pa.LargeListType):
-        return _is_token_type(kind.value_type)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
-    return False
 
 
 def _without_metadata(kind: pa.DataType) -> pa.DataType:

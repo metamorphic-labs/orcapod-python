@@ -406,7 +406,7 @@ def _write_in_operator_order(source_dir: Any, target_dir: Any) -> tuple[str, ...
     data, system tags, source info) and the bookkeeping (``__``) columns where they were.
     """
     source = DeltaTableDatabase(source_dir)
-    (path,) = [p for p in source.list_table_paths() if p[-1] == "odb_v2"]
+    (path,) = [p for p in source.list_table_paths() if p[-1] == "odb_v3"]
     rows = source.get_all_records(
         path, record_id_column=OperatorJobNode.HASH_COLUMN_NAME
     )

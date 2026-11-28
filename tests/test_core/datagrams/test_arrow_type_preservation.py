@@ -58,6 +58,29 @@ INPUT_TYPES = {
 DATA_COLUMNS = list(INPUT_TYPES)
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_tag_preserves_arrow_system_tag_fields_with_python_system_tags(
+    override: bool,
+) -> None:
+    field = pa.field(
+        "_tag_custom", pa.int16(), nullable=True, metadata={b"owner": b"raw"}
+    )
+    table = pa.Table.from_pylist(
+        [{"name": "sample", field.name: 123}],
+        schema=pa.schema([pa.field("name", pa.large_string()), field]),
+    )
+    new_tags = {"_tag_unrelated": "more"}
+    if override:
+        new_tags = {**new_tags, field.name: 456}
+    tag = Tag(table, system_tags=new_tags)
+    result = tag.copy(include_cache=False).as_table(columns={"system_tags": True})
+    assert result.schema.field(field.name).equals(field, check_metadata=True)
+    assert result.column(field.name).to_pylist() == [456 if override else 123]
+    assert result.schema.field("_tag_unrelated") == pa.field(
+        "_tag_unrelated", pa.large_string(), nullable=False
+    )
+
+
 @dataclass(frozen=True)
 class Mutation:
     """A datagram mutator and the input columns it legitimately changes or removes."""

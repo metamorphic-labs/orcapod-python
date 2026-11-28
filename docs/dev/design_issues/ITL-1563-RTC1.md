@@ -23,9 +23,7 @@ no output of the row is refused.
 No stored column, path, record id or hash moved.
 The stored field is the declared one whatever the row's field says (a non-nullable
 token field is wrapped under the nullable field, never cast), and the type checked is
-the one the row carries (`source_info_table`), so a dictionary-encoded or binary token
-column is refused. Open until rows keep their token columns' Arrow types: a null token
-in a column declared with another type reaches the store as a `large_string` null and
-is not refused (a strict `xfail` in
-`tests/test_core/data_function/test_result_token_column_type.py` names it). A table
-that already holds a list token column is not migrated.
+the one the row carries. With ITL-1557, `as_table(columns={"source": True})` preserves
+the declared type even for a null token, so list, dictionary-encoded, and binary token
+columns are refused before writing. A table that already holds a list token column is
+not migrated.
