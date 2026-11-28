@@ -1,6 +1,7 @@
 # Three-chain hash design for slot identity (ITL-1559)
 
-Status: draft for the developer's review. No production code is changed by this document.
+Status: draft for the developer's review. Decisions of 2026-11-28 are marked "decided"
+where they apply (3.1, Q1, the single walk of 2.3). No production code is changed by this document.
 Measured on `main` at `c1040ffa` (2026-11-28). Related: ITL-1442, ITL-1427, ITL-1470,
 ITL-1506, ITL-1472, ITL-1553, ITL-1554, ITL-1560, ITL-1590.
 
@@ -36,7 +37,8 @@ What this document found, in short:
      value" and "`P` holds no source" cannot both hold for that case (3.5).
    - Today's content hash distinguishes a context-taking function pod from a plain pod
      of the same uri, and `P` does not, so `H(P, C)` and `H(P, I)` would merge two nodes
-     that are two today (3.1).
+     that are two today (3.1). Decided: `ctx_arg_name` enters the pod's pipeline
+     identity.
 3. Entry ids and instance ids do not contain the node content hash. They do not change.
    Only record ids and the operator cache's row key do, and no golden entry pins either.
 4. Most of the work is not hashing. It is moving about 40 places that use the content hash
@@ -46,8 +48,9 @@ What this document found, in short:
 
 ### 2.1 Notation and labels
 
-`P(x)` is `x.pipeline_hash()` exactly as today. No definition in this document changes it,
-except the proposal in 3.1, which the developer must approve.
+`P(x)` is `x.pipeline_hash()` as today, with two changes, each for one narrow case: the
+decision of 3.1 (a context-taking function pod) and the correction of 3.5 (a commutative
+operator over inputs of equal `P`).
 
 Each new hash is defined in one module, proposed `src/orcapod/core/identity_chains.py`, and
 carries its own label, defined there as a constant and written nowhere else (the hash label
@@ -222,16 +225,26 @@ This is the only such case. Every operator and `SideEffectPod` uses one structur
 hashes (`static_output_pod.py:223`, `side_effects.py:657`), and a data function's two
 structures are both its uri (`data_function.py:241`).
 
-Options:
+**Decided (developer, 2026-11-28): option (a).** `ctx_arg_name` enters the function
+pod's pipeline identity when it is set, so that `P` describes the operation completely.
+`P` then moves for every node at or below a context-taking pod, and with it their
+`schema:<P>` path component. No golden entry holds such a pod (`cases.py` has no
+`ctx_arg`), so no golden value moves. `P` is unchanged everywhere else. The two options
+not taken were to refuse two pods of one uri that differ in `ctx_arg_name` in one job,
+and to carry the difference in both `C` and `I`.
 
-- (a) Put `ctx_arg_name` into the pod's pipeline identity when it is set. `P` then moves
-  for every node at or below a context-taking pod, and with it their `schema:<P>` path
-  component. No golden entry holds such a pod (`cases.py` has no `ctx_arg`), so no golden
-  value moves. `P` stays unchanged everywhere else. **Recommended**: `P` should name the
-  operation completely, and the chains then need no fourth term.
-- (b) Refuse two pods of one uri that differ in `ctx_arg_name` in one job.
-- (c) Carry the difference in both `C` and `I`. This makes neither chain what its name
-  says.
+**General provision (developer, 2026-11-28).** A node MAY contribute a term of its own
+to `C` or to `I`. No node does today: every node other than a leaf only pools its
+upstreams' values. Two rules bound such a term:
+
+- Anything that tells apart two nodes that can sit in one graph must be in `P` or in
+  `I`. Semantic identity `H(P, I)` is the graph's key, so a difference held only in `C`
+  would leave two nodes with one key.
+- A term in `C` only must be like a binding: one value per node at a time. It may change
+  (as a bind changes a slot's source), and the node stays the same node when it does.
+
+A node that contributes a term hashes it with its pooled value, also when it has one
+input, so the pass-through of 2.3 holds only for a node with no term of its own.
 
 ### 3.2 A flat pooled list grows exponentially
 
@@ -419,7 +432,7 @@ Every line is `src/orcapod/` at `c1040ffa`.
 |---|---|
 | `core/base.py:178`, `:189` | `__hash__` and `__eq__` of every stream, node and invocation: content hash and identity structure. Every node-keyed dict and set below goes through these |
 | `pipeline/base.py:341`, `:344` | `_record_invocation`: the invocation's key and its upstream keys in `_hash_graph`, `_invocation_lut`, `_source_streams` |
-| `pipeline/base.py:360` | `_remember_invocation`: two invocations with one key become one node, keeping the smallest label (Q1) |
+| `pipeline/base.py:360` | `_remember_invocation`: two invocations with one key become one node, keeping the smallest label. Under Q1 they stay one node and the most recent label is kept |
 | `pipeline/base.py:519`, `:522` | compile: leaves found and ordered by hash key |
 | `pipeline/base.py:578` | compile: a node's upstream nodes looked up by the input's content hash |
 | `pipeline/base.py:611` | compile: equal labels numbered in content hash order |
@@ -605,7 +618,7 @@ Each step keeps the suite green. Sizes are of the production diff.
 |---|---|---|---|
 | 0 | Merge PR 577, then 608 and 613 (8.2). PRs 607 and 615 can land at any time before step 5: their golden moves are disjoint from 7.1 (three root source content hashes in `schema-01.json`, instance ids and result paths) | theirs | none here |
 | 1 | `core/identity_chains.py`: the five labelled hashes, the canonical order of 2.4, pooling over an input list. Streams, nodes and invocations get `source_chain()`, `name_chain()`, `content_identity()`, `node_identity()` beside the existing hashes. Nothing reads them yet. Tests compare `H(P, C)` across plain stream, invocation and job node | none | small, about 300 lines |
-| 2 | Close 3.5: `P` at a commutative operator from an input list (a multiset), on PR 587's positioned inputs. Apply the decision on 3.1. Both are pipeline hash changes for one narrow case each, approved as such. Test that every other `P` is unchanged (the 179 golden pipeline hashes, and stored paths of a job) | no golden entry; stored paths move for a commutative operator over content-equal inputs of equal `P`, and with 3.1(a) for context-taking pods | small |
+| 2 | Close 3.5: `P` at a commutative operator from an input list (a multiset), on PR 587's positioned inputs. Put `ctx_arg_name` into the function pod's pipeline identity (3.1, decided). Both are pipeline hash changes for one narrow case each, approved as such. Test that every other `P` is unchanged (the 179 golden pipeline hashes, and stored paths of a job) | no golden entry; stored paths move for a commutative operator over content-equal inputs of equal `P`, and for context-taking pods (3.1) | small |
 | 3 | Graph keys to semantic identity: `_hash_graph`, `_invocation_lut`, `_persistent_node_map`, `_sources_by_hash`, compile, `to_invocations`, `from_invocations`, `as_pipeline` (the remap goes), `is_runnable`, the run DAG. Job nodes stop being equal by content: node-keyed containers key by node object or by semantic identity. Observers get the semantic identity. Content hash still the old recursion | none | large: `pipeline/base.py`, `job.py`, `dag.py`, both orchestrators, `node_run.py` |
 | 4 | Saved files: node keys become semantic identities; descriptors hold `node_identity` and `content_identity` (nullable). Loader reads the new form | none | medium: `graph.py`, `job.py`, `serialization.py`, the loaded node classes |
 | 5 | The switch: `content_hash()` of every derived stream, node and invocation becomes `H(P, C)`; the unbound slot's name leaves the content hash (3.4); a bind invalidates content identity below it (ITL-1427). One golden regeneration, with the list of 7.1 approved entry by entry | 104 entries (106 after PR 609) | small in code, large in tests |
@@ -646,7 +659,7 @@ section 6.
 | ITL-1204, slot lost from the run graph after a bind | Yes, outright. The slot's key is its semantic identity, which a bind does not change; today `SourceJobNode.__hash__` changes at a bind (`job.py:931`) | Nothing beyond step 3; `is_runnable`'s workaround goes | 3 |
 | ITL-1470, a stream built before a job gets other system-tag names | No. It is a difference in `P`: the stream built outside becomes a leaf slot of its own, with its narrower schema, so the schema hash in the column names differs. No chain changes `P` | The capture rule: a stream brings its upstream steps down to its sources (ITL-1387), or is refused (PR 613 refuses a leaf that is not a source). The chains add the check: the job node's `P` must equal the plain stream's (9.1, PR 579) | 6, or its own PR after it |
 | ITL-1506, one source id read with different key columns | Yes, once each reading has its own slot name: the readings differ in `C` (key columns are in the leaf) and in `I` | Removing the refusal for distinctly named slots; `bind` and the saved file address slots by name (PR 613) | 6 |
-| One slot, two labels | By decision Q1. With (b) they are two nodes of one content identity, the same case as ITL-1442 | Q1; the label enters the `I` chain | 1 (definition), 3 (graph) |
+| One slot, two labels | Decided (Q1): one node. Its key is `H(P, I)`, which holds no label, so the two declarations have one key | `_remember_invocation` keeps the most recent label instead of the smallest; `job.nodes` holds the node under that label only; tests | 3 |
 | Binding a slot to something that depends on a slot (cycles; a stale slot-to-slot binding after recompiling) | No, and the chains say why it must stay refused: a slot's `C` is its bound leaf's `C`. If what is bound depends on a slot, `C` is defined through that slot, and through itself in a cycle; and what is bound holds a reference to a slot object that a recompile replaces | One rule at `bind` and at capture: what a slot holds is a leaf with a `C` of its own, with no slot beneath it (walk with `streams_beneath`). PR 577's foreign-slot refusal and PR 613's refusal of a leaf that is not a source already cover it; step 6 states it once and keeps it. Binding a composite properly is ITL-1127 | 6 |
 | Edges carrying input position (PR 587) | Needed by the chains, not resolved by them: pooling and 3.5 need each node's inputs as an ordered list with repeats | Re-key its edges by semantic identity | 2 (the list), 3 (the keys) |
 | Restrictions on edges (ITL-1472) | Made possible. An edge is `(upstream semantic identity, node semantic identity, position)`, which survives a rebind and exists for an unbound blueprint; two slots on one source are two edges and can carry two restrictions | The edge registry itself (PR 580's design), the rule for stored rows under a restriction (Q4), and Q3 for two restricted nodes of one content identity. Not part of this work | after 6 |
@@ -682,7 +695,11 @@ arrangement, and on the sync and the async path.
   the two slots hold one source, two equal objects or two different sources (3.5); both
   arrangements of two sources over the two slots give one `C`, one `I`, one table of
   rows and the same system-tag column names and values.
-- 3.1: a plain and a context-taking pod of one uri over one source are two nodes.
+- 3.1: a plain and a context-taking pod of one uri over one source have different `P`
+  and are two nodes; `P` of a pod that takes no context is unchanged.
+- Q1: one slot feeding one pod under labels `r1` then `r2` is one node labelled `r2`,
+  in `job.nodes`, the run summary and a saved and loaded job; the reverse order gives
+  `r1`; neither changes any `P`, content identity or semantic identity.
 - Unbound: every node has a semantic identity; asking for content identity raises and
   names the slots.
 - The label rule: `tests/test_hashing/test_hash_label_rule.py` extended to the five
@@ -708,25 +725,27 @@ arrangement, and on the sync and the async path.
 - A side-effect node under each of two slots on one source: the decided number of
   deliveries, with and without `track_completion`.
 
-## 10. Open questions for the developer
+## 10. Questions for the developer
 
-### Q1. Is a node's own label part of its semantic identity?
+Q1 is decided. Q2, Q3 and Q4, and the PR recommendations of 8.2, are open.
 
-One slot feeding the same pod twice under labels `r1` and `r2`: one node or two? Today
-they are one node and the smaller label is kept (`pipeline/base.py:360`).
+### Q1. Is a node's own label part of its semantic identity? DECIDED: no
 
-- (a) Not part: one node. `job.nodes["r2"]` does not exist, and a label the user wrote is
-  dropped without notice.
-- (b) An explicitly assigned label is part: two nodes with one content identity. The
-  label must enter the `I` chain, not only the node's own hash, or the steps below `r1`
-  and `r2` would merge again: `I(node) = H(("label", label), pooled I)` when a label was
-  assigned, pass-through otherwise. A computed label never enters.
+Decided (developer, 2026-11-28). A node's label is not part of its semantic identity,
+and no label enters the `I` chain. A node has one label. Declaring the same computation
+again under another label replaces the earlier label: the most recent wins.
 
-Recommendation: (b). A slot's label is already its identity, so a step's assigned label
-being identity is the same rule. Edges, restrictions and probes can then be attached to
-`r1` and `r2` apart (ITL-1472). The cost is that a labelled step can no longer be renamed
-after capture without re-keying what is below it, as for a slot, and that Q3's case
-arises more often, which it must handle anyway.
+So one slot feeding the same pod twice under labels `r1` and then `r2` is one node,
+labelled `r2`; `job.nodes["r1"]` no longer exists. A label can be changed without
+re-keying anything, because no identity holds it. Only a slot's name is identity (the
+`I` leaf).
+
+This changes `main`, where the smaller of two labels is kept whatever the order of
+declaration (`pipeline/base.py:360`). One detail I assume and the developer should
+confirm: a later declaration that gives no label leaves an assigned label in place.
+
+The option not taken was to make an assigned label part of `I`, giving two nodes of one
+content identity.
 
 ### Q2. A stream outside a job: how is its semantic identity formed?
 
@@ -782,7 +801,7 @@ restricted; (c) works for some graphs and not others.
 
 ### 11.1 What cannot be made to hold
 
-- **3.1** as stated: without a decision, two nodes merge (counterexample there).
+- **3.1** held as first worded; it is settled by the decision there (`ctx_arg_name` in `P`).
 - **"`P` unchanged in value" together with "`P` holds no source"** (3.5): on `main` the
   pipeline hash of `Join` or `Rejoin` over two inputs of equal `P` depends on whether
   they are equal by content. One of the two statements has to give for that case; I
