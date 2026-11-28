@@ -929,6 +929,32 @@ class TestRefreshIsPerNodePerRun:
         assert refreshed.count(result_table) == 2  # one per node, not per row
 
 
+def test_warm_delta_job_reuses_the_result_table_handle(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm job opens its result table only as often as on main before ITL-1386."""
+    import deltalake
+
+    db = DeltaTableDatabase(tmp_path)
+    _ = one_step_job("warm", db, [1.0], double).run(
+        orchestrator=SyncPipelineOrchestrator()
+    )
+    job = one_step_job("warm", db, [float(i) for i in range(2, 502)], double)
+    open_table = deltalake.DeltaTable
+    result_opens = 0
+
+    def count_open(uri: str, *args: Any, **kwargs: Any) -> deltalake.DeltaTable:
+        nonlocal result_opens
+        if uri.rstrip("/").endswith("/rdb_v1"):
+            result_opens += 1
+        return open_table(uri, *args, **kwargs)
+
+    monkeypatch.setattr(deltalake, "DeltaTable", count_open)
+    _ = job.run(orchestrator=SyncPipelineOrchestrator())
+    assert result_opens == 6
+    assert len(calls) == 501
+
+
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,

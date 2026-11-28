@@ -154,7 +154,8 @@ def appended_field_change(
         incoming: The column of the rows to append.
         delta_log_storage: The held type is the physical Delta log type. Within
             extension storage the log cannot describe metadata on list items or
-            map keys and values. Struct field metadata is still known.
+            map keys and values. Struct field metadata is still known, apart
+            from the logical identifiers checked separately against the log.
 
     Returns:
         The reason, naming the path (``x``, ``x.a``, ``x[]``, ``x.key``), or ``None``.
@@ -180,10 +181,15 @@ def _child_change(
 ) -> str | None:
     if not metadata_only and held.name != incoming.name:
         return f"{path} is named {incoming.name!r}, the stored column's {held.name!r}"
-    if check_metadata and metadata_bytes(held.metadata) != metadata_bytes(
-        incoming.metadata
-    ):
-        return f"{path} has other field metadata than the stored column"
+    if check_metadata:
+        incoming_metadata = metadata_bytes(incoming.metadata)
+        if delta_log_storage and metadata_only and _EXTENSION_NAME in incoming_metadata:
+            # The physical Delta schema omits these keys to prevent Arrow from
+            # decoding the extension. The identity check uses the raw log instead.
+            del incoming_metadata[_EXTENSION_NAME]
+            incoming_metadata.pop(_EXTENSION_METADATA, None)
+        if metadata_bytes(held.metadata) != incoming_metadata:
+            return f"{path} has other field metadata than the stored column"
     return _nested_change(
         held.type,
         incoming.type,

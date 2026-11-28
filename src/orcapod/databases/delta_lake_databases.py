@@ -13,6 +13,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
+from weakref import ReferenceType, ref
 
 import polars as pl
 import pyarrow as pa
@@ -1556,7 +1557,11 @@ def _plain_delta_type(delta_type: Any, *, keep_user_metadata: bool) -> Any:
                         {
                             k: v
                             for k, v in f.metadata.items()
-                            if k.encode() not in (ARROW_TYPE_KEY, *_EXTENSION_KEYS)
+                            if k.encode() != _EXTENSION_KEYS[0]
+                            and (
+                                k.encode() != _EXTENSION_KEYS[1]
+                                or _EXTENSION_KEYS[0].decode() not in f.metadata
+                            )
                         }
                         if keep_user_metadata
                         else None
@@ -1818,6 +1823,11 @@ class DeltaTableDatabase:
         self._delta_table_cache: dict[str, deltalake.DeltaTable] = (
             _shared_delta_table_cache if _shared_delta_table_cache is not None else {}
         )
+        # A local directory stamp can show that a loaded log has not changed
+        # without asking Delta to list its commits again for every strict add.
+        self._local_log_stamps: dict[
+            str, tuple[ReferenceType[deltalake.DeltaTable], os.stat_result]
+        ] = _root._local_log_stamps if _root is not None else {}
         if _shared_pending_batches is not None:
             self._pending_batches = _shared_pending_batches
         else:
@@ -1962,9 +1972,7 @@ class DeltaTableDatabase:
 
         try:
             # Try to load existing table
-            delta_table = deltalake.DeltaTable(
-                table_uri, storage_options=self._storage_options or None
-            )
+            delta_table = self._open_delta_table(table_uri)
             self._delta_table_cache[record_key] = delta_table
             logger.debug(f"Loaded existing Delta table for {record_key}")
             return delta_table
@@ -1990,6 +1998,71 @@ class DeltaTableDatabase:
         return OrcapodDatabaseReadError(
             self._get_table_uri(record_path), self._path_prefix + record_path
         )
+
+    def _local_log_stamp(self, table_uri: str) -> os.stat_result | None:
+        """Observe the local log directory, or return None if it is unavailable."""
+        if self._is_cloud:
+            return None
+        try:
+            return (Path(table_uri) / "_delta_log").stat()
+        except OSError:
+            return None
+
+    def _open_delta_table(self, table_uri: str) -> deltalake.DeltaTable:
+        """Load a table and remember the local log stamp from before the load."""
+        stamp = self._local_log_stamp(table_uri)
+        table = deltalake.DeltaTable(
+            table_uri, storage_options=self._storage_options or None
+        )
+        if stamp is not None:
+            self._local_log_stamps[table_uri] = (ref(table), stamp)
+        return table
+
+    def _refresh_before_strict_add(self, record_path: tuple[str, ...]) -> None:
+        """Bring a cached table up to date without reopening it on each add."""
+        record_key = self._get_record_key(record_path)
+        table_uri = self._get_table_uri(record_path)
+        stamp = self._local_log_stamp(table_uri)
+        cached = self._delta_table_cache.get(record_key)
+        if cached is not None:
+            if not self._is_cloud:
+                loaded = self._local_log_stamps.get(table_uri)
+                if (
+                    stamp is None
+                    or loaded is None
+                    or loaded[0]() is not cached
+                    or not os.path.samestat(stamp, loaded[1])
+                ):
+                    # An incremental update cannot detect a different table
+                    # recreated at the same path and version.
+                    self._delta_table_cache.pop(record_key, None)
+                    return
+                if (stamp.st_mtime_ns, stamp.st_ctime_ns) == (
+                    loaded[1].st_mtime_ns,
+                    loaded[1].st_ctime_ns,
+                ):
+                    return
+            try:
+                cached.update_incremental()
+            except Exception:  # noqa: BLE001  # let the next load report any read failure
+                self._delta_table_cache.pop(record_key, None)
+            else:
+                if stamp is not None:
+                    self._local_log_stamps[table_uri] = (ref(cached), stamp)
+            return
+        if record_key in self._absent_tables:
+            try:
+                appeared = (
+                    deltalake.DeltaTable.is_deltatable(
+                        table_uri, storage_options=self._storage_options or None
+                    )
+                    if self._is_cloud
+                    else stamp is not None
+                )
+            except Exception:  # noqa: BLE001  # let the next load report any read failure
+                appeared = True
+            if appeared:
+                self._absent_tables.discard(record_key)
 
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """List the paths of the Delta tables stored under ``prefix``.
@@ -2811,11 +2884,7 @@ class DeltaTableDatabase:
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
         if not skip_duplicates:
-            # Strict adds check the table as it stands now. The ID snapshot can
-            # still be reused when the table's ID and version match.
-            record_key = self._get_record_key(record_path)
-            self._delta_table_cache.pop(record_key, None)
-            self._absent_tables.discard(record_key)
+            self._refresh_before_strict_add(record_path)
         self._refuse_untyped_null_columns(record_path, records.schema)
         # A logical type identifier known to differ from the held one is refused
         # first (ITL-1371), whatever skip_duplicates: found from the Delta log, before
@@ -3617,10 +3686,11 @@ class DeltaTableDatabase:
         cached = self._delta_table_cache.get(record_key)
         if cached is None:
             return
+        table_uri = self._get_table_uri(record_path)
+        stamp = self._local_log_stamp(table_uri)
         try:
             latest = deltalake.DeltaTable(
-                self._get_table_uri(record_path),
-                storage_options=self._storage_options or None,
+                table_uri, storage_options=self._storage_options or None
             )
         except Exception:
             # The next read loads the table again and reports a failure itself.
@@ -3629,6 +3699,8 @@ class DeltaTableDatabase:
             return
         if latest.version() != cached.version():
             self._delta_table_cache[record_key] = latest
+            if stamp is not None:
+                self._local_log_stamps[table_uri] = (ref(latest), stamp)
             self._snapshots.pop(record_key, None)
 
     def _flush_by_key(self, record_key: str) -> None:
@@ -3782,9 +3854,7 @@ class DeltaTableDatabase:
             committed = (
                 delta_table
                 if delta_table is not None
-                else deltalake.DeltaTable(
-                    table_uri, storage_options=self._storage_options or None
-                )
+                else self._open_delta_table(table_uri)
             )
             self._delta_table_cache[record_key] = committed
             self._snapshots[record_key] = self._extend_snapshot(
@@ -3838,9 +3908,7 @@ class DeltaTableDatabase:
         # Only TableNotFoundError means "absent": a table that exists but cannot be
         # loaded is never created over (ITL-884).
         try:
-            delta_table = deltalake.DeltaTable(
-                table_uri, storage_options=self._storage_options or None
-            )
+            delta_table = self._open_delta_table(table_uri)
         except TableNotFoundError:
             delta_table = None
         except Exception as load_error:

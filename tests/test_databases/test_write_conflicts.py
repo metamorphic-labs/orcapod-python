@@ -65,11 +65,17 @@ def test_conflict_at_flush_keeps_first_commit(
         assert stored.to_pylist() == [{"v": 2}]
 
 
-def test_delta_add_sees_id_committed_since_its_last_read(tmp_path: Path) -> None:
+@pytest.mark.parametrize("initial", ["absent", "existing", "replaced"])
+def test_delta_add_sees_id_committed_since_its_last_read(
+    tmp_path: Path, initial: str
+) -> None:
     """The strict add checks the current store, including for a warm handle."""
     a, b = DeltaTableDatabase(tmp_path), DeltaTableDatabase(tmp_path)
-    a.add_record(PATH, b"initial", pa.table({"v": [0]}), flush=True)
+    if initial != "absent":
+        a.add_record(PATH, b"initial", pa.table({"v": [0]}), flush=True)
     assert a.get_record_by_id(PATH, b"x") is None
+    if initial == "replaced":
+        _ = (tmp_path / PATH[0]).rename(tmp_path / "old")
     b.add_record(PATH, b"x", pa.table({"v": [1]}), flush=True)
     with pytest.raises(ValueError, match="already exist.*stored"):
         a.add_record(PATH, b"x", pa.table({"v": [2]}))
