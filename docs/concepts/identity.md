@@ -13,7 +13,7 @@ The content hash captures schema, topology, and the **identity of the sources** 
 pipeline. It is computed recursively: each element's content hash depends on its own identity
 plus the content hashes of all its upstream elements, all the way back to the sources.
 
-A source's identity is its schema, its `source_id` and its key columns (the
+Most sources use their schema, `source_id` and key columns in their identity (the
 `record_id_columns` that name its rows, or none when rows are named by position). What the
 `source_id` is depends on how the source was created:
 
@@ -24,9 +24,12 @@ A source's identity is its schema, its `source_id` and its key columns (the
   path for `CSVSource`, the table folder's path or URI for `DeltaTableSource`), not from the
   rows.
 - If you pass `source_id` yourself, you are naming the source. The kind is part of the
-  canonical ID. Two sources with the same ID, schema and key columns have the same
-  content hash even when their rows differ. A pipeline or job registers one source
-  object per content hash at capture, binding, loading and execution.
+  canonical ID. For sources whose identity uses only the ID, schema and key columns,
+  matching those fields gives the same content hash even when the rows differ.
+  `DerivedSource(tags_as_data=...)` also hashes the tag-copy mapping. A derived source
+  without tag copies takes its identity from the producing node's content hash.
+  A pipeline or job registers one source object per content hash at capture, binding,
+  loading and execution.
   See [source consistency](sources.md#source-ids-name-the-kind-that-reads-the-data).
 
 Two sources that differ only in their key columns name the same rows differently, so they

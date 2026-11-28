@@ -299,7 +299,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             else:
                 yield f"source {stream.label!r}", stream
         if extra is not None:
-            yield from invocation_source_uses(extra)
+            yield from invocation_source_uses((extra,))
 
     def _source_node_from_recording(self, key: str) -> SourceJobNode:
         """Preserve an explicit binding when recompiling its slot."""

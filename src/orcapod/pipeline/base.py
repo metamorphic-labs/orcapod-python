@@ -70,7 +70,7 @@ def _refuse_sources_sharing_a_slot_name(
     described = (
         ", ".join(repr(i) for i in ids)
         if len(ids) > 1
-        else f"{ids[0]!r} ({len(sources)} sources with other key columns or rows)"
+        else f"{ids[0]!r} ({len(sources)} distinct content hashes)"
     )
     raise SourceSlotNameCollisionError(
         f"{len(sources)} different sources would take the slot name {slot_name!r}: "
@@ -396,10 +396,11 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
     def _source_uses(self, extra: PodInvocation | None = None) -> Iterator[SourceUse]:
         """Held inputs and, when supplied, the candidate's inputs before deduplication."""
         # Prefer the labelled endpoint of a chain over an implicit projection.
-        for invocation in reversed(self._invocation_lut.values()):
-            yield from invocation_source_uses(invocation)
-        if extra is not None:
-            yield from invocation_source_uses(extra)
+        invocations = chain(
+            reversed(self._invocation_lut.values()),
+            (extra,) if extra is not None else (),
+        )
+        yield from invocation_source_uses(invocations)
         for stream in self._source_streams.values():
             yield f"source {stream.label!r}", stream
 
@@ -839,11 +840,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 ),
             )
         )
-        require_consistent_sources(
-            use
-            for invocation in graph.invocations
-            for use in invocation_source_uses(invocation)
-        )
+        require_consistent_sources(invocation_source_uses(graph.invocations))
         instance._source_streams = dict(graph.source_streams)
         for inv in graph.invocations:
             key = inv.content_hash().to_string()

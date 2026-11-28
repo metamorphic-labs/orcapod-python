@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, cast
 
@@ -9,6 +10,8 @@ from orcapod.errors import InconsistentSourceError
 from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from orcapod.core.sources.base import RootSource
     from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.restrictions import Rebinding
@@ -18,16 +21,28 @@ if TYPE_CHECKING:
 SourceUse = tuple[str, "StreamProtocol"]
 
 
-def invocation_source_uses(invocation: PodInvocation) -> Iterable[SourceUse]:
-    """Name the input streams of a recorded step for diagnostics."""
-    label = invocation.label or getattr(
-        invocation.pod, "label", type(invocation.pod).__name__
-    )
-    for index, stream in enumerate(invocation.input_streams, 1):
-        name = f"step {label!r}"
-        if len(invocation.input_streams) > 1:
-            name += f" input {index}"
-        yield name, stream
+def invocation_source_uses(invocations: Iterable[PodInvocation]) -> Iterable[SourceUse]:
+    """Name each invocation's inputs, numbering occurrences of repeated labels."""
+    labelled = [
+        (
+            invocation.label
+            or getattr(invocation.pod, "label", type(invocation.pod).__name__),
+            invocation,
+        )
+        for invocation in invocations
+    ]
+    counts = Counter(label for label, _ in labelled)
+    occurrences: Counter[str] = Counter()
+    for label, invocation in labelled:
+        step = f"step {label!r}"
+        if counts[label] > 1:
+            occurrences[label] += 1
+            step += f" (occurrence {occurrences[label]})"
+        for index, stream in enumerate(invocation.input_streams, 1):
+            name = step
+            if len(invocation.input_streams) > 1:
+                name += f" input {index}"
+            yield name, stream
 
 
 def root_source_uses(
@@ -75,33 +90,37 @@ def root_source_uses(
 
 
 def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:
-    """Compare a bound proxy's live schema through schema-preserving caches."""
+    """Use a bound proxy's live Arrow types without changing source identity."""
     from orcapod.core.sources.cached_source import CachedSource
+    from orcapod.core.sources.derived_source import DerivedSource
     from orcapod.core.sources.source_proxy import SourceProxy
     from orcapod.core.streams.base import typed_arrow_schemas
 
-    current: StreamProtocol = source
     visited: set[int] = set()
-    saw_bound_proxy = False
-    while id(current) not in visited:
+
+    def live_schemas(
+        current: StreamProtocol, from_proxy: bool = False
+    ) -> tuple[pa.Schema, pa.Schema] | None:
+        if id(current) in visited:
+            return None
         visited.add(id(current))
         if isinstance(current, CachedSource):
-            current = current.cached_source
-        elif (
+            return live_schemas(current.cached_source, from_proxy=from_proxy)
+        if (
             isinstance(current, SourceProxy)
             and (delegate := current.delegate) is not None
         ):
-            saw_bound_proxy = True
-            current = delegate
-        else:
-            if saw_bound_proxy:
-                # Cache and proxy schemas may still describe the unbound proxy.
-                # Keep the delegate's schema, including any tag copies it adds.
-                return arrow_schema_identity(
-                    *typed_arrow_schemas(current), source.data_context
-                )
-            break
-    return arrow_schema_identity(*source.arrow_schemas, source.data_context)
+            return live_schemas(delegate, from_proxy=True)
+        if isinstance(current, DerivedSource) and (
+            inputs := current.live_source_inputs
+        ):
+            origin_schemas = live_schemas(inputs[0])
+            if origin_schemas is not None:
+                return current._arrow_schemas_from_origin(*origin_schemas)  # pyright: ignore[reportPrivateUsage]  # source consistency
+        return typed_arrow_schemas(current) if from_proxy else None
+
+    schemas = live_schemas(source) or source.arrow_schemas
+    return arrow_schema_identity(*schemas, source.data_context)
 
 
 def require_consistent_sources(
