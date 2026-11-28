@@ -2,7 +2,7 @@
   "execution": [
     {
       "arrow_type": "large_string",
-      "meaning": "the executor that ran the function (local, ray, none)",
+      "meaning": "the executor that ran the function (local, ray.v0, none)",
       "name": "executor_type",
       "nullable": true,
       "python_type": "str"
