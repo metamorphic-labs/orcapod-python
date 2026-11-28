@@ -14,6 +14,7 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
     require_custom_system_tags,
     require_supported_nullable_types,
+    require_system_tag_without_field_metadata,
 )
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -65,6 +66,11 @@ class DataFrameSource(RootSource):
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
 
+        # Polars does not preserve Arrow field metadata across this conversion.
+        if isinstance(data, (pa.Table, pa.RecordBatch)):
+            for field in data.schema:
+                if field.name in system_tag_columns:
+                    require_system_tag_without_field_metadata(field)
         df = pl.DataFrame(data)
 
         # Convert any Object-dtype columns to Arrow-compatible types.

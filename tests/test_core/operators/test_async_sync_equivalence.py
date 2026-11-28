@@ -1099,6 +1099,70 @@ def test_standalone_async_join_rows_keep_declared_system_tag_fields(
 
 
 @pytest.mark.parametrize("reverse_columns", [False, True])
+def test_tied_join_keeps_custom_system_tags_with_their_operand(
+    reverse_columns: bool,
+) -> None:
+    source_id, record_id, custom = (
+        "_tag_source_id::seed",
+        "_tag_record_id::seed",
+        "_tag_rev::seed",
+    )
+    inputs = {}
+    for name in "abc":
+        schema = pa.schema(
+            [
+                pa.field("k", pa.int64(), False),
+                pa.field("g", pa.large_string(), False),
+                pa.field(source_id, pa.large_string(), False),
+                pa.field(record_id, pa.large_string(), False),
+                pa.field(
+                    custom, pa.large_string(), name == "a", {b"owner": name.encode()}
+                ),
+            ]
+        )
+        table = pa.Table.from_pylist(
+            [
+                {
+                    "k": i,
+                    "g": group,
+                    source_id: name,
+                    record_id: record,
+                    custom: f"{name}{i}",
+                }
+                for i, (group, record) in enumerate((("x", "p"), ("y", "q")), start=1)
+            ],
+            schema=schema,
+        )
+        if reverse_columns:
+            table = table.select(list(reversed(table.column_names)))
+        inputs[name] = ArrowTableStream(
+            table, tag_columns=["k", "g"], data_tags=["k", "g"]
+        )
+    assert len({stream.pipeline_hash() for stream in inputs.values()}) == 1
+    columns = {"system_tags": True}
+    for order in itertools.permutations(inputs):
+        operands = [inputs[name] for name in order]
+        join = Join()
+        stream = join(*operands)
+        expected = stream.as_table(columns=columns)
+        prediction, _ = join.output_schema(*operands, columns=columns)
+        names = sorted(
+            name for name in expected.column_names if name.startswith(custom)
+        )
+        for name, owner in zip(names, order, strict=True):
+            assert expected[name].to_pylist() == [f"{owner}1", f"{owner}2"]
+            assert prediction[name] == (str | None if owner == "a" else str)
+        for rows in (list(stream.iter_data()), async_rows(join, *operands)):
+            assert len(rows) == expected.num_rows
+            actual = pa.concat_tables(
+                [tag.as_table(columns=columns).select(names) for tag, _ in rows]
+            )
+            target = expected.select(names)
+            assert actual.equals(target, check_metadata=True)
+            assert actual.schema.equals(target.schema, check_metadata=True)
+
+
+@pytest.mark.parametrize("reverse_columns", [False, True])
 def test_raw_stream_rows_keep_system_tag_width_flags_and_metadata(
     reverse_columns: bool,
 ) -> None:

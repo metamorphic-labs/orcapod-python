@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Collection
 from pathlib import Path
@@ -34,7 +35,7 @@ from orcapod.core.sources import (
 )
 from orcapod.core.sources.source_proxy import SourceProxy
 from orcapod.core.streams import ArrowTableStream
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.operators import DropNulls
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -473,6 +474,133 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
         InputValidationError, match=r"'__unused'.*declare a supported nullable type"
     ):
         cached.as_table()
+
+
+@pytest.mark.parametrize("route", ["table", "rows", "async_rows", "stored"])
+def test_reopened_cache_refuses_legacy_system_tag_metadata(
+    route: str,
+    tmp_path: Path,
+) -> None:
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        system_tag_columns=["extra"],
+        source_id="rows",
+    )
+    cache = source.cached(DeltaTableDatabase(tmp_path))
+    columns = {"source": True, "system_tags": True}
+    records = source.as_table(columns=columns)
+    name = "_tag_extra"
+    pos = records.schema.get_field_index(name)
+    field = records.schema.field(pos).with_metadata(
+        {b"ARROW:extension:name": b"user.opaque"}
+    )
+    records = records.set_column(pos, field, records.column(pos))
+    records = records.append_column(
+        CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"])
+    )
+    DeltaTableDatabase(tmp_path).add_records(
+        cache.cache_path,
+        with_data_context(records, source.data_context_key),
+        record_id_column=CachedSource.HASH_COLUMN_NAME,
+        flush=True,
+    )
+    reopened = CachedSource.from_config(cache.to_config())
+
+    async def consume() -> None:
+        _ = [row async for row in reopened.async_iter_data()]
+
+    with pytest.raises(
+        InputValidationError,
+        match=r"'_tag_extra'.*cache.*written.*field metadata.*[Rr]ebuild",
+    ):
+        if route == "table":
+            reopened.as_table(columns=columns)
+        elif route == "rows":
+            list(reopened.iter_data())
+        elif route == "async_rows":
+            asyncio.run(consume())
+        else:
+            reopened.get_all_records()
+
+
+@pytest.mark.parametrize("as_batch", [False, True])
+@pytest.mark.parametrize("declare_schema", [False, True])
+def test_dataframe_source_validates_nominated_arrow_fields_before_polars(
+    as_batch: bool,
+    declare_schema: bool,
+) -> None:
+    table = _table(
+        pa.field("extra", pa.string(), False, metadata={b"owner": b"research"}),
+        ["a", "b"],
+    )
+    data = table.to_batches()[0] if as_batch else table
+    schema = (
+        table.schema.set(
+            table.num_columns - 1, table.schema.field("extra").remove_metadata()
+        )
+        if declare_schema
+        else None
+    )
+    with pytest.raises(
+        InputValidationError, match=r"'extra'.*[Rr]emove.*field metadata"
+    ):
+        DataFrameSource(
+            data,
+            schema=schema,
+            tag_columns=TAGS,
+            system_tag_columns=["rev", "extra"],
+        )
+
+
+@pytest.mark.parametrize("route", ["table", "rows", "async_rows", "head"])
+def test_bound_proxy_refuses_delegated_system_tag_metadata(
+    route: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        system_tag_columns=["extra"],
+        source_id="rows",
+    )
+    tags, data = source.output_schema()
+    proxy = SourceProxy(
+        source.source_id,
+        source.content_hash().to_string(),
+        source.pipeline_hash().to_string(),
+        tags,
+        data,
+    )
+    proxy.bind(source)
+    columns = {"system_tags": True}
+    table = source.as_table(columns=columns)
+    pos = table.schema.get_field_index("_tag_extra")
+    field = table.schema.field(pos).with_metadata({b"owner": b"research"})
+    raw = ArrowTableStream(
+        table.set_column(pos, field, table.column(pos)),
+        tag_columns=TAGS,
+    )
+    monkeypatch.setattr(source, "as_table", raw.as_table)
+    monkeypatch.setattr(source, "iter_data", raw.iter_data)
+    monkeypatch.setattr(source, "head", raw.head)
+
+    async def consume() -> None:
+        _ = [row async for row in proxy.async_iter_data()]
+
+    with pytest.raises(
+        InputValidationError, match=r"'_tag_extra'.*[Rr]emove.*field metadata"
+    ):
+        if route == "table":
+            proxy.as_table(columns=columns)
+        elif route == "rows":
+            list(proxy.iter_data())
+        elif route == "async_rows":
+            asyncio.run(consume())
+        else:
+            proxy.head(columns=columns)
 
 
 @pytest.mark.parametrize("stored_flag", [False, True])

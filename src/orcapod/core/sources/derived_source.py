@@ -20,6 +20,7 @@ from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.core.sources.stream_builder import (
     require_supported_nullable_types,
+    validate_source_table,
     SourceStreamBuilder,
     normalize_record_id_columns,
 )
@@ -809,9 +810,8 @@ class DerivedSource(RootSource):
         """Return this source's stream over the origin rows ``table``."""
         if self._tags_as_data is not None:
             return self._derive_from(table, self._tags_as_data)
-        require_supported_nullable_types(table.schema)
         return ArrowTableStream(
-            table,
+            validate_source_table(table),
             tag_columns=self._origin.keys()[0],
             data_tags=self._data_tags(),
         )
