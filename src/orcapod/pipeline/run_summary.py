@@ -470,9 +470,16 @@ def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
     from orcapod.errors import ObserverEventsLostWarning
     from orcapod.utils.warning_utils import warn_at_frame
 
+    # Warning sinks can use a strict encoding, including across worker processes.
+    # Keep the original error text on the summary.
+    details = (
+        summary.lost_observer_events_message()
+        .encode("ascii", "backslashreplace")
+        .decode("ascii")
+    )
     warn_at_frame(
         "Observer events were not recorded in this run: "
-        + f"{summary.lost_observer_events_message()}. The run's results are not "
+        + f"{details}. The run's results are not "
         + "affected, but its status and log records are incomplete. Each failed "
         + "write was logged with its traceback; the counts are in the run "
         + "summary's lost_observer_events.",

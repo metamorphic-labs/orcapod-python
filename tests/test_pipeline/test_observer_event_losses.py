@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
 import logging
 import threading
 import warnings
@@ -370,6 +371,10 @@ class _CompletionCounter:
 class _CustomComposite(_CompletionCounter, CompositeObserver):
     """A composite with a stateful lifecycle hook."""
 
+    def _contextualize(self) -> str:
+        """Return an application-specific context label."""
+        return "custom"
+
     @override
     def on_run_end(self, run_id: str) -> None:
         self.finished += 1
@@ -515,6 +520,92 @@ def utf8_log_capture(
                 handler, "formatter", _Utf8CaptureFormatter(handler.formatter)
             )
     return caplog
+
+
+class _WriteErrorWithSurrogate(OSError):
+    @override
+    def __str__(self) -> str:
+        return "unreadable filename: café\udcff"
+
+
+@pytest.mark.usefixtures("utf8_log_capture")
+@pytest.mark.parametrize("encoding", ["utf-8", "ascii"])
+def test_observer_warning_displays_on_strict_stderr(
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    """The ordinary warning path can display any failed write's error text."""
+    observer = StatusObserver(_database(error=_WriteErrorWithSurrogate))
+    job = _job(arrangement)
+    with (
+        io.TextIOWrapper(io.BytesIO(), encoding=encoding) as stderr,
+        warnings.catch_warnings(),
+    ):
+
+        def show_on_stderr(
+            message: Warning | str,
+            category: type[Warning],
+            filename: str,
+            lineno: int,
+            file: Any = None,
+            line: str | None = None,
+        ) -> None:
+            _ = stderr.write(
+                warnings.formatwarning(message, category, filename, lineno, line)
+            )
+
+        # Format and write the warning even inside pytest's recorder.
+        monkeypatch.setattr(warnings, "showwarning", show_on_stderr)
+        warnings.simplefilter("default", ObserverEventsLostWarning)
+        summary = run_job(job, observer)
+        _ = stderr.seek(0)
+        message = stderr.read()
+
+    assert message.count("ObserverEventsLostWarning:") == 1
+    assert "unreadable filename:" in message
+    assert r"\udcff" in message
+    assert summary.lost_observer_events["status"].first_error.endswith("café\udcff")
+    assert summary is job.last_run and summary.ok
+    assert _rows(job) == EXPECTED_ROWS
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested"])
+@pytest.mark.parametrize("kind", ["composite", "logging", "status"])
+def test_concrete_observer_uses_its_custom_contextualize(
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    nested: bool,
+) -> None:
+    """An instance's hook controls node scoping and owns its delegated observer."""
+    originals = {
+        "composite": CompositeObserver(),
+        "logging": LoggingObserver(InMemoryArrowDatabase()),
+        "status": StatusObserver(InMemoryArrowDatabase()),
+    }
+    original = originals[kind]
+    database = _database()
+    delegate = StatusObserver(database)
+    paths: list[tuple[str, ...]] = []
+
+    def scope(*path: str) -> Any:
+        paths.append(path)
+        return delegate.contextualize(*path)
+
+    monkeypatch.setattr(original, "contextualize", scope)
+    observer = CompositeObserver(original) if nested else original
+    job = _job(arrangement)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ObserverEventsLostWarning)
+        summary = run_job(job, observer)
+
+    assert paths.count(job.nodes[LABEL].node_identity_path) == 1
+    assert database.refusals.writes == 2 * N_ROWS
+    assert summary.lost_observer_events == {}
+    assert summary.ok and _rows(job) == EXPECTED_ROWS
 
 
 def test_unencodable_log_event_preserves_rows(

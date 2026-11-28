@@ -139,7 +139,7 @@ class StatusObserver:
     ) -> None:
         self._current_run_id = run_id
         self._current_pipeline_uri = pipeline_uri
-        self._tag_schema_per_node = {}
+        self._tag_schema_per_node.clear()
 
     def on_run_end(self, run_id: str) -> None:
         self._tag_schema_per_node.clear()
