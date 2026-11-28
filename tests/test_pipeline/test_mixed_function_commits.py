@@ -527,6 +527,9 @@ class ProtocolDatabase(DatabaseWithoutCommitGuards):
     def stores_records(self) -> bool:
         return self._inner.stores_records
 
+    def preview_appended_rows(self, stored: pa.Table, incoming: pa.Table) -> pa.Table:
+        return self._inner.preview_appended_rows(stored, incoming)
+
     def pending_result(
         self, record_path: tuple[str, ...], record_id: bytes
     ) -> PendingCommit | None:

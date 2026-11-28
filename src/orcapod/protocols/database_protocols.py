@@ -26,6 +26,24 @@ class ArrowDatabaseProtocol(Protocol):
         """Return whether this store keeps records. Explicit discards return False."""
         ...
 
+    def preview_appended_rows(self, stored: pa.Table, incoming: pa.Table) -> pa.Table:
+        """Return the rows a read gives after ``incoming`` is appended, writing nothing.
+
+        ``stored`` is a table read from this store and ``incoming`` rows not yet in
+        it. The result follows this store's own append: its row order, and what it
+        does with a column or nested field only one of the two tables has. A cached
+        source uses it to let enclosing caches check a delivery before any cache
+        writes (ITL-1396).
+
+        Args:
+            stored: The rows read from the store.
+            incoming: The new rows, already deduplicated against ``stored``.
+
+        Returns:
+            The combined rows. Nothing is queued or written.
+        """
+        ...
+
     def pending_result(
         self, record_path: tuple[str, ...], record_id: bytes
     ) -> PendingCommit | None:

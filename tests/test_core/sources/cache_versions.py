@@ -3,8 +3,8 @@
 A ``CachedSource`` refuses a delivery that changes a row its cache holds, so a cache
 never comes to hold two contents for one record id through one. A cache table can
 still hold them when it was written outside that rule (two writers that both passed
-the check, a table written by hand). Tests of how such rows are treated downstream
-build that state with ``write_outside_the_rule``.
+the check, a table written by hand), and is then refused whenever it is read. Tests
+of that refusal build the state with ``write_outside_the_rule``.
 """
 
 from __future__ import annotations

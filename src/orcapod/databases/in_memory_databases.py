@@ -49,6 +49,14 @@ class InMemoryArrowDatabase:
 
     RECORD_ID_COLUMN = "__record_id"
 
+    def preview_appended_rows(self, stored: pa.Table, incoming: pa.Table) -> pa.Table:
+        """Return ``stored`` followed by ``incoming``, as a read after the append gives them.
+
+        This store keeps a table's columns as they are: ``incoming`` holds every
+        stored column, taken by name.
+        """
+        return pa.concat_tables([stored, incoming.select(stored.column_names)])
+
     def __init__(
         self,
         max_hierarchy_depth: int = 10,

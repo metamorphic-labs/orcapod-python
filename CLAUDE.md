@@ -1544,10 +1544,22 @@ data. The rules:
   record id the cache holds under another `_record_hash` (`CachedSourceChangedRowError`,
   `_require_no_changed_rows`): one rule for every wrapped source, key columns or
   position (a reorder or a middle insert of a positional source is refused; an append is
-  not). It is a decided rule, not a stopgap. Deliveries only: a cache table that already
-  holds two contents for one record id (written outside the rule) is still read as it is
-  (open, see the design entry `ITL-1396-CS1`); tests build that state with
-  `tests/test_core/sources/cache_versions.write_outside_the_rule`.
+  not). It is a decided rule, not a stopgap. A cache table that already holds two
+  contents for one record id (two writers that both passed the check and both wrote, or
+  a table written by hand) is refused, with the same error, whenever it is read
+  (developer, November 28, 2026: "(b) for now"; `_require_one_content_per_record_id`,
+  called by every read of the cache's rows, by the delivery check, by the freshness
+  check and by `head()` when it holds no rows): a cached source never presents two rows
+  for one record id. The same row stored twice (one record id, one `_record_hash`) is
+  not a conflict. A source object that holds rows it already read shows them without
+  reading the cache again, on a full read and on `head()` alike. The two-writer race
+  itself stays open (both can still write; the next read refuses). Resolving the case by
+  time or another tie-breaker instead of refusing is ITL-1592; never add it here. Tests
+  build the state with `tests/test_core/sources/cache_versions.write_outside_the_rule`.
+  A store says what a read gives after an append through
+  `ArrowDatabaseProtocol.preview_appended_rows`; never decide it from the store's class.
+  One job's cached sources are checked one by one: a cache that accepted its delivery may
+  have written it before another source's refusal fails the run (open, `ITL-1396-CS1`).
   Nested caches also validate before writing through source proxies and keyed derivations.
   A positional derivation instead uses its origin's database order, so its origin cache
   may commit before an enclosing cache refuses a changed row (open, `ITL-1396-CS1`).

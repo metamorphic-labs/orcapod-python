@@ -833,7 +833,7 @@ class CachedSourceIdMismatchError(ValueError):
 
 
 class CachedSourceChangedRowError(InputValidationError):
-    """A source delivered a changed row under a record id its cache holds (ITL-1396).
+    """A cached source would hold or present two contents for one record id (ITL-1396).
 
     A ``CachedSource`` keeps every row its wrapped source ever delivered, and a record
     id names one row. When the wrapped source delivers a row whose record id (its key
@@ -847,6 +847,13 @@ class CachedSourceChangedRowError(InputValidationError):
 
     Changed data is another dataset: give the source a new ``source_id``, or keep a
     new cache for it (another ``cache_path`` or cache database).
+
+    The same error is raised when the cache table itself already holds two different
+    contents for one record id (two writers that both passed the check before either
+    wrote, or a table written by hand): such a cache is refused whenever it is read,
+    by a run, a read of its rows or ``head()``, so a cached source never presents two
+    rows for one record id. The message then says what the cache holds; rebuild the
+    cache from the source in a new cache.
     """
 
 

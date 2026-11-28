@@ -749,6 +749,84 @@ def test_a_nested_delta_cache_preserves_schema_evolution(
     assert inner.as_table().sort_by("id").equals(result)
 
 
+def _derived(table: pa.Table, pod: Any, tags: list[str]) -> DerivedSource:
+    """A plain derived source over a job node computed from ``table``."""
+    origin = ArrowTableSource(
+        table,
+        source_id="origin",
+        record_id_columns="id",
+        tag_columns=tags,
+        tag_only_columns=True,
+    )
+    job = PipelineJob(name="origin", database=InMemoryArrowDatabase())
+    with job:
+        pod.pod(origin, label="values")
+    _ = job.run()
+    return DerivedSource(job.nodes["values"], source_id="plain")
+
+
+@pytest.mark.parametrize("children", [("x", "y"), ("y", "x")])
+def test_a_nested_delta_cache_accepts_an_added_nullable_struct_child(
+    tmp_path: Path, children: tuple[str, str]
+) -> None:
+    """Independent review of 76912324: the stored struct has one child, the appended
+    rows two. Delta evolves the struct; the check of the delivery, made before the
+    write, must not hold the stored rows to the new declaration."""
+
+    def source(key: int, names: tuple[str, ...]) -> DerivedSource:
+        values = {"x": key * 10, "y": key * 20}
+        payload = pa.StructArray.from_arrays(
+            [pa.array([values[name]]) for name in names],
+            fields=[pa.field(name, pa.int64()) for name in names],
+        )
+        table = pa.table(
+            {"id": [key], "site": ["lab"], "payload": payload, "value": [key * 3]}
+        )
+        return _derived(table, _without_extra, ["id", "site", "payload"])
+
+    database = DeltaTableDatabase(tmp_path)
+    seed = source(1, ("x",)).cached(database, cache_path=("fixed",))
+    assert seed.as_table()["id"].to_pylist() == [1]
+    inner = source(2, children).cached(database, cache_path=("fixed",))
+    outer = inner.cached(InMemoryArrowDatabase())
+
+    result = outer.as_table().sort_by("id")
+    assert result["payload"].to_pylist() == [{"x": 10, "y": None}, {"x": 20, "y": 40}]
+    assert result["total"].to_pylist() == [3, 6]
+    assert inner.as_table().sort_by("id").equals(result)
+
+
+@pytest.mark.parametrize("omit_on_append", [True, False], ids=["omitted", "added"])
+def test_a_nested_cache_over_a_wrapped_delta_store_preserves_schema_evolution(
+    tmp_path: Path, omit_on_append: bool
+) -> None:
+    """Independent review of 76912324: a Delta store behind the extension-aware
+    wrapper appends as Delta does; the store's kind is never read from its class."""
+    from orcapod.databases.extension_aware_database import ExtensionAwareDatabase
+    from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+
+    def source(key: int, *, extra: bool) -> DerivedSource:
+        table = pa.table({"id": [key], "site": ["lab"], "value": [10], "count": [3]})
+        return _derived(
+            table.drop(["count"]),
+            _with_extra if extra else _without_extra,
+            ["id", "site"],
+        )
+
+    database = ExtensionAwareDatabase(
+        DeltaTableDatabase(tmp_path), UniversalTypeConverter()
+    )
+    seed = source(1, extra=omit_on_append).cached(database, cache_path=("fixed",))
+    assert seed.as_table()["id"].to_pylist() == [1]
+    inner = source(2, extra=not omit_on_append).cached(database, cache_path=("fixed",))
+    outer = inner.cached(InMemoryArrowDatabase())
+
+    result = outer.as_table().sort_by("id")
+    assert result["id"].to_pylist() == [1, 2]
+    assert result["extra"].to_pylist() == ([42, None] if omit_on_append else [None, 42])
+    assert inner.as_table().sort_by("id").equals(result)
+
+
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,

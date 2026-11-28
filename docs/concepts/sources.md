@@ -808,6 +808,22 @@ before an enclosing cache refuses them.
 Changed data is another dataset. Give the source a new `source_id`, or keep a new cache for
 it (another `cache_path` or cache database).
 
+A cache table can still come to hold two different rows for one record id: two processes
+that both checked their delivery before either wrote, or a table written by hand. Such a
+cache is refused whenever it is read, with the same `CachedSourceChangedRowError` (its
+message says what the cache holds, with the source id, the first five record ids and how
+many there are): by a job run, sync or async, by `as_table()`, `iter_data()` and `run()`,
+through a cache nested in another, and by `head()`, which reads only the cache's record
+ids for this; the notebook preview shows the error in place of rows. So a cached source
+never presents two rows for one record id. The same row stored twice is not a conflict.
+Rebuild such a cache from the source in a new cache. A source object that already read its
+rows keeps showing them, on a full read and on `head()` alike, until it reads its cache
+again.
+
+The caches of one job are checked one by one. When two cached sources feed a job and one
+is refused, the other may already have added its own new rows to its cache; the run fails
+and no result of it is stored.
+
 The rule is the same for every wrapped source, whatever its record ids are made from:
 
 | Record ids | Accepted | Refused |

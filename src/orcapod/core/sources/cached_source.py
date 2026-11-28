@@ -162,6 +162,10 @@ class CachedSource(RootSource):
           refused before anything is written (``CachedSourceChangedRowError``,
           ITL-1396): a record id names one row, whether it is made from key columns
           or from the row's position.
+        - A cache table that already holds two contents for one record id (written
+          by two writers at the same moment, or by hand) is refused with the same
+          error whenever it is read, so two rows are never presented for one
+          record id.
 
     Semantic guarantee:
         The cache is a correct cumulative record.  The union of cache + live
@@ -573,25 +577,17 @@ class CachedSource(RootSource):
         records = self._read_cache_table()
         if records is None:
             return
-        # The source builder's declared order distinguishes its generated pair
-        # from similarly named custom tags. Neither table's order identifies it.
-        declared = typed_zero_row_table(self._source)
-        if declared is not None:
-            id_column = _record_id_column(declared.column_names)
-        elif not schema_requires_io(self._source, ColumnConfig(system_tags=True)):
-            names = self._source.keys(columns={"system_tags": True})[0]
-            id_column = _record_id_column(names) or _unambiguous_record_id_column(
-                live_with_hash.column_names
-            )
-        else:
-            id_column = _unambiguous_record_id_column(live_with_hash.column_names)
+        records = keep_rows_of_data_context(records, self.data_context_key)
+        # First the cache itself: one that already holds two contents for a record
+        # id is refused before the delivery is compared with it.
+        self._require_one_content_per_record_id(records)
+        id_column = self._record_id_column_among(live_with_hash.column_names)
         if (
             id_column is None
             or id_column not in live_with_hash.column_names
             or id_column not in records.column_names
         ):
             return
-        records = keep_rows_of_data_context(records, self.data_context_key)
         cached: dict[str, set[bytes | None]] = {}
         for record_id, record_hash in zip(
             cast("list[str]", records.column(id_column).to_pylist()),
@@ -624,6 +620,85 @@ class CachedSource(RootSource):
             "or cache database)."
         )
 
+    def _record_id_column_among(self, names: Sequence[str]) -> str | None:
+        """The wrapped source's generated record-id column, or ``None`` without one.
+
+        The source builder's declared order distinguishes its generated pair from
+        similarly named custom tags; no table's own order identifies it. ``names``
+        (the columns of a delivery or of the cache table) are searched only when the
+        source does not declare its system tags.
+        """
+        declared = typed_zero_row_table(self._source)
+        if declared is not None:
+            return _record_id_column(declared.column_names)
+        if not schema_requires_io(self._source, ColumnConfig(system_tags=True)):
+            declared_names = self._source.keys(columns={"system_tags": True})[0]
+            return _record_id_column(declared_names) or _unambiguous_record_id_column(
+                names
+            )
+        return _unambiguous_record_id_column(names)
+
+    def _require_one_content_per_record_id(self, records: pa.Table) -> None:
+        """Refuse a cache holding two contents for one record id (ITL-1396).
+
+        A delivery that changes a cached row is refused before it is written
+        (``_require_no_changed_rows``), but a cache table can still hold two contents
+        for one record id: two writers that both passed that check before either
+        wrote, or a table written by hand. Such a cache is refused wherever its rows
+        are read, so a cached source never presents two rows for one record id.
+        Content is compared by the stored record hash; the same row stored twice (one
+        record id, one record hash) is not a conflict. Sources without a generated
+        record id have nothing to compare.
+
+        Args:
+            records: The cache table's rows of the current data context, with their
+                record hashes.
+
+        Raises:
+            CachedSourceChangedRowError: Naming the source id, the first record ids
+                held with several contents and how many there are. No row was
+                presented and nothing was written.
+        """
+        id_column = self._record_id_column_among(records.column_names)
+        if id_column is None or id_column not in records.column_names:
+            return
+        contents: dict[str, set[bytes | None]] = {}
+        for record_id, record_hash in zip(
+            cast("list[str]", records.column(id_column).to_pylist()),
+            records.column(self.HASH_COLUMN_NAME).to_pylist(),
+            strict=True,
+        ):
+            contents.setdefault(record_id, set()).add(record_hash)
+        conflicting = sorted(
+            record_id for record_id, hashes in contents.items() if len(hashes) > 1
+        )
+        if not conflicting:
+            return
+        named = ", ".join(conflicting[:_CHANGED_ROWS_NAMED])
+        more = len(conflicting) - _CHANGED_ROWS_NAMED
+        raise CachedSourceChangedRowError(
+            f"CachedSource over {self.source_id!r}: the cache at "
+            f"{'/'.join(self.cache_path)!r} holds {len(conflicting)} record "
+            f"id{'s' if len(conflicting) != 1 else ''} with more than one content: "
+            f"{named}{f' and {more} more' if more > 0 else ''}. No row was presented "
+            "and nothing was written. A record id names one row, and this cache was "
+            "written outside that rule (by two writers at the same moment, or by "
+            "hand): rebuild it from the source in a new cache (another cache_path "
+            "or cache database)."
+        )
+
+    def _require_readable_cache(self) -> None:
+        """Refuse, without presenting or writing a row, a cache no read may present.
+
+        For ``head()``, which reads no row of the cache: it reads the cache table's
+        record ids and record hashes only, so that it refuses where a full read does.
+        """
+        records = self._read_cache_table()
+        if records is not None:
+            self._require_one_content_per_record_id(
+                keep_rows_of_data_context(records, self.data_context_key)
+            )
+
     def _source_modified_time(self) -> datetime | None:
         """The wrapped source's modified time, or ``None`` if it has none."""
         return getattr(self._source, "last_modified", None)
@@ -636,6 +711,7 @@ class CachedSource(RootSource):
             return set()
         records = keep_rows_of_data_context(records, self.data_context_key)
         self._require_source_ids(records)
+        self._require_one_content_per_record_id(records)
         return {
             h
             for h in records.column(self.HASH_COLUMN_NAME).to_pylist()
@@ -737,7 +813,9 @@ class CachedSource(RootSource):
             return None
         return records.drop(self._STORED_ONLY_COLUMNS)
 
-    def _read_cached_records_with_hashes(self) -> "pa.Table | None":
+    def _read_cached_records_with_hashes(
+        self, *, declared_types: bool = True
+    ) -> "pa.Table | None":
         """Read the cached rows written under the current data context, as stored.
 
         Every read of the cache's rows goes through here: ``get_all_records()`` and
@@ -747,6 +825,11 @@ class CachedSource(RootSource):
         cache at the older layout is not read (ITL-944). Rows whose Arrow types are
         not the source's are refused here (``_require_declared_types``), so no read
         can present them.
+
+        Args:
+            declared_types: ``False`` only for the preview of a delivery not yet
+                written, whose append may evolve the stored table; the rows read back
+                after that write are checked.
 
         Returns:
             The cached rows with their record hash, ``__recorded_at`` and
@@ -768,7 +851,9 @@ class CachedSource(RootSource):
                 stored_rows - records.num_rows,
             )
         self._require_source_ids(records)
-        self._require_declared_types(records)
+        self._require_one_content_per_record_id(records)
+        if declared_types:
+            self._require_declared_types(records)
         return records
 
     def _require_rows_of_this_source(self) -> None:
@@ -841,9 +926,10 @@ class CachedSource(RootSource):
 
     def _preview_stream(self, delivery: pa.Table | None) -> ArrowTableStream:
         """Present the cached and newly accepted rows while enclosing caches check them."""
-        from orcapod.databases.delta_lake_databases import DeltaTableDatabase
-
-        stored = self._read_cached_records_with_hashes()
+        # With a delivery, the stored rows are not held to the source's declared
+        # types here: the append may evolve the table (a new nullable column or struct
+        # child), and the rows read back after the write are checked then.
+        stored = self._read_cached_records_with_hashes(declared_types=delivery is None)
         rows = stored.drop(self._STORED_ONLY_COLUMNS) if stored is not None else None
         if delivery is not None and self._cache_database.stores_records:
             physical = self._read_cache_table()
@@ -864,12 +950,11 @@ class CachedSource(RootSource):
                 new_rows = delivery.take(sorted(additions.values())).drop(
                     [self.HASH_COLUMN_NAME]
                 )
-                if rows is None:
-                    rows = new_rows
-                elif isinstance(self._cache_database, DeltaTableDatabase):
-                    rows = self._cache_database.preview_appended_rows(rows, new_rows)
-                else:
-                    rows = pa.concat_tables([rows, new_rows.select(rows.column_names)])
+                rows = (
+                    new_rows
+                    if rows is None
+                    else self._cache_database.preview_appended_rows(rows, new_rows)
+                )
         return self._stream_over(rows if rows is not None else self._empty_table())
 
     def _publish_stream(
@@ -1042,19 +1127,30 @@ class CachedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> StreamView:
-        """Return the first rows without reading or writing the cache.
+        """Return the first rows without presenting or writing a row of the cache.
 
         Once the source has been used, its merged stream is in memory and this is a slice
         of it. Before that its rows are not known: they are the cache's earlier rows
         merged with the wrapped source's, and reading them writes the cache. The head
         then has the wrapped source's columns, no rows and ``NOT_COMPUTED`` (or the
         wrapped source's own reason when it has none to give).
+
+        A head with no rows to show agrees with a full read about a cache no read may
+        present: it reads the cache table's record ids and record hashes (stored
+        values only; nothing is computed, and the wrapped source is not read) and
+        refuses a cache holding two contents for one record id.
+
+        Raises:
+            CachedSourceChangedRowError: If the cache holds two contents for one
+                record id (ITL-1396).
         """
         check_head_size(n)
         if self._cached_stream is not None and not self.is_stale:
             return head_of(
                 self._cached_stream.head(n, columns=columns, all_info=all_info), self
             )
+        # No row is read, but a cache that a full read refuses is refused here too.
+        self._require_readable_cache()
         wrapped = head_of(
             self._source.head(0, columns=columns, all_info=all_info), self
         )

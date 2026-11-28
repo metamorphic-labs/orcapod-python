@@ -249,6 +249,10 @@ class ExtensionAwareDatabase:
         """Return whether the wrapped database retains records."""
         return self._db.stores_records
 
+    def preview_appended_rows(self, stored: pa.Table, incoming: pa.Table) -> pa.Table:
+        """Delegate to the wrapped database, whose append decides the rows read back."""
+        return self._db.preview_appended_rows(stored, incoming)
+
     @property
     def storage_location(self) -> str:
         """The wrapped database's storage location, if it names one."""
