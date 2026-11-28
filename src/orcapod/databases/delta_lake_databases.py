@@ -1385,9 +1385,8 @@ def _nested_logical_type_path(
         A relative path to the first unsupported field, or ``None``.
     """
     arrow_type = field.type
-    annotation = any(
-        key.startswith(b"ARROW:extension:") for key in (field.metadata or {})
-    )
+    metadata = field.metadata or {}
+    annotation = any(key in metadata for key in _EXTENSION_KEYS)
     if isinstance(arrow_type, pa.BaseExtensionType) or annotation:
         if not top_level:
             return ""
@@ -2828,13 +2827,12 @@ class DeltaTableDatabase:
         if records.num_rows == 0:
             return
 
-        # A chunk can carry nested field metadata different from the table schema.
-        # Check those original types before any casts normalize them to the schema.
+        # Arrow type equality can overlook nested field metadata in extension
+        # storage and dictionary values. Check every chunk before any casts.
         self._require_top_level_logical_types(
             field.with_type(chunk.type)
             for index, field in enumerate(records.schema)
             for chunk in records.column(index).chunks
-            if not chunk.type.equals(field.type, check_metadata=True)
         )
 
         # Convert view types up front so the whole write path (group_by dedup,
