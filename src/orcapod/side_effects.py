@@ -1084,7 +1084,6 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         )
         self._pipeline_database: ArrowDatabaseProtocol | None = None
         self._table_path: tuple[str, ...] | None = None
-        self._current_completion_paths: frozenset[tuple[str, ...]] = frozenset()
         self._unlisted_store_reported = False
         self._current_log_checked = False
         # The rows the last completed run passed on, in the order it passed them;
@@ -1113,40 +1112,15 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         self._run_load_only = False
         self._set_modified_time(None)
 
-    @property
-    def completion_log_path(self) -> tuple[str, ...] | None:
-        """The attached invocation log path, including logs that only audit delivery."""
-        return self._table_path
-
-    def set_current_completion_paths(self, paths: frozenset[tuple[str, ...]]) -> None:
-        """Record the paths owned by live taps sharing this job's database view."""
-        self._current_completion_paths = paths
-
-    def _previous_completion_path(self) -> tuple[str, ...] | None:
-        from orcapod.core.function_pod import pipeline_hash_before_context_parameter
-
-        if not self._pod.pod_config.track_completion:
-            return None
-        previous = pipeline_hash_before_context_parameter(self)
-        if previous == self.pipeline_hash():
-            return None
-        path = self.node_uri + (
-            f"schema:{previous.to_hex()}",
-            TRACKING_DB_SCHEMA_VERSION,
-        )
-        # Before ctx_arg entered the pipeline hash, this tap could share a
-        # pipeline identity with a live tap on the equivalent plain branch.
-        return None if path in self._current_completion_paths else path
-
     def _refuse_log_of_another_data_context(self) -> None:
         """Refuse invocation logs holding deliveries this run cannot match.
 
         A delivery already made is found by a record id hashed under this node's
         data context, so deliveries logged under another one would not be found and
         every side effect would be delivered again (ITL-944). The search looks under
-        the pod's name for older layouts and, when tracking completions, the log at
-        this node's previous pipeline identity (ITL-954, ITL-1559). Checked at the
-        start of every run, so a log that appears between runs is found too.
+        the pod's name for older layouts (ITL-954). Logs at other pipeline paths
+        in the current layout belong to other taps (ITL-1559). Checked at the start
+        of every run, so a log of an older layout that appears between runs is found too.
         The current log is read and counted by data context the first time only;
         the later runs list the database, which reads no table.
 
@@ -1162,7 +1136,6 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             current=None if self._current_log_checked else (self._table_path, current),
             # ("side_effects", <pod name>): the part of the path that holds no hash.
             name_path=self.node_uri,
-            previous_completion_path=self._previous_completion_path(),
         )
         if found.unlisted:
             # The check runs before every run; that the database cannot list its tables
@@ -1220,7 +1193,6 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             # before anything is delivered or changes (ITL-1162).
             self.require_storable_tables(pipeline_database)
         self._pipeline_database = pipeline_database
-        self._current_completion_paths = frozenset()
         self._unlisted_store_reported = False
         self._current_log_checked = False
         if pipeline_database is not None:

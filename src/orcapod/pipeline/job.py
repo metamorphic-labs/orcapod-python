@@ -652,7 +652,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         )
 
         nodes = (self._persistent_node_map or {}).values()
-        side_effect_nodes: list[SideEffectJobNode] = []
         for node in nodes:
             if isinstance(node, FunctionJobNode):
                 if self._unresolved_result_database is not None:
@@ -671,15 +670,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 node.attach_databases(
                     pipeline_database=pipeline_db,
                 )
-                side_effect_nodes.append(node)
-
-        current_completion_paths = frozenset(
-            path
-            for node in side_effect_nodes
-            if (path := node.completion_log_path) is not None
-        )
-        for node in side_effect_nodes:
-            node.set_current_completion_paths(current_completion_paths)
 
     # ------------------------------------------------------------------
     # _iter_function_job_nodes() / apply_node_config()

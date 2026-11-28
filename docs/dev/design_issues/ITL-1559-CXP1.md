@@ -12,8 +12,8 @@ node over the same slot, even though one receives an invocation context.
 **Fix:** Include the context parameter in the pipeline identity when configured, giving the
 pod and its downstream steps distinct pipeline hashes. Plain pods retain the data function's
 pipeline identity. Result tables for context-taking pods also include the parameter name in
-their paths. The stale-table check looks at the exact previous pipeline and result
-paths. A live tap that owns a path keeps it available to that tap. A decorator
-cache's previous path was shared with plain calls, so the check uses the stored
-function signature to recognize previously completed calls. A saved job restores
-its context-taking function nodes and reads their results from the original paths.
+their paths. The stale-table check looks for exact previous pipeline and result
+paths reserved for context-taking functions. Downstream tap logs and decorator
+results at shared paths belong to the current plain branch, even when that
+branch is absent from the job. A saved job restores its context-taking function
+nodes and reads their results from the original paths.

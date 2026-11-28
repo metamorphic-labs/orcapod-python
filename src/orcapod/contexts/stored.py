@@ -454,7 +454,7 @@ def find_stale_tables(
     name_path: tuple[str, ...] | None = None,
     result_revision: str | None = None,
     previous_completion_path: tuple[str, ...] | None = None,
-    previous_result: tuple[tuple[str, ...], tuple[str, bytes] | None] | None = None,
+    previous_result_path: tuple[str, ...] | None = None,
 ) -> StaleTables:
     """Find the stored rows of other generations that belong to one table of a node.
 
@@ -476,8 +476,8 @@ def find_stale_tables(
             (``tables_of_another_layout``).
         previous_completion_path: The exact path of this node's completion table
             before its pipeline identity changed, relative to this database.
-        previous_result: The exact previous result table path and optional
-            column/value pair identifying a result in a shared legacy namespace.
+        previous_result_path: The exact previous result table path in a namespace
+            reserved for context-taking pods.
 
     Returns:
         The tables of another layout found, then one entry per other data context
@@ -514,23 +514,8 @@ def find_stale_tables(
                 found.other_completion_paths.append(
                     database.base_path + previous_completion_path
                 )
-    if previous_result is not None:
-        path, match = previous_result
-        if match is None:
-            completed = database.table_exists(path)
-        else:
-            column, value = match
-            rows = database.get_all_records(path)
-            completed = (
-                rows is not None
-                and column in rows.column_names
-                and pc.any(
-                    pc.equal(rows[column], pa.scalar(value, type=pa.large_binary()))
-                ).as_py()
-                is True
-            )
-        if completed:
-            found.other_completion_paths.append(database.base_path + path)
+    if previous_result_path is not None and database.table_exists(previous_result_path):
+        found.other_completion_paths.append(database.base_path + previous_result_path)
     if current is not None:
         current_path, current_context = current
         for key, rows in sorted(stored_data_contexts(database, current_path).items()):

@@ -662,13 +662,13 @@ class TestCtxArgCachedPodWrapping:
 
 @pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("legacy_case", ["function_log", "tap_log", "tap_and_results"])
-def test_reopening_pre_context_identity_completions_refuses_delivery(
+def test_reopening_pre_context_identity_completions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     async_path: bool,
     legacy_case: str,
 ) -> None:
-    """Completions at the previous schema path refuse a run before redelivery."""
+    """Only the unambiguous old completion paths block redelivery."""
     from orcapod import FunctionPod, PipelineJob, function_pod
     from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
     from orcapod.errors import SideEffectLogDataContextError
@@ -757,25 +757,32 @@ def test_reopening_pre_context_identity_completions_refuses_delivery(
 
     before = store.get_all_records(expected_path)
     assert before is not None and before.num_rows == 1
-    with pytest.raises(SideEffectLogDataContextError) as info:
-        run(build_job(root))
-    assert info.value.node_label == expected_label
-    assert expected_path in info.value.record_paths
-    assert delivered == expected_deliveries
+    if legacy_case == "tap_log":
+        job = build_job(root)
+        run(job)
+        run(job)
+        assert delivered == [*expected_deliveries, ("tap", 100)]
+        assert job.nodes["tap"].as_table()["result"].to_pylist() == [100]
+    else:
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            run(build_job(root))
+        assert info.value.node_label == expected_label
+        assert expected_path in info.value.record_paths
+        assert delivered == expected_deliveries
     assert DeltaTableDatabase(root).get_all_records(expected_path) == before
 
 
 @pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("run_in_job", [False, True], ids=["standalone", "job"])
 @pytest.mark.parametrize("cache_kind", ["decorator", "pod"])
-def test_pre_context_cache_only_results_refuse_delivery(
+def test_pre_context_cache_only_results(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     async_path: bool,
     run_in_job: bool,
     cache_kind: str,
 ) -> None:
-    """Standalone results from the old exact cache path protect a finished action."""
+    """Only the old result cache in the contextual namespace blocks redelivery."""
     from orcapod import PipelineJob, function_pod
     from orcapod.databases import DeltaTableDatabase
     from orcapod.errors import SideEffectLogDataContextError
@@ -828,40 +835,54 @@ def test_pre_context_cache_only_results_refuse_delivery(
     before = store.get_all_records(previous_path)
     assert before is not None and before.num_rows == 1
 
-    pod = build_pod()
-    with pytest.raises(SideEffectLogDataContextError) as info:
+    def run() -> None:
+        pod = build_pod()
         if run_in_job:
             with PipelineJob(
                 name="upgrade", database=DeltaTableDatabase(tmp_path / "job")
             ) as job:
                 pod.process(source, label="action")
-            asyncio.run(job.run_async()) if async_path else job.run()
+            summary = asyncio.run(job.run_async()) if async_path else job.run()
+            assert summary.ok
+            assert job.nodes["action"].as_table()["result"].to_pylist() == [110]
         else:
             stream = pod.process(source)
             if async_path:
 
                 async def consume() -> None:
-                    async for _ in stream.async_iter_data():
-                        pass
+                    assert [
+                        data.as_dict()["result"]
+                        async for _, data in stream.async_iter_data()
+                    ] == [110]
 
                 asyncio.run(consume())
             else:
-                list(stream.iter_data())
-    assert info.value.record_paths == (previous_path,)
-    assert deliveries == [10]
+                assert [data.as_dict()["result"] for _, data in stream.iter_data()] == [
+                    110
+                ]
+
+    if cache_kind == "decorator":
+        run()
+        run()
+        assert deliveries == [10, 10]
+    else:
+        with pytest.raises(SideEffectLogDataContextError) as info:
+            run()
+        assert info.value.record_paths == (previous_path,)
+        assert deliveries == [10]
     reopened = DeltaTableDatabase(cache_root)
-    assert reopened.list_table_paths() == [previous_path]
+    assert len(reopened.list_table_paths()) == (2 if cache_kind == "decorator" else 1)
     assert reopened.get_all_records(previous_path) == before
 
 
 @pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize(
-    "plain_written_first", [False, True], ids=["both", "plain_first"]
+    "scenario", ["both", "plain_first", "remove_plain", "remove_plain_with_new_input"]
 )
 def test_current_sibling_log_is_not_a_previous_context_completion(
-    tmp_path: Path, async_path: bool, plain_written_first: bool
+    tmp_path: Path, async_path: bool, scenario: str
 ) -> None:
-    """A live plain sibling owns the log at the contextual tap's former path."""
+    """The plain tap's log remains usable when either branch runs on its own."""
     from orcapod import PipelineJob, function_pod
     from orcapod.databases import DeltaTableDatabase
     from orcapod.side_effects import SideEffectPod
@@ -882,17 +903,20 @@ def test_current_sibling_log_is_not_a_previous_context_completion(
     def tap(result: int, ctx: InvocationContext) -> None:
         deliveries.append(("tap", result))
 
-    def build_job(*, both: bool) -> PipelineJob:
+    def build_job(
+        *, keep_plain: bool = True, keep_contextual: bool = True, value: int = 10
+    ) -> PipelineJob:
         source = DictSource(
-            [{"id": 1, "value": 10}],
+            [{"id": 1, "value": value}],
             tag_columns=["id"],
             tag_only_columns=True,
             source_id="input",
         )
         with PipelineJob(name="siblings", database=DeltaTableDatabase(root)) as job:
             observe = SideEffectPod(tap)
-            observe.process(plain.pod(source, label="plain"), label="plain_tap")
-            if both:
+            if keep_plain:
+                observe.process(plain.pod(source, label="plain"), label="plain_tap")
+            if keep_contextual:
                 observe.process(
                     contextual.pod(source, label="contextual"), label="context_tap"
                 )
@@ -901,18 +925,35 @@ def test_current_sibling_log_is_not_a_previous_context_completion(
     def run(job: PipelineJob) -> None:
         assert (asyncio.run(job.run_async()) if async_path else job.run()).ok
 
-    if plain_written_first:
-        run(build_job(both=False))
+    if scenario == "plain_first":
+        run(build_job(keep_contextual=False))
         assert deliveries == [("tap", 110)]
 
-    job = build_job(both=True)
+    job = build_job()
     run(job)
     run(job)
-    reopened = build_job(both=True)
+    reopened = build_job()
     run(reopened)
     assert reopened.nodes["plain_tap"].as_table()["result"].to_pylist() == [110]
     assert reopened.nodes["context_tap"].as_table()["result"].to_pylist() == [210]
     assert sorted(deliveries) == [("function", 10), ("tap", 110), ("tap", 210)]
+
+    if scenario.startswith("remove_plain"):
+        value = 11 if scenario == "remove_plain_with_new_input" else 10
+        deliveries.clear()
+        retained = build_job(keep_plain=False, value=value)
+        run(retained)
+        run(retained)
+        run(build_job(keep_plain=False, value=value))
+        assert retained.nodes["context_tap"].as_table()["result"].to_pylist() == [
+            value + 200
+        ]
+        expected = [("function", 11), ("tap", 211)] if value == 11 else []
+        assert deliveries == expected
+        run(build_job(value=value))
+        if value == 11:
+            expected.append(("tap", 111))
+        assert deliveries == expected
 
 
 @pytest.mark.parametrize(

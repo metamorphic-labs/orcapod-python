@@ -1033,9 +1033,11 @@ generation of hashing; rows of the current data context are the current entries.
   <function>, side_effect_function/<function>, side_effects/<pod>, relative to the node's
   database; <prefix>/source for a cached source) and every table there whose last component
   is not in contexts/stored.CURRENT_LAYOUTS is of another layout (tables_of_another_layout).
-  For a node that tracks completions, the same listing checks the exact current-layout path
-  computed from that node's pipeline identity before the context parameter entered the hash
-  (previous_completion_path, ITL-1559).
+  For a context-taking function node, the same listing checks the exact current-layout path
+  in its reserved namespace computed from the node's pipeline identity before the context
+  parameter entered the hash (previous_completion_path, ITL-1559). Tap logs and decorator
+  cache tables at shared paths belong to the current plain branch, even when that branch
+  is absent.
   A new layout constant must be added to CURRENT_LAYOUTS. A store that cannot list raises
   TableListingNotSupportedError: side-effecting nodes then warn and proceed (developer,
   November 11, 2026). Every database class implements list_table_paths. Stores of the

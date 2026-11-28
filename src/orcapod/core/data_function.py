@@ -45,7 +45,6 @@ from orcapod.semantic_types.output_conformance import (
     check_conformance,
     normalize_output_numbers,
 )
-from orcapod.system_constants import constants
 from orcapod.types import ContentHash, DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
@@ -1548,20 +1547,7 @@ class CachedDataFunction(DataFunctionWrapper):
         super().__init__(data_function, **kwargs)
         self._result_database = result_database
         self._record_path_prefix = record_path_prefix
-        previous_record_path = None
-        previous_result_match = None
         if context_parameter is not None:
-            # Decorator caches used the plain namespace. The stored signature
-            # lets us recognize results from the same declared interface.
-            signature = self.get_function_variation_data().get(
-                "function_signature_hash"
-            )
-            if isinstance(signature, bytes):
-                previous_record_path = record_path_prefix + self.uri
-                previous_result_match = (
-                    f"{constants.PF_VARIATION_PREFIX}function_signature_hash",
-                    signature,
-                )
             record_path_prefix += ("side_effect_function",)
         self._cache = ResultCache(
             result_database=result_database,
@@ -1573,8 +1559,6 @@ class CachedDataFunction(DataFunctionWrapper):
             delivers_side_effects=context_parameter is not None,
             # The first uri component is the function's name; no hash before it.
             name_path=record_path_prefix + self.uri[:1],
-            previous_record_path=previous_record_path,
-            previous_result_match=previous_result_match,
         )
 
     @property
