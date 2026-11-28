@@ -13,6 +13,10 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import io
+import pickle
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -21,6 +25,7 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.core.datagrams import Data
+from orcapod.errors import OutputContainerTypeError
 from orcapod.core.executors import (
     LocalPythonFunctionExecutor,
     PythonFunctionExecutorBase,
@@ -676,6 +681,103 @@ class TestRayExecutorInitialization:
 
             assert len(captured_wrappers) == 1
             assert captured_wrappers[0].__name__ == "compute_features"
+
+
+class _SerializesAsTuple:
+    """A wrong return container that would appear valid after deserialization."""
+
+    def __reduce__(self) -> tuple[object, ...]:
+        return tuple, (("wrong-first", "wrong-second"),)
+
+
+@pytest.mark.parametrize("returned", ["generator", "tuple-on-unpickle", "valid"])
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["call", "async-call"])
+def test_ray_checks_multi_output_container_before_serializing(
+    returned: str, asynchronous: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the actual capture wrapper and Ray serializer without a cluster."""
+    ray = pytest.importorskip("ray")
+    from ray import cloudpickle
+    from ray._private.worker import global_worker
+
+    from orcapod.core.executors.ray import RayExecutor
+
+    def raw_outputs(x: str, y: str) -> object:
+        if returned == "generator":
+            return (value for value in (x, y))
+        if returned == "tuple-on-unpickle":
+            return _SerializesAsTuple()
+        return x, y
+
+    def worker_output(x: str, y: str) -> tuple[str, str]:
+        return raw_outputs(x, y)  # pyright: ignore[reportReturnType]  # Deliberate mismatch.
+
+    async def async_worker_output(x: str, y: str) -> tuple[str, str]:
+        return raw_outputs(x, y)  # pyright: ignore[reportReturnType]  # Deliberate mismatch.
+
+    class Ref:
+        def __init__(self, result: Future[object]) -> None:
+            self.result = result
+
+        def future(self) -> Future[object]:
+            return self.result
+
+    class WorkerUnpickler(pickle.Unpickler):
+        def find_class(self, module: str, name: str) -> object:
+            assert not (module == "orcapod" or module.startswith("orcapod."))
+            return super().find_class(module, name)
+
+    class SerializedTransport:
+        def __init__(self, wrapper: Callable[..., object]) -> None:
+            self.wrapper = wrapper
+
+        def options(self, *, name: str) -> SerializedTransport:
+            assert name == self.wrapper.__name__
+            return self
+
+        def remote(self, *args: object) -> Ref:
+            def on_worker() -> object:
+                # Ray exports the wrapper and arguments before executing the task.
+                serialized_call = cloudpickle.dumps((self.wrapper, args))
+                wrapper, worker_args = WorkerUnpickler(
+                    io.BytesIO(serialized_call)
+                ).load()
+                response = wrapper(*worker_args)
+                _ = global_worker.get_serialization_context().serialize(response)
+                return cloudpickle.loads(cloudpickle.dumps(response))
+
+            return Ref(pool.submit(on_worker))
+
+    fn = async_worker_output if asynchronous else worker_output
+    data_function = PythonDataFunction(fn, output_keys=("first", "second"))
+    executor = RayExecutor()
+    monkeypatch.setattr(executor, "_ensure_ray_initialized", lambda: None)
+    monkeypatch.setattr(ray, "remote", SerializedTransport)
+    monkeypatch.setattr(ray, "get", lambda ref: ref.future().result())
+    data_function.set_executor(executor)
+    data = Data({"x": "a", "y": "b"})
+
+    def call() -> DataProtocol | None:
+        if asynchronous:
+            return asyncio.run(data_function.async_call(data))
+        return data_function.call(data)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        if returned == "valid":
+            result = call()
+            assert result is not None
+            assert result.as_dict() == {"first": "a", "second": "b"}
+        else:
+            returned_type = (
+                "generator" if returned == "generator" else "_SerializesAsTuple"
+            )
+            with pytest.raises(OutputContainerTypeError) as caught:
+                _ = call()
+            message = str(caught.value)
+            assert fn.__name__ in message
+            assert returned_type in message
+            assert "tuple[str, str]" in message
+            assert "Return a tuple with one value per output key" in message
 
 
 # ===========================================================================

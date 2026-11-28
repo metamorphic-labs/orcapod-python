@@ -23,6 +23,7 @@ import datetime as dt
 import enum
 import types
 import warnings
+from abc import ABCMeta
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -333,16 +334,35 @@ _POSITIONAL_SEQUENCE = types.GenericAlias(Sequence, (int, int))
         ),
     ],
 )
+@pytest.mark.parametrize("reverse_keys", [False, True], ids=["as-declared", "reversed"])
 @pytest.mark.parametrize(
-    "entrypoint", ["call", "async_call", "as_table", "run", "run_async"]
+    ("entrypoint", "asynchronous", "store_kind"),
+    [
+        pytest.param("call", False, "memory", id="call"),
+        pytest.param("async_call", True, "memory", id="async-call"),
+        pytest.param("as_table", False, "memory", id="table-sync-function"),
+        pytest.param("as_table", True, "memory", id="table-async-function"),
+        pytest.param("run", False, "memory", id="run-memory"),
+        pytest.param("run_async", True, "memory", id="run-async-memory"),
+        pytest.param("run", False, "delta", id="run-delta"),
+        pytest.param("run_async", True, "delta", id="run-async-delta"),
+    ],
 )
 def test_multi_output_containers_are_checked_before_values_are_unpacked(
-    annotation: object, returned: object, keys: tuple[str, ...], entrypoint: str
+    annotation: object,
+    returned: object,
+    keys: tuple[str, ...],
+    entrypoint: str,
+    asynchronous: bool,
+    store_kind: str,
+    reverse_keys: bool,
+    tmp_path: Path,
 ) -> None:
     """All entry points report the container mismatch and jobs store no rows."""
     if callable(returned):
         returned = returned()
-    asynchronous = entrypoint in ("async_call", "run_async")
+    if reverse_keys:
+        keys = keys[::-1]
     fn = _multi_output_function(annotation, returned, asynchronous=asynchronous)
     source = DictSource(
         data=[{"session": "s1", "record": 1, "x": 7, "y": "b"}],
@@ -354,7 +374,7 @@ def test_multi_output_containers_are_checked_before_values_are_unpacked(
     if entrypoint in ("run", "run_async"):
         pod = FunctionPod.from_fn(fn, output_keys=list(keys))
         observer = _CrashRecorder()
-        job = PipelineJob(name="multi_output", database=InMemoryArrowDatabase())
+        job = PipelineJob(name="multi_output", database=_store(store_kind, tmp_path))
         with job:
             _ = pod(source, label="result")
         with pytest.warns(errors.RowFailuresWarning, match=fn.__name__):
@@ -455,6 +475,22 @@ def test_multi_output_annotation_must_declare_position_types(
     fn = _multi_output_function(annotation, [])
     with pytest.raises(ValueError, match="return type annotation"):
         PythonDataFunction(fn, output_keys=_TWO_TEXT)
+
+
+class _MappingSequence(dict[str, str]):
+    """A mapping whose class also satisfies the sequence origin check."""
+
+
+_ = cast(ABCMeta, cast(object, Sequence)).register(_MappingSequence)
+
+
+@pytest.mark.parametrize("origin", [str, bytes, bytearray, _MappingSequence])
+def test_multi_output_excluded_container_annotation_is_refused_at_definition(
+    origin: type,
+) -> None:
+    fn = _multi_output_function(types.GenericAlias(origin, (str, str)), "ab")
+    with pytest.raises(ValueError, match=r"return type annotation.*tuple\["):
+        _ = PythonDataFunction(fn, output_keys=_TWO_TEXT)
 
 
 def _half_on_even(x: int) -> int:

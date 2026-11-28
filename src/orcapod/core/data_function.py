@@ -9,7 +9,7 @@ import tokenize
 import types
 import uuid
 from abc import abstractmethod
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 import typing
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
@@ -33,12 +33,12 @@ from orcapod.errors import (
     OutputContainerTypeError,
     OutputTypeError,
     UnstorableDatetimeError,
-    type_text,
 )
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
     DataFunctionExecutorProtocol,
     PythonFunctionExecutorProtocol,
+    PythonFunctionReturnCheckProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.semantic_types.output_conformance import (
@@ -49,6 +49,10 @@ from orcapod.types import ContentHash, DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
+from orcapod.utils.output_containers import (
+    UnexpectedOutputContainer,
+    output_container_mismatch,
+)
 from orcapod.utils.tensor_conversions import describe, tensor_conversions, warn_once
 
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
@@ -80,19 +84,6 @@ def _get_sync_executor():
     return _sync_executor
 
 
-class _UnexpectedOutputContainer(ValueError):
-    """The parser received a value outside the required output container."""
-
-    def __init__(self, returned_type: type) -> None:
-        """Record the returned type without retaining the value.
-
-        Args:
-            returned_type: Type of the value passed to the parser.
-        """
-        self.returned_type = returned_type
-        super().__init__(f"Unexpected output container type {type_text(returned_type)}")
-
-
 def parse_function_outputs(
     output_keys: Sequence[str], values: Any, return_container: type = tuple
 ) -> dict[str, DataValue]:
@@ -116,7 +107,7 @@ def parse_function_outputs(
         Dict mapping each output key to its corresponding value.
 
     Raises:
-        _UnexpectedOutputContainer: If the value is not an accepted output container.
+        UnexpectedOutputContainer: If the value is not an accepted output container.
         ValueError: If the number of values does not match the number of keys.
     """
     if len(output_keys) == 0:
@@ -124,10 +115,9 @@ def parse_function_outputs(
     elif len(output_keys) == 1:
         output_values = [values]
     else:
-        if not isinstance(values, return_container) or isinstance(
-            values, (Mapping, str, bytes, bytearray)
-        ):
-            raise _UnexpectedOutputContainer(type(values))
+        returned_type = output_container_mismatch(values, return_container)
+        if returned_type is not None:
+            raise UnexpectedOutputContainer(returned_type)
         output_values = list(values)
 
     if len(output_values) != len(output_keys):
@@ -1024,13 +1014,8 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             output_data = parse_function_outputs(
                 self._output_keys, values, self._return_container
             )
-        except _UnexpectedOutputContainer as exc:
-            raise OutputContainerTypeError(
-                self.canonical_function_name,
-                type_text(exc.returned_type),
-                self._return_container,
-                self._container_annotation,
-            ) from exc
+        except UnexpectedOutputContainer as exc:
+            raise self._output_container_error(exc) from exc
         output_schema = self.output_data_schema
         for key, value in output_data.items():
             mismatch = check_conformance(
@@ -1090,6 +1075,25 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             record_uuid=new_record_uuid,
             data_context=self.data_context,
         )
+
+    def _output_container_error(
+        self, error: UnexpectedOutputContainer
+    ) -> OutputContainerTypeError:
+        """Attach the function and its declaration to a container mismatch."""
+        return OutputContainerTypeError(
+            self.canonical_function_name,
+            error.returned_type,
+            self._return_container,
+            self._container_annotation,
+        )
+
+    def _executor_return_options(self) -> dict[str, object] | None:
+        """Request a container check from an executor that can check before transport."""
+        if len(self._output_keys) > 1 and isinstance(
+            self._executor, PythonFunctionReturnCheckProtocol
+        ):
+            return self._executor.return_container_options(self._return_container)
+        return None
 
     def _convert_outputs(
         self, output_data: dict[str, DataValue], output_schema: Schema
@@ -1204,9 +1208,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         if self._executor is not None:
             if not self._active:
                 return None
-            raw = self._executor.execute_callable(
-                self._function, {**data.as_dict(), **kwargs}, logger=logger
-            )
+            try:
+                raw = self._executor.execute_callable(
+                    self._function,
+                    {**data.as_dict(), **kwargs},
+                    executor_options=self._executor_return_options(),
+                    logger=logger,
+                )
+            except UnexpectedOutputContainer as exc:
+                raise self._output_container_error(exc) from exc
             return self._build_output_data(raw)
         if logger is not None:
             import warnings
@@ -1229,9 +1239,15 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         if self._executor is not None:
             if not self._active:
                 return None
-            raw = await self._executor.async_execute_callable(
-                self._function, {**data.as_dict(), **kwargs}, logger=logger
-            )
+            try:
+                raw = await self._executor.async_execute_callable(
+                    self._function,
+                    {**data.as_dict(), **kwargs},
+                    executor_options=self._executor_return_options(),
+                    logger=logger,
+                )
+            except UnexpectedOutputContainer as exc:
+                raise self._output_container_error(exc) from exc
             return self._build_output_data(raw)
         if logger is not None:
             import warnings

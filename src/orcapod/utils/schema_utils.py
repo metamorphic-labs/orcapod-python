@@ -11,6 +11,7 @@ import pyarrow as pa
 
 from orcapod.errors import InputValidationError
 from orcapod.types import ContentHash, Schema, SchemaLike
+from orcapod.utils.output_containers import EXCLUDED_OUTPUT_CONTAINERS
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +326,14 @@ def extract_function_schemas_with_container(
             output_item_types = [return_annot]
         else:
             origin = get_origin(return_annot)
+            if isinstance(origin, type) and issubclass(
+                origin, EXCLUDED_OUTPUT_CONTAINERS
+            ):
+                raise ValueError(
+                    f"Function return type annotation {return_annot} cannot declare "
+                    "multiple outputs. Use tuple[T1, T2, ...] or a supported "
+                    "sequence annotation with one type per output key."
+                )
             if not isinstance(origin, type) or not issubclass(origin, Sequence):
                 raise ValueError(
                     f"Multiple return keys were specified but return type annotation {return_annot} is not a sequence type (list, tuple, Collection)."
