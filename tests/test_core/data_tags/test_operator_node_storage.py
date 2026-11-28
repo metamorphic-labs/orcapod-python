@@ -565,7 +565,7 @@ def test_merge_join_cache_keeps_declared_system_tag_fields(
     from orcapod.streams import ArrowTableStream
 
     left = ArrowTableStream(
-        pa.table({"k": [1, 2], "x": [3, 4], "_tag_custom": ["one", None]}),
+        pa.table({"k": [1, 2], "x": [3, 4], "_tag_custom": ["one", "two"]}),
         tag_columns=["k"],
     )
     right = ArrowTableStream(pa.table({"k": [1, 2], "y": [5, 6]}), tag_columns=["k"])

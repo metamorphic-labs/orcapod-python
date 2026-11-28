@@ -32,7 +32,11 @@ from orcapod.core.streams.base import (
     typed_zero_row_table,
 )
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
+from orcapod.errors import (
+    InputValidationError,
+    SourceSpecMismatchError,
+    UnboundSourceError,
+)
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.sources import ArrowTableSource, CSVSource, DictSource
 from orcapod.types import Schema
@@ -1064,20 +1068,12 @@ def test_an_extra_system_tag_column_is_refused(
         bind(job, stream)
 
 
-@pytest.mark.parametrize("x_type", [int, int | None], ids=["declared", "narrower"])
-@pytest.mark.parametrize("bind", ALL_BINDS.values(), ids=ALL_BINDS.keys())
-def test_a_system_tag_pair_of_other_types_is_refused(
-    bind: Callable[[PipelineJob, Any], None], x_type: Any
-) -> None:
-    """The source id and the record id must be ``str``, as the slot predicts (ITL-1154)."""
-    stream = _stream_with_system_tags(
-        {
-            SOURCE_ID: pa.array(["s"], pa.large_string()),
-            RECORD_ID: pa.array([b"r"], pa.large_binary()),
-        }
-    )
-    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
-    with job:
-        _ = MapData({"x": "y"})(_slot(x_type), label="renamed")
-    with pytest.raises(SourceSpecMismatchError, match=r"declared str but the source"):
-        bind(job, stream)
+def test_a_non_string_record_id_is_refused_before_binding() -> None:
+    """A raw stream reports its invalid ID type at construction."""
+    with pytest.raises(InputValidationError, match=RECORD_ID):
+        _stream_with_system_tags(
+            {
+                SOURCE_ID: pa.array(["s"], pa.large_string()),
+                RECORD_ID: pa.array([b"r"], pa.large_binary()),
+            }
+        )

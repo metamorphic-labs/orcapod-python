@@ -191,11 +191,10 @@ def _with_system_tag(column: pa.Array[Any]) -> ArrowTableStream:
 @pytest.mark.parametrize(
     "column",
     [
-        pa.array([1, 2], pa.int16()),
-        pa.array([1, 2], pa.int32()),
         pa.array(["a", "b"], pa.string()),
+        pa.array(["a", "b"], pa.large_string()),
     ],
-    ids=["int16", "int32", "string"],
+    ids=["string", "large_string"],
 )
 def test_a_channel_on_a_raw_stream_keeps_the_declared_system_tag_field(
     column: pa.Array[Any],
@@ -214,14 +213,6 @@ def test_a_channel_on_a_raw_stream_keeps_the_declared_system_tag_field(
     assert delivered.schema.field(name).equals(expected, check_metadata=True)
     assert built.schema.field(name).equals(expected, check_metadata=True)
     assert delivered[name].to_pylist() == built[name].to_pylist()
-
-
-def test_a_channel_keeps_null_values_in_a_nullable_raw_system_tag() -> None:
-    """A single nullable field can hold the rows with and without a value."""
-    stream = _with_system_tag(pa.array(["a", None], pa.large_string()))
-    table = pa.Table.from_batches(asyncio.run(stream.open_channel().collect()))
-    assert table.schema.field("_tag_e").equals(pa.field("_tag_e", pa.large_string()))
-    assert table.column("_tag_e").to_pylist() == ["a", None]
 
 
 def _arrow_table_source() -> ArrowTableSource:

@@ -76,7 +76,9 @@ def test_raw_system_tag_fields_survive_a_record_batch_channel() -> None:
     """A channel carries a stream's system-tag Arrow fields through to its rows."""
     system = pa.schema(
         [
-            pa.field("_tag_rank", pa.int8(), False, metadata={b"purpose": b"rank"}),
+            pa.field(
+                "_tag_rank", pa.large_string(), False, metadata={b"purpose": b"rank"}
+            ),
             pa.field("_tag_label", pa.large_string(), True),
         ]
     )
@@ -93,7 +95,7 @@ def test_raw_system_tag_fields_survive_a_record_batch_channel() -> None:
         [
             pa.array(values, field.type)
             for values, field in zip(
-                (["a", "b"], [1, 2], [3, 4], [5, 6], [7, 8], ["a", None]),
+                (["a", "b"], [1, 2], [3, 4], [5, 6], ["7", "8"], ["a", "b"]),
                 schema,
                 strict=True,
             )
@@ -2394,13 +2396,13 @@ def test_a_source_nodes_channel_gives_its_output_stream_as_it_is() -> None:
 
 
 def test_channel_keeps_first_system_tag_declaration_and_entry_id() -> None:
-    """A later batch containing a null cannot change an earlier row's entry ID."""
+    """A later batch cannot change an earlier row's entry ID."""
     from orcapod.core import row_ids
 
     name = "_tag_custom"
     field = pa.field(name, pa.large_string(), metadata={b"owner": b"test"})
     table = pa.Table.from_arrays(
-        [pa.array([1, 2]), pa.array([7, 8]), pa.array(["kept", None], field.type)],
+        [pa.array([1, 2]), pa.array([7, 8]), pa.array(["kept", "later"], field.type)],
         schema=pa.schema([pa.field("k", pa.int64()), pa.field("x", pa.int64()), field]),
     )
     stream = _UntypedStream(table, tag_columns=["k"])

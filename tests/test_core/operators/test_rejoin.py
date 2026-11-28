@@ -45,6 +45,7 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.system_constants import constants
+from orcapod.utils import arrow_utils
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning"),
@@ -438,16 +439,19 @@ def test_stated_system_tags_are_compared_even_beside_an_input_that_states_none()
         _ = Rejoin()(a, b, c)
 
 
-def _float_provenance(origin: list[float], data: str) -> ArrowTableStream:
-    """A raw stream whose one system tag is a float, with data column ``data``."""
+def _float_tag_branch(level: list[float], data: str) -> ArrowTableStream:
+    """A branch with a float user tag and data column ``data``."""
     table = pa.table(
         {
             "g": pa.array([1, 2], pa.int64()),
-            "origin": pa.array(origin, pa.float64()),
+            "level": pa.array(level, pa.float64()),
             data: pa.array([0.5, 0.25], pa.float64()),
         }
     )
-    return ArrowTableStream(table, tag_columns=["g"], system_tag_columns=["origin"])
+    return ArrowTableStream(
+        arrow_utils.add_system_tag_columns(table, "origin", "source", ["r1", "r2"]),
+        tag_columns=["g", "level"],
+    )
 
 
 OTHER_CONTEXT = "std:v1:test-other"
@@ -764,18 +768,19 @@ def test_several_shared_tags_several_inputs_in_every_order() -> None:
             assert _units(_rejoined(*order)[0]) == kept
 
 
-def test_a_null_in_a_system_tag_matches_nothing() -> None:
-    """Provenance is never null: rows with a null in a system-tag column match nothing
-    and are left out, in both inputs; the other rows are put together. Nothing is
-    refused and nothing warns (no shared column differs)."""
+def test_different_source_ids_match_nothing() -> None:
+    """Rows from different sources do not match, even with matching record IDs."""
     origin = _origin()
     source_id = next(name for name in _system_tags(_source()) if "source_id" in name)
     values = origin.column(source_id).to_pylist()
-    nulled: dict[str, Any] = {
-        source_id: pa.array([None, None, *values[2:]], pa.large_string())
+    left: dict[str, Any] = {
+        source_id: pa.array(["a", "a", *values[2:]], pa.large_string())
     }
-    a = _branch(origin, ["rate"], **nulled)
-    b = _branch(origin, ["depth"], **nulled)
+    right: dict[str, Any] = {
+        source_id: pa.array(["b", "b", *values[2:]], pa.large_string())
+    }
+    a = _branch(origin, ["rate"], **left)
+    b = _branch(origin, ["depth"], **right)
     whole = _branch(origin, ["area"])
     for inputs in ((a, b), (b, a), (a, whole), (whole, a), (a, whole, b)):
         result, warned = _rejoined(*inputs)
@@ -784,8 +789,8 @@ def test_a_null_in_a_system_tag_matches_nothing() -> None:
 
 
 def test_a_null_in_another_shared_column_equals_a_null() -> None:
-    """Only a system tag's null matches nothing. Rows of one origin row that both hold
-    no value in a shared tag, or in a shared data-tag's source info, are put together."""
+    """Rows of one origin row that both hold no value in a shared tag or source-info
+    column are put together."""
     origin = _origin()
     holes = pa.array(
         ["s0", None, "s2", None, "s1", "s2", "s0", "s1"], pa.large_string()
@@ -1023,22 +1028,18 @@ def test_the_first_input_is_the_first_by_pipeline_hash_whatever_the_argument_ord
 ):
     """Inputs of different pipeline hashes are taken in the order of those hashes: the
     shared column keeps the same input's bits in both argument orders. Here the shared
-    column is a float system tag, ``-0.0`` in one input and ``0.0`` in the other."""
-    a = _float_provenance([0.0, 1.0], "x")
-    b = _float_provenance([-0.0, 1.0], "y")
+    column is a float user tag, ``-0.0`` in one input and ``0.0`` in the other."""
+    a = _float_tag_branch([0.0, 1.0], "x")
+    b = _float_tag_branch([-0.0, 1.0], "y")
     assert a.pipeline_hash() != b.pipeline_hash()
     first = _first(a, b)
-    wanted = _bits(
-        first.as_table(columns={"system_tags": True})
-        .column("_tag_origin")
-        .to_pylist()[0]
-    )
+    wanted = _bits(first.as_table().column("level").to_pylist()[0])
     for inputs in ((a, b), (b, a)):
         result, warned = _rejoined(*inputs)
         table = result.as_table(columns={"system_tags": True})
         assert table.num_rows == 2 and not warned
         by_g = dict(
-            zip(table.column("g").to_pylist(), table.column("_tag_origin").to_pylist())
+            zip(table.column("g").to_pylist(), table.column("level").to_pylist())
         )
         assert _bits(by_g[1]) == wanted
 

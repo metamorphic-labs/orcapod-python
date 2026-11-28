@@ -507,10 +507,7 @@ def _float_tag_branch(values: Sequence[float], data: str) -> ArrowTableStream:
 
 CASES = [
     # Rejoin leaves out rows of one origin row that differ in a shared column; equal
-    # floats of different bits match (ITL-1355). A null system tag is not here: rows
-    # holding one cannot be rebuilt into a table by the barrier of any operator (their
-    # system-tag field is nullable, the other rows' is not), before Rejoin sees them;
-    # the sync path is tested in test_rejoin.
+    # floats of different bits match (ITL-1355).
     Case(
         "rejoin_differing_tag",
         Rejoin,
@@ -1040,7 +1037,7 @@ def test_standalone_async_join_rows_keep_declared_system_tag_fields(
     )
     inputs = []
     empty_inputs = []
-    for source, records in (("a", [None, "q"]), ("b", ["r", "t"]), ("c", ["s", "u"])):
+    for source, records in (("a", ["p", "q"]), ("b", ["r", "t"]), ("c", ["s", "u"])):
         field_metadata: dict[bytes | str, bytes | str] | None = (
             None
             if metadata == "none"
@@ -1106,7 +1103,7 @@ def test_standalone_async_join_rows_keep_declared_system_tag_fields(
 
 
 @pytest.mark.parametrize("arity", [2, 3])
-def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
+def test_tied_join_sorts_record_ids_only_at_the_final_link(
     arity: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source_id, record_id = "_tag_source_id::seed", "_tag_record_id::seed"
@@ -1123,7 +1120,7 @@ def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
             tag_columns=["k", "g"],
             data_tags=["k", "g"],
         )
-        for source, record in (("same", None), ("same", "r"), ("z", "other"))[:arity]
+        for source, record in (("same", "s"), ("same", "r"), ("z", "other"))[:arity]
     ]
     assert len({stream.pipeline_hash() for stream in inputs}) == 1
     columns = {"system_tags": True}
@@ -1137,9 +1134,7 @@ def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
     assert [expected[n][0].as_py() for n in source_names] == ["same", "same", "z"][
         :arity
     ]
-    assert [expected[n][0].as_py() for n in record_names] == ["r", None, "other"][
-        :arity
-    ]
+    assert [expected[n][0].as_py() for n in record_names] == ["r", "s", "other"][:arity]
 
     calls: list[int] = []
     sort_system_tags = arrow_utils.sort_system_tag_values
@@ -1292,7 +1287,7 @@ def test_distinct_join_inputs_keep_custom_tags_when_short_hashes_collide(
 
 
 @pytest.mark.parametrize("reverse_columns", [False, True])
-def test_raw_stream_rows_keep_system_tag_width_flags_and_metadata(
+def test_raw_stream_rows_keep_system_tag_flags_and_metadata(
     reverse_columns: bool,
 ) -> None:
     schema = pa.schema(
@@ -1301,14 +1296,16 @@ def test_raw_stream_rows_keep_system_tag_width_flags_and_metadata(
             pa.field("g", pa.large_string(), False),
             pa.field("x", pa.int16(), False),
             pa.field("y", pa.large_string(), True),
-            pa.field("_tag_rank", pa.int8(), False, metadata={b"purpose": b"rank"}),
+            pa.field(
+                "_tag_rank", pa.large_string(), False, metadata={b"purpose": b"rank"}
+            ),
             pa.field("_tag_label", pa.large_string(), True),
         ]
     )
     table = pa.Table.from_pylist(
         [
-            {"k": 1, "g": "a", "x": 4, "y": "x", "_tag_rank": 7, "_tag_label": "a"},
-            {"k": 2, "g": "b", "x": 5, "y": None, "_tag_rank": 8, "_tag_label": None},
+            {"k": 1, "g": "a", "x": 4, "y": "x", "_tag_rank": "7", "_tag_label": "a"},
+            {"k": 2, "g": "b", "x": 5, "y": None, "_tag_rank": "8", "_tag_label": "b"},
         ],
         schema=schema,
     )
