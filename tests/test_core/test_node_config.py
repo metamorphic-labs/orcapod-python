@@ -2,7 +2,13 @@ import os
 
 import pytest
 
-from orcapod.types import NodeConfig, PipelineConfig, PodConfig, resolve_concurrency
+from orcapod.types import (
+    DEFAULT_FUNCTION_POD_CONCURRENCY_CAP,
+    NodeConfig,
+    PipelineConfig,
+    PodConfig,
+    resolve_concurrency,
+)
 
 
 class TestPodConfig:
@@ -69,7 +75,14 @@ class TestNodeConfig:
 class TestResolveConcurrency:
     @pytest.mark.parametrize("has_process_count", [True, False])
     @pytest.mark.parametrize(
-        ("cpu_count", "expected"), [(1, 1), (4, 4), (16, 16), (64, 16), (None, 1)]
+        ("cpu_count", "expected"),
+        [
+            (1, 1),
+            (4, 4),
+            (DEFAULT_FUNCTION_POD_CONCURRENCY_CAP, 16),
+            (64, DEFAULT_FUNCTION_POD_CONCURRENCY_CAP),
+            (None, 1),
+        ],
     )
     def test_default_concurrency_uses_usable_cpus(
         self,

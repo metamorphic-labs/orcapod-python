@@ -17,7 +17,11 @@ from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.sources import DictSource
 from orcapod.system_constants import constants
-from orcapod.types import PipelineConfig, PodConfig
+from orcapod.types import (
+    DEFAULT_FUNCTION_POD_CONCURRENCY_CAP,
+    PipelineConfig,
+    PodConfig,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -86,7 +90,9 @@ def _node_identity(
     )
 
 
-@pytest.mark.parametrize(("cpu_count", "default_peak"), [(4, 4), (64, 16)])
+@pytest.mark.parametrize(
+    ("cpu_count", "default_peak"), [(4, 4), (64, DEFAULT_FUNCTION_POD_CONCURRENCY_CAP)]
+)
 @pytest.mark.parametrize(
     ("tag_only", "multiple_outputs"),
     [

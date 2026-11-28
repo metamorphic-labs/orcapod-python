@@ -341,12 +341,16 @@ class OrchestratorType(Enum):
     ASYNC_CHANNELS = "async_channels"
 
 
+# Upper bound on the default number of in-flight calls per async function pod.
+DEFAULT_FUNCTION_POD_CONCURRENCY_CAP = 16
+
+
 def _default_function_pod_concurrency() -> int:
     """Return the default number of in-flight calls per async function pod."""
     cpu_count = cast(
         Callable[[], int | None], getattr(os, "process_cpu_count", os.cpu_count)
     )
-    return min(16, max(1, cpu_count() or 1))
+    return min(DEFAULT_FUNCTION_POD_CONCURRENCY_CAP, max(1, cpu_count() or 1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,7 +362,8 @@ class PipelineConfig:
         channel_buffer_size: Max items buffered per channel edge.
         default_max_concurrency: Limit for async function pods that inherit
             from this config. When omitted, computed at construction as the
-            usable CPU count clamped to 1–16. ``None`` means unlimited.
+            usable CPU count clamped between 1 and
+            ``DEFAULT_FUNCTION_POD_CONCURRENCY_CAP`` (16). ``None`` means unlimited.
         execution_engine: Optional data-function executor applied to all
             function nodes (e.g. ``RayExecutor``).  ``None`` means in-process
             execution.
