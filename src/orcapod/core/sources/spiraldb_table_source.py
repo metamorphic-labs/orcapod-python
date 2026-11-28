@@ -933,8 +933,8 @@ class SpiralDBTableSource(RootSource):
         ):
             for start in range(0, max(batch.num_rows, 1), self._batch_rows):
                 raw = pa.Table.from_batches([batch.slice(start, self._batch_rows)])
-                require_supported_nullable_types(raw.schema)
                 require_source_column_names(raw.column_names, self._system_tag_columns)
+                require_supported_nullable_types(raw.schema)
                 rows = arrow_utils.drop_system_columns(raw)
                 # Metadata too: field metadata is how a column's logical type is
                 # recorded, and the schema hash was computed at construction.

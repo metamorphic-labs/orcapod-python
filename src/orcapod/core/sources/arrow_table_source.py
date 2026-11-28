@@ -9,6 +9,7 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
+    require_source_column_names,
     require_supported_nullable_types,
 )
 from orcapod.utils import arrow_utils
@@ -112,6 +113,7 @@ class ArrowTableSource(RootSource):
         tag_columns = _normalize_column_list(tag_columns)
 
         if infer_nullable:
+            require_source_column_names(table.column_names, system_tag_columns)
             require_supported_nullable_types(table.schema)
             logger.debug(
                 "infer_nullable=True: deriving nullable flags from data "

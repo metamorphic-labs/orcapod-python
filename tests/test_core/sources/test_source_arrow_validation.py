@@ -979,7 +979,7 @@ class _Poll:
     """Minimal impl for testing schema validation before the first fetch."""
 
     def __init__(
-        self, schema: pa.Schema | None, batch: pl.DataFrame | list[Any]
+        self, schema: pa.Schema | None, batch: pl.DataFrame | list[Any] | Iterator[Any]
     ) -> None:
         self._schema = schema
         self._batch = batch
@@ -1002,7 +1002,7 @@ class _Poll:
 
     async def fetch(
         self, cursor: Cursor[int] | None = None
-    ) -> tuple[Cursor[int], pl.DataFrame | list[Any]]:
+    ) -> tuple[Cursor[int], pl.DataFrame | list[Any] | Iterator[Any]]:
         """Return the prepared batch on the initial fetch."""
         return Cursor(value=0), self._batch
 
@@ -1114,9 +1114,7 @@ def test_polling_refuses_null_in_declaration_and_batch(values: list[Any]) -> Non
     table = _table(pa.field("__unused", pa.large_list(pa.null())), values)
     batch = pl.from_arrow(table)
     assert isinstance(batch, pl.DataFrame)
-    with pytest.raises(
-        InputValidationError, match=r"'__unused'.*declare a supported nullable type"
-    ):
+    with pytest.raises(InputValidationError, match=r"'__unused'.*drop them first"):
         PollingSource(
             _Poll(table.schema, batch), TAGS, source_id="poll", record_id_columns="k"
         )
@@ -1162,7 +1160,7 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
     database = InMemoryArrowDatabase()
     cached = CachedSource(proxy, cache_database=database)
     raw = source.as_table(columns={"source": True, "system_tags": True})
-    raw = raw.append_column("__unused", pa.nulls(2))
+    raw = raw.append_column("unused", pa.nulls(2))
     raw = raw.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
     database.add_records(
         cached.cache_path,
@@ -1171,7 +1169,7 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
         flush=True,
     )
     with pytest.raises(
-        InputValidationError, match=r"'__unused'.*declare a supported nullable type"
+        InputValidationError, match=r"'unused'.*declare a supported nullable type"
     ):
         cached.as_table()
 
@@ -1238,7 +1236,7 @@ def test_derived_source_checks_reserved_columns_before_filtering_storage(
     )
     with pytest.raises(
         InputValidationError,
-        match=r"'__raw_missing'.*declare a supported nullable type",
+        match=r"'__raw_missing'.*reserved.*odb_v2",
     ):
         derived.as_table()
 
@@ -1296,7 +1294,136 @@ def test_spiral_validates_reserved_null_in_an_empty_scan_batch(
         )
         monkeypatch.setattr(source, "_lookup_table", lambda: handle)
         monkeypatch.setattr(handle, "scan_batches", lambda **kwargs: iter([batch]))
-        with pytest.raises(
-            InputValidationError, match=r"'__unused'.*declare a supported nullable type"
-        ):
+        with pytest.raises(InputValidationError, match=r"'__unused'.*drop them first"):
             source.as_table()
+
+
+@pytest.mark.parametrize(
+    "kind", ["arrow", "arrow-infer", "dict-schema", "frame-schema", "poll-declaration"]
+)
+def test_raw_reserved_names_precede_arrow_type_validation(kind: str) -> None:
+    table = pa.table({"k": [1, 2], "x": [3, 4], "_one": [None, None], "_two": [4, 5]})
+    with pytest.raises(
+        InputValidationError, match="'_one'.*'_two'.*rename.*drop them first"
+    ):
+        if kind == "poll-declaration":
+            PollingSource(
+                _Poll(table.schema, []), ["k"], source_id="poll", record_id_columns="k"
+            )
+        else:
+            ArrowTableSource(table, ["k"], infer_nullable=kind == "arrow-infer")
+
+
+@pytest.mark.parametrize(
+    "kind", ["pandas-series", "pandas-index", "namedtuple", "numpy"]
+)
+@pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
+def test_named_frame_inputs_keep_polars_conversion(kind: str, path: str) -> None:
+    from collections import namedtuple
+
+    import numpy as np
+    import pandas as pd
+
+    batch: list[Any]
+    if kind == "pandas-series":
+        batch = [pd.Series([1, 2], name="k"), pd.Series([3, 4], name="x")]
+    elif kind == "pandas-index":
+        batch = [pd.Index([1, 2], name="k"), pd.Index([3, 4], name="x")]
+    elif kind.startswith("namedtuple"):
+        row = namedtuple("FrameRecord", ["k", "x"])
+        batch = [row(1, 3), row(2, 4)]
+    else:
+        batch = [np.array([1, 2]), np.array([3, 4])]
+
+    data = iter(batch) if kind == "namedtuple-iterator" else batch
+    frame = pl.DataFrame(batch)
+    key, value = frame.columns
+    expected = frame.to_dicts()
+    if path == "frame":
+        source = DataFrameSource(data, [key], tag_only_columns=True)
+        control = DataFrameSource(frame, [key], tag_only_columns=True)
+        assert source.as_table().equals(control.as_table(), check_metadata=True)
+        assert source.source_id == control.source_id
+    else:
+        source = PollingSource(
+            _Poll(None, data), [key], source_id="poll", record_id_columns=key
+        )
+        if path == "poll-sync":
+            assert source.as_table().to_pylist() == expected
+        else:
+
+            async def read() -> list[dict[str, Any]]:
+                async with contextlib.aclosing(source.async_iter_data()) as rows:
+                    return [
+                        {key: tag.as_dict()[key], value: data.as_dict()[value]}
+                        for tag, data in [await anext(rows) for _ in expected]
+                    ]
+
+            assert asyncio.run(read()) == expected
+
+
+@pytest.mark.parametrize("view", ["operator-replay", "operator-records", "derived"])
+def test_operator_storage_refuses_reserved_user_columns(
+    view: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        source_id="rows",
+    )
+    store = InMemoryArrowDatabase()
+    job = PipelineJob(name="stored", database=store)
+    with job:
+        DropNulls(["x", "y"])(source, label="origin")
+    node = job.nodes["origin"]
+    assert isinstance(node, OperatorJobNode)
+    node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
+    job.run()
+    read = store.get_all_records
+
+    def read_legacy_rows(path: tuple[str, ...], *args: Any, **kwargs: Any):
+        table = read(path, *args, **kwargs)
+        if table is not None and path[-1] == "odb_v2":
+            return table.append_column("_foo", pa.array([4] * table.num_rows))
+        return table
+
+    monkeypatch.setattr(store, "get_all_records", read_legacy_rows)
+    with pytest.raises(InputValidationError, match="'_foo'.*reserved.*odb_v2"):
+        if view == "operator-records":
+            node.get_all_records()
+        elif view == "derived":
+            node.as_source().as_table()
+        else:
+            node.attach_databases(pipeline_database=store, cache_mode=CacheMode.REPLAY)
+            node.run(load_only=True)
+
+
+def test_cached_source_refuses_reserved_stored_user_columns() -> None:
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        source_id="rows",
+    )
+    tag_schema, data_schema = source.output_schema()
+    proxy = SourceProxy(
+        source_id=source.source_id,
+        content_hash_str=source.content_hash().to_string(),
+        pipeline_hash_str=source.pipeline_hash().to_string(),
+        tag_schema=tag_schema,
+        data_schema=data_schema,
+    )
+    store = InMemoryArrowDatabase()
+    cached = CachedSource(proxy, cache_database=store)
+    raw = source.as_table(columns={"source": True, "system_tags": True})
+    raw = raw.append_column("_foo", pa.array([4, 5]))
+    raw = raw.append_column(CachedSource.HASH_COLUMN_NAME, pa.array([b"a", b"b"]))
+    store.add_records(
+        cached.cache_path,
+        with_data_context(raw, source.data_context_key),
+        record_id_column=CachedSource.HASH_COLUMN_NAME,
+        flush=True,
+    )
+    with pytest.raises(InputValidationError, match="'_foo'.*reserved.*sdb_v1"):
+        cached.as_table()

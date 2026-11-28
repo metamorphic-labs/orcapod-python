@@ -94,7 +94,7 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
 import orcapod.core.row_ids as row_ids
 from orcapod.types import CacheMode, ColumnConfig, ContentHash, Schema
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, schema_utils
 
 logger = logging.getLogger(__name__)
 
@@ -1573,6 +1573,16 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         )
         if records is None:
             return None
+        schema_utils.require_stored_stream_column_names(
+            records.column_names,
+            (
+                self.HASH_COLUMN_NAME,
+                constants.NODE_CONTENT_HASH_COL,
+                constants.DATA_CONTEXT_COL,
+                *_STORED_ONLY_COLUMNS,
+            ),
+            self._pipeline_database.base_path + self._stored_table_path,
+        )
         self._check_stored_data_tags(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)

@@ -33,6 +33,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.result_cache import read_stored_result_table
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.function_pod import (
     fall_through_tags,
@@ -3641,8 +3642,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             )
         for database, path in places:
             database.refresh_table(path)
-            stored = database.get_all_records(
-                path, record_id_column=constants.DATA_RECORD_ID
+            stored = read_stored_result_table(
+                database, path, record_id_column=constants.DATA_RECORD_ID
             )
             if stored is not None:
                 found.append(keep_rows_of_data_context(stored, context_key))
@@ -3739,7 +3740,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         eph_results: pa.Table | None = None
         persistent_df = pl.DataFrame()
         if persistent_taginfo_df.height > 0:
-            results = self._cached_function_pod.result_database.get_all_records(
+            results = read_stored_result_table(
+                self._cached_function_pod.result_database,
                 self._cached_function_pod.record_path,
                 record_id_column=constants.DATA_RECORD_ID,
             )
@@ -3768,11 +3770,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if ephemeral_taginfo_df.height > 0:
             eph_frame: pl.DataFrame | None = None
             if self._ephemeral_cached_pod is not None:
-                eph_results = (
-                    self._ephemeral_cached_pod.result_database.get_all_records(
-                        self._ephemeral_cached_pod.record_path,
-                        record_id_column=constants.DATA_RECORD_ID,
-                    )
+                eph_results = read_stored_result_table(
+                    self._ephemeral_cached_pod.result_database,
+                    self._ephemeral_cached_pod.record_path,
+                    record_id_column=constants.DATA_RECORD_ID,
                 )
             if eph_results is not None:
                 eph_results = keep_rows_of_data_context(eph_results, context_key).drop(

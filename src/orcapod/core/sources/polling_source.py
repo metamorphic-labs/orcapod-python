@@ -332,8 +332,8 @@ class PollingSource(RootSource, Generic[T]):
         self._declared_arrow: pa.Schema | None = None
         unified_schema = self._impl.schema()
         if isinstance(unified_schema, pa.Schema):
-            require_supported_nullable_types(unified_schema)
             require_source_column_names(unified_schema.names)
+            require_supported_nullable_types(unified_schema)
             # Logical types in one form first: a field declared with its identifier
             # in ARROW:extension:* metadata is that logical type (ITL-640).
             self._declared_arrow = declaration_form_schema(

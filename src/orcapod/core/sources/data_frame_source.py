@@ -6,6 +6,8 @@ from dataclasses import fields, is_dataclass
 from itertools import chain, repeat
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
+import numpy as np
+import pandas as pd
 import polars as pl
 import pyarrow as pa
 from pydantic import BaseModel
@@ -87,10 +89,14 @@ def _describe_frame_row(value: Any) -> _FrameRow | None:
         return _FrameRow(
             value, tuple(field.name for field in fields(value)), type(value)
         )
+    if isinstance(value, tuple):
+        names = getattr(type(value), "_fields", None)
+        if isinstance(names, tuple) and all(isinstance(name, str) for name in names):
+            return _FrameRow(value, names, type(value))
     raise InputValidationError(
         f"({type(value).__name__}) needs named fields. "
-        "Use a mapping, dataclass or Pydantic model for rows. "
-        "Pass named Polars Series as a list of columns."
+        "Use a mapping, namedtuple, dataclass or Pydantic model for rows. "
+        "Pass named Polars or pandas Series or pandas Index objects as a list of columns."
     )
 
 
@@ -232,6 +238,23 @@ def source_dataframe(
         return pl.DataFrame(data)
     elif isinstance(data, Sequence):
         if all(isinstance(column, pl.Series) for column in data):
+            require_source_column_names(
+                {column.name for column in data}, system_tag_columns
+            )
+            return pl.DataFrame(data)
+        first = next((value for value in data if value is not None), None)
+        if isinstance(first, (pd.Series, pd.Index, np.ndarray)):
+            # These sequences use Polars' column conversion. Check pandas names
+            # before conversion can fail or discard a column.
+            require_source_column_names(
+                {
+                    column.name
+                    for column in data
+                    if isinstance(column, (pd.Series, pd.Index))
+                    and isinstance(column.name, str)
+                },
+                system_tag_columns,
+            )
             return pl.DataFrame(data)
         rows = list(_describe_frame_rows(data))
         _require_materialized_row_names(rows, system_tag_columns)
@@ -256,11 +279,11 @@ def source_dataframe(
 class DataFrameSource(RootSource):
     """A source backed by a Polars DataFrame or supported tabular or column input.
 
-    Python rows must be mappings with the same keys, or dataclass or Pydantic
-    rows of one class with the same declared fields. Put extra or computed
+    Python rows must be mappings with the same keys, or namedtuple, dataclass
+    or Pydantic rows of one class with the same declared fields. Put extra or computed
     Pydantic fields in mappings, and use mappings for models with custom
     serialization. A ``None`` row keeps its position as a null row. Pass
-    named Polars Series as a list of columns.
+    named Polars Series, pandas Series or pandas Index objects as a list of columns.
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
@@ -327,8 +350,8 @@ class DataFrameSource(RootSource):
 
         arrow_table = df.to_arrow()
         if schema is not None:
-            require_supported_nullable_types(schema)
             require_source_column_names(schema.names, system_tag_columns)
+            require_supported_nullable_types(schema)
             require_custom_system_tags(arrow_table, system_tag_columns, schema=schema)
             arrow_table = arrow_table.cast(schema)
         else:

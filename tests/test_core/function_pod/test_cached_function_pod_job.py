@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, errors
@@ -323,3 +324,50 @@ def test_saved_job_equals_the_uncached_pods_and_loads(
         {"k": 1, "total": 5},
         {"k": 2, "total": 10},
     ]
+
+
+@pytest.mark.parametrize("mode", ["ordinary", "load-only", "records", "derived"])
+@pytest.mark.parametrize("orchestrator", ["sync", "async"])
+def test_function_job_refuses_reserved_stored_result_keys(
+    mode: str, orchestrator: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counter = Counter()
+    store = DeltaTableDatabase(tmp_path / "store")
+    job = run_job(counter.pod(), store, orchestrator)
+    job_path = tmp_path / "job.json"
+    job.save(job_path)
+    counter.calls.clear()
+    read = DeltaTableDatabase.get_all_records
+
+    def read_legacy_result(
+        database: DeltaTableDatabase, path: tuple[str, ...], *args: Any, **kwargs: Any
+    ) -> pa.Table | None:
+        table = read(database, path, *args, **kwargs)
+        if path[-1] == "rdb_v1" and table is not None:
+            return table.append_column(
+                "_foo", pa.array([6] * table.num_rows)
+            ).append_column("_tag_fake", pa.array([7] * table.num_rows))
+        return table
+
+    monkeypatch.setattr(DeltaTableDatabase, "get_all_records", read_legacy_result)
+    if mode == "load-only":
+        job = PipelineJob.load(job_path, database=store)
+        job.bind(sources={"s": make_source()})
+    elif mode == "ordinary":
+        job = PipelineJob(name="j", database=store)
+        with job:
+            _ = counter.pod()(make_source(), label="add")
+    node = job.nodes["add"]
+    with pytest.raises(
+        errors.InputValidationError, match="'_foo'.*'_tag_fake'.*reserved.*rdb_v1"
+    ):
+        if mode == "records":
+            _ = node.get_all_records()
+        elif mode == "derived":
+            _ = node.as_source().as_table()
+        else:
+            _ = job.run(
+                orchestrator=ORCHESTRATORS[orchestrator](),
+                load_only=mode == "load-only",
+            )
+    assert counter.calls == []

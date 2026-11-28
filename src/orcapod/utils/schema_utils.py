@@ -1099,3 +1099,30 @@ def require_names_not_system(names: Collection[str]) -> None:
             f"Column names {columns} start with {prefix!r}, which is reserved "
             "for system columns. A tag or data column needs another name."
         )
+
+
+def require_stored_stream_column_names(
+    names: Collection[str], bookkeeping: Collection[str], path: Sequence[str]
+) -> None:
+    """Validate the user columns of a stored stream and name its table on error.
+
+    Stored streams carry system tags and source info alongside the user columns.
+    System tags have their own prefix. Source info names the column it describes.
+    """
+    from orcapod.system_constants import constants
+
+    system_columns = {
+        name
+        for name in names
+        if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        or (
+            name.startswith(constants.SOURCE_PREFIX)
+            and name.removeprefix(constants.SOURCE_PREFIX) in names
+        )
+    }
+    try:
+        require_names_not_system(set(names) - set(bookkeeping) - system_columns)
+    except InputValidationError as exc:
+        raise InputValidationError(
+            f"{exc} Stored stream table: {'/'.join(path)}"
+        ) from exc

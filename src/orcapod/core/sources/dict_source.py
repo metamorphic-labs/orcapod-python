@@ -68,8 +68,8 @@ class DictSource(RootSource):
         rows = [dict(row) for row in data]
         require_source_row_names(rows, system_tag_columns)
         if isinstance(data_schema, pa.Schema):
-            require_supported_nullable_types(data_schema)
             require_source_column_names(data_schema.names, system_tag_columns)
+            require_supported_nullable_types(data_schema)
             arrow_table = self.data_context.type_converter.python_dicts_to_arrow_table(
                 rows,
                 arrow_schema=data_schema,

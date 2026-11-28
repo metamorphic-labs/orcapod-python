@@ -564,6 +564,7 @@ class SourceStreamBuilder:
         )
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
+        require_source_column_names(table.column_names, system_tag_columns_tuple)
         require_supported_nullable_types(table.schema)
         data_tags_tuple = tuple(c for c in tag_columns_tuple if c in data_tags)
         if unknown := set(data_tags) - set(tag_columns_tuple):
@@ -592,7 +593,6 @@ class SourceStreamBuilder:
             )
 
         # 1. Refuse reserved names before any system columns could be dropped.
-        require_source_column_names(table.column_names, system_tag_columns_tuple)
         schema_utils.require_names_not_meta(tag_columns_tuple)
         table = arrow_utils.drop_system_columns(table)
         require_custom_system_tags(table, system_tag_columns_tuple)

@@ -531,6 +531,11 @@ class CachedSource(RootSource):
         )
         if records is None:
             return None
+        schema_utils.require_stored_stream_column_names(
+            records.column_names,
+            (self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL),
+            self._cache_database.base_path + self.cache_path,
+        )
         require_supported_nullable_types(records.schema)
         stored_rows = records.num_rows
         records = keep_rows_of_data_context(records, self.data_context_key)
