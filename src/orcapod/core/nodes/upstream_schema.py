@@ -15,7 +15,7 @@ def require_same_upstream_schemas(
         replacements: The proposed upstreams, in input order.
 
     Raises:
-        ValueError: If the upstream count or a tag or data schema changes.
+        ValueError: If the upstream count or a tag, data, or system-tag schema changes.
     """
     upstreams = node.upstreams
     if len(upstreams) != len(replacements):
@@ -53,4 +53,22 @@ def require_same_upstream_schemas(
                 f"Cannot rewire node {node.label!r}: upstream {index} has a different "
                 + f"Arrow schema: current (tag={current_arrow[0]}, data={current_arrow[1]}), "
                 + f"replacement (tag={proposed_arrow[0]}, data={proposed_arrow[1]})"
+            )
+
+        columns = {"system_tags": True}
+        current_system_tags = {
+            name: hint
+            for name, hint in upstream.output_schema(columns=columns)[0].items()
+            if name not in current[0]
+        }
+        proposed_system_tags = {
+            name: hint
+            for name, hint in replacement.output_schema(columns=columns)[0].items()
+            if name not in proposed[0]
+        }
+        if current_system_tags != proposed_system_tags:
+            raise ValueError(
+                f"Cannot rewire node {node.label!r}: upstream {index} has a different "
+                + f"system-tag schema: current {current_system_tags!r}, "
+                + f"replacement {proposed_system_tags!r}"
             )

@@ -31,6 +31,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes import FunctionJobNode, OperatorJobNode
+from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.databases import InMemoryArrowDatabase
@@ -668,6 +669,40 @@ class TestMemoInvalidation:
             node.upstreams = (other,)
 
         assert node.upstreams is before
+
+    def test_rewiring_to_a_join_with_different_system_tags_is_atomic(self) -> None:
+        """A new provenance schema must leave downstream predictions untouched."""
+        original = DictSource(
+            [{"id": 1, "x": 1, "extra": 2}], tag_columns=["id"], tag_only_columns=True
+        )
+        right = DictSource(
+            [{"id": 1, "extra": 2}], tag_columns=["id"], tag_only_columns=True
+        )
+        replacement = Join()(_one_row_source(1), right)
+        assert original.output_schema() == replacement.output_schema()
+
+        job = PipelineJob(name="rewire_system_tags")
+        with job:
+            selected = original.select_data_columns("x", label="selected")
+            _ = selected.map_data({"x": "y"}, label="renamed")
+        node = job.nodes["selected"]
+        downstream = job.nodes["renamed"]
+        assert isinstance(node, OperatorJobNode)
+        assert isinstance(downstream, OperatorJobNode)
+        before = node.upstreams
+        columns = {"system_tags": True}
+        old_tags = before[0].output_schema(columns=columns)[0]
+        new_tags = replacement.output_schema(columns=columns)[0]
+        assert len(old_tags) == 3
+        assert len(new_tags) == 5
+        downstream_schema = downstream.output_schema(columns=columns)
+
+        with pytest.raises(ValueError, match="'selected'.*system-tag") as error:
+            node.upstreams = (replacement,)
+
+        assert all(name in str(error.value) for name in {*old_tags, *new_tags} - {"id"})
+        assert node.upstreams is before
+        assert downstream.output_schema(columns=columns) is downstream_schema
 
     @pytest.mark.parametrize(
         ("build_job", "label"), [(_rename_job, "renamed"), (_function_job, "plus_one")]
