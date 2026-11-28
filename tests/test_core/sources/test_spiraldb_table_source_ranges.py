@@ -25,7 +25,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import SourceTooLargeError
+from orcapod.errors import InconsistentSourceError, SourceTooLargeError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import Condition, col
@@ -749,7 +749,7 @@ class TestJobs:
             return n
 
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 same.pod(
                     events.where(col("unit") < 2).select_data_columns(["n"]), label="a"
