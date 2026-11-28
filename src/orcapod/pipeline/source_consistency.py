@@ -108,8 +108,6 @@ def require_consistent_sources(
     Raises:
         InconsistentSourceError: Naming both locations and how to resolve the conflict.
     """
-    from orcapod.core.sources.derived_source import DerivedSource
-
     by_hash: dict[str, tuple[str, RootSource]] = {}
     by_id: dict[str, list[tuple[str, RootSource]]] = {}
     for location, source in root_source_uses(uses, rebinding):
@@ -119,12 +117,12 @@ def require_consistent_sources(
             reuse = "Build the source once and reuse the object"
             if first.condition.equalities or source.condition.equalities:
                 reuse = "Call where() once and reuse the resulting source object"
-            remedy = f"{reuse}, or give each source its own source_id."
-            if any(
-                isinstance(candidate, DerivedSource) and candidate._tags_as_data is None  # pyright: ignore[reportPrivateUsage]  # plain derived sources hash only the origin
-                for candidate in (first, source)
-            ):
-                remedy = f"{reuse}."
+            remedy = f"{reuse}."
+            if first.source_id == source.source_id:
+                remedy += (
+                    " If the source ID contributes to the hash, give each source "
+                    "its own source_id."
+                )
             raise InconsistentSourceError(
                 f"Source {source.source_id!r} has distinct source objects with one "
                 f"content hash in {first_location} and {location}. {remedy}"

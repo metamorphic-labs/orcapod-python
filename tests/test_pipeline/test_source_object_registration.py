@@ -66,6 +66,16 @@ def _source(
     )
 
 
+def _shifted_source(name: str, offset: int) -> DictSource:
+    """Build a fixture whose output values distinguish it from other slot bindings."""
+    return DictSource(
+        [{**row, "x": int(row["x"]) + offset} for row in ROWS],
+        source_id=name,
+        tag_columns=["t1", "t2"],
+        tag_only_columns=True,
+    )
+
+
 def _pair(
     tmp_path: Path, kind: str, reverse: bool
 ) -> tuple[DictSource | CSVSource, DictSource | CSVSource]:
@@ -562,3 +572,182 @@ def test_one_wrapper_object_can_be_reused(wrapper_pair) -> None:
         shared.map_data({column: "a"}, label="first")
         shared.map_data({column: "b"}, label="second")
     assert {"first", "second"} <= graph.nodes.keys()
+
+
+@function_pod(output_keys="out")
+def increment(x: int) -> int:
+    """Increment the selected input."""
+    return x + 1
+
+
+@function_pod(output_keys="doubled")
+def double(out: int) -> int:
+    """Double the earlier output."""
+    return out * 2
+
+
+@pytest.mark.parametrize("kind", ["select", "join", "function", "cache"])
+@pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+@pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning")
+def test_prebuilt_stream_checks_for_a_retired_root_after_recompile(
+    tmp_path: Path, kind: str, setter: bool, orchestrator: Orchestrator
+) -> None:
+    from orcapod.operators import SemiJoin
+
+    original = _source(tmp_path, "dict", "a")
+    replacement = _shifted_source("b", 10)
+    peer = _source(tmp_path, "dict", "peer")
+    original_cache = original.cached(InMemoryArrowDatabase())
+    consumer = double if kind == "function" else increment
+
+    def build(prebuilt: bool = False):
+        if kind == "join":
+            return SemiJoin()(original, peer, label="joined")
+        if kind == "function":
+            return increment.pod(original, label="prepared")
+        source = (
+            original
+            if kind == "select"
+            else (
+                original.cached(InMemoryArrowDatabase()) if prebuilt else original_cache
+            )
+        )
+        return source.select_data_columns(["x"], label="selected")
+
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        recorded = build()
+        consumer.pod(recorded, label="before")
+    if setter:
+        job.nodes["a"].bound_source = replacement
+    else:
+        job.bind(sources={"a": replacement})
+    job.compile()
+
+    prebuilt = build(prebuilt=True)
+    assert (
+        prebuilt is not recorded and prebuilt.content_hash() == recorded.content_hash()
+    )
+    with job:
+        with pytest.raises(InconsistentSourceError, match="slot 'a'") as error:
+            consumer.pod(prebuilt, label="refused")
+        assert "Pass the source bound there" in str(error.value)
+    job.run(orchestrator=orchestrator())
+    assert "refused" not in job.nodes
+    column, expected = (
+        ("doubled", [24, 28]) if kind == "function" else ("out", [12, 14])
+    )
+    assert sorted(job.before.as_table()[column].to_pylist()) == expected
+
+
+@pytest.mark.parametrize(
+    "names", [("a", "b"), ("b", "a"), ("a", "b", "c"), ("c", "b", "a")]
+)
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_capture_uses_current_source_object_after_swapping_or_rotating_slots(
+    names: tuple[str, ...], orchestrator: Orchestrator
+) -> None:
+    sources = {
+        name: _shifted_source(name, 10 * index) for index, name in enumerate(names)
+    }
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        for name, source in sources.items():
+            total.pod(source, label=f"original_{name}")
+    rotated = names[1:] + names[:1]
+    job.bind(
+        sources={slot: sources[name] for slot, name in zip(names, rotated, strict=True)}
+    )
+    job.compile()
+    with job:
+        for name, source in reversed(sources.items()):
+            difference.pod(source, label=f"added_{name}")
+    job.run(orchestrator=orchestrator())
+
+    assert set(job.sources) == set(names)
+    for index, name in enumerate(names):
+        before = job.nodes[f"original_{name}"]
+        after = job.nodes[f"added_{name}"]
+        assert sorted(after.as_table()["out"].to_pylist()) == [10 * index - 1] * 2
+        offset = 10 * ((index + 1) % len(names))
+        assert sorted(before.as_table()["out"].to_pylist()) == [offset + 3, offset + 7]
+
+
+def test_cached_derived_collision_only_suggests_reusing_the_object(
+    tmp_path: Path,
+) -> None:
+    job = _job(tmp_path, ("a",))
+    job.run()
+    first = job.result_a.as_source(source_id="left").cached(InMemoryArrowDatabase())
+    second = job.result_a.as_source(source_id="right").cached(InMemoryArrowDatabase())
+    assert first.content_hash() == second.content_hash()
+    assert first.source_id != second.source_id
+    with Pipeline("diagnostics"):
+        first.map_data({"out": "first_out"}, label="first")
+        with pytest.raises(InconsistentSourceError, match="reuse the object") as error:
+            second.map_data({"out": "second_out"}, label="second")
+    assert "source_id" not in str(error.value)
+
+
+@pytest.mark.parametrize("setter", [False, True])
+def test_recompiling_a_loaded_job_preserves_its_sources_mapping(
+    tmp_path: Path, setter: bool
+) -> None:
+    original = _source(tmp_path, "csv", "a")
+    replacement = _source(tmp_path, "csv", "b", change=True)
+    db = InMemoryArrowDatabase()
+    with PipelineJob(database=db) as job:
+        total.pod(original, label="before")
+    job.bind(sources={"a": replacement})
+    job.run()
+    path = tmp_path / "job.json"
+    job.save(path)
+    loaded = PipelineJob.load(path, database=db)
+    if setter:
+        loaded.nodes["a"].bound_source = original
+    before = loaded.sources
+
+    loaded.compile()
+
+    assert set(loaded.sources) == set(before) == {"a"}
+    assert loaded.sources["a"] is before["a"]
+
+
+@pytest.mark.parametrize("prebuilt", [False, True], ids=["same-pod", "prebuilt"])
+@pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_capture_refuses_to_reuse_an_invocation_on_different_slots(
+    tmp_path: Path, prebuilt: bool, setter: bool, orchestrator: Orchestrator
+) -> None:
+    first = _source(tmp_path, "dict", "a")
+    second = _shifted_source("b", 10)
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        if prebuilt:
+            increment.pod(first.select_data_columns(["x"]), label="original_a")
+        else:
+            total.pod(first, label="original_a")
+        total.pod(second, label="original_b")
+    if setter:
+        job.nodes["a"].bound_source = second
+        job.nodes["b"].bound_source = first
+    else:
+        job.bind(sources={"a": second, "b": first})
+    job.compile()
+
+    outside = first.select_data_columns(["x"]) if prebuilt else first
+    with job:
+        with pytest.raises(InconsistentSourceError, match="ITL-1559") as error:
+            if prebuilt:
+                outside.map_data({"x": "selected"}, label="refused")
+            else:
+                total.pod(outside, label="refused")
+        assert "slot 'a'" in str(error.value) and "slot 'b'" in str(error.value)
+        assert "currently bound" in str(error.value)
+        assert "bind back" in str(error.value)
+        difference.pod(first, label="accepted")
+
+    job.run(orchestrator=orchestrator())
+    assert "refused" not in job.nodes
+    assert sorted(job.original_a.as_table()["out"].to_pylist()) == (
+        [12, 14] if prebuilt else [13, 17]
+    )
+    assert sorted(job.accepted.as_table()["out"].to_pylist()) == [-1, -1]

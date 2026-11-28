@@ -240,46 +240,52 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         else:
             yield from recorded
         if extra is not None:
-            yield from invocation_source_uses(extra)
+            candidate = tuple(invocation_source_uses(extra))
+            if bound_leaves:
+                # A prebuilt stream may coalesce with a recorded invocation.
+                # Check its actual roots before the topology can redirect it.
+                for _, source in root_source_uses(candidate):
+                    _ = self._capture_input_key(source)
+            yield from candidate
 
     def _capture_input_key(self, stream: cp.StreamProtocol) -> str:
         """Route a newly captured use of a bound object to its existing slot."""
-        stream_key = super()._capture_input_key(stream)
-        if isinstance(stream, SourceJobNode):
+        if self._rebound_source_keys or isinstance(stream, SourceJobNode):
             for key, node in self._persistent_node_map.items():
                 if node is stream:
                     return key
+        stream_key = super()._capture_input_key(stream)
         if not self._rebound_source_keys:
             return stream_key
         slot_key = self._captured_slot_keys.get(stream_key, stream_key)
         slot = self._persistent_node_map.get(slot_key)
+        if isinstance(slot, SourceJobNode) and slot.bound_source is stream:
+            return slot_key
+        for key, node in self._persistent_node_map.items():
+            if isinstance(node, SourceJobNode) and node.bound_source is stream:
+                return key
         # Stopgap (ITL-1559): refuse to route a new source object to a different
         # one through the old hash. The follow-up will settle whether capture
         # refers to the object or to the slot.
         if isinstance(slot, SourceJobNode):
-            if (
-                slot_key in self._rebound_source_keys
-                and slot.bound_source is not None
-                and slot.bound_source is not stream
-            ):
+            if slot_key in self._rebound_source_keys and slot.bound_source is not None:
                 raise InconsistentSourceError(
                     f"Capture found distinct source objects for slot {slot.name!r}. "
                     "Pass the source bound there or bind the slot again with job.bind()."
                 )
             return slot_key
-        for key, slot in self._persistent_node_map.items():
-            if (
-                key in self._rebound_source_keys
-                and isinstance(slot, SourceJobNode)
-                and slot.bound_source is stream
-            ):
-                return key
+        if stream_key in self._invocation_lut:
+            inputs = stream.upstreams
+            input_keys = tuple(self._capture_input_key(upstream) for upstream in inputs)
+            self._refuse_reused_invocation(stream_key, inputs, input_keys)
         return stream_key
 
     def _remember_invocation(
         self, key: str, invocation: PodInvocation, input_keys: tuple[str, ...]
     ) -> None:
         """Remember the slot used by each newly captured replacement hash."""
+        if self._rebound_source_keys:
+            self._refuse_reused_invocation(key, invocation.input_streams, input_keys)
         super()._remember_invocation(key, invocation, input_keys)
         for stream, slot_key in zip(invocation.input_streams, input_keys, strict=True):
             if slot_key not in self._rebound_source_keys:
@@ -287,8 +293,69 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             slot = self._persistent_node_map.get(slot_key)
             if isinstance(slot, SourceJobNode) and slot.bound_source is stream:
                 stream_key = stream.content_hash().to_string()
-                if stream_key != slot_key:
+                if (
+                    stream_key != slot_key
+                    and stream_key not in self._persistent_node_map
+                ):
                     self._captured_slot_keys[stream_key] = slot_key
+
+    def _refuse_reused_invocation(
+        self,
+        key: str,
+        inputs: tuple[cp.StreamProtocol, ...],
+        input_keys: tuple[str, ...],
+    ) -> None:
+        """Apply the ITL-1559 stopgap before reusing a step on different slots."""
+        recorded_keys = self._invocation_input_keys.get(key)
+        if recorded_keys is None or recorded_keys == input_keys:
+            return
+        recorded = self._invocation_lut[key]
+
+        def grouped_keys(
+            streams: tuple[cp.StreamProtocol, ...], keys: tuple[str, ...]
+        ) -> Any:
+            """Compare topology keys using the recorded pod's argument symmetry."""
+            key_by_object = {
+                id(stream): name for stream, name in zip(streams, keys, strict=True)
+            }
+
+            def resolve(group: cp.ArgumentGroup) -> Any:
+                if isinstance(group, tuple):
+                    return tuple(resolve(member) for member in group)
+                if isinstance(group, frozenset):
+                    return frozenset(resolve(member) for member in group)
+                return key_by_object[id(group)]
+
+            return resolve(recorded.pod.argument_symmetry(streams))
+
+        if len(recorded_keys) == len(input_keys) and grouped_keys(
+            recorded.input_streams, recorded_keys
+        ) == grouped_keys(inputs, input_keys):
+            return
+
+        raise InconsistentSourceError(
+            f"Cannot reuse a recorded step over {self._capture_slot_names(recorded_keys)} "
+            f"for inputs bound to {self._capture_slot_names(input_keys)} (ITL-1559). "
+            "Build a distinct step from the sources as currently bound, or bind back to "
+            "the recorded sources."
+        )
+
+    def _capture_slot_names(self, input_keys: tuple[str, ...]) -> str:
+        """Describe the source slots under the supplied recorded or candidate keys."""
+        pending = list(input_keys)
+        visited: set[str] = set()
+        names: set[str] = set()
+        while pending:
+            key = pending.pop()
+            if key in visited:
+                continue
+            visited.add(key)
+            node = self._persistent_node_map.get(key)
+            if isinstance(node, SourceJobNode):
+                names.add(f"slot {node.name!r}")
+            elif key in self._invocation_input_keys:
+                pending.extend(self._invocation_input_keys[key])
+        return ", ".join(sorted(names)) or "unrecorded inputs"
 
     def _source_node_from_recording(self, key: str) -> SourceJobNode:
         """Preserve an explicit binding when recompiling its slot."""
@@ -324,12 +391,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         for slot in previous_slots:
             slot._set_binding_owner(None)  # pyright: ignore[reportPrivateUsage]  # the replaced slot no longer belongs to this job
+        previous_sources = self._sources
         self._sources = {}
         for node in self._persistent_node_map.values():
             if isinstance(node, SourceJobNode):
                 node._set_binding_owner(self)  # pyright: ignore[reportPrivateUsage]  # setters participate in this job's binding transaction
                 if node.bound_source is not None:
                     self._sources[node.name] = node.bound_source
+        if self._loaded:
+            # Loaded jobs have no recorded invocations (ITL-1560). Preserve the
+            # bindings restored from the saved job when recompiling.
+            self._sources.update(previous_sources)
 
         # Invalidate the lazy compiled_pipeline cache.
         self._compiled_pipeline = None

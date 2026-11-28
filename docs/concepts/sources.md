@@ -88,10 +88,17 @@ Rebinding replaces a slot's source. On load, slots with identical saved source
 configurations share one reconstructed object.
 
 When adding a step to a job after rebinding a slot, pass the source object currently
-bound there. Capturing an older object while that slot holds a different object
-raises `InconsistentSourceError`. To use the older object again, bind it to the slot
-first. ITL-1559 tracks whether a captured source should refer to the object or to the
-slot.
+bound there. This also applies to sources read through a stream built before
+capture. A capture uses the slot that currently holds the supplied source object.
+If the object has been replaced and is no longer bound in the job, capturing it
+raises `InconsistentSourceError`. Bind it again to use it. ITL-1559 tracks whether a
+captured source should refer to the object or to the slot.
+
+The temporary rule also refuses to reuse a recorded step when its recorded inputs
+and the incoming stream point to different slots. This applies when you call the
+same pod again and when a stream built before capture has the same hash as a recorded
+step. Build a distinct step from the currently bound sources or restore the
+recorded bindings.
 
 The same rule applies to wrappers. Each of these pairs raises
 `InconsistentSourceError` when the objects share one content hash.
@@ -126,7 +133,7 @@ try:
         adjust.pod(second, label="second")
 except InconsistentSourceError as error:
     print(error)
-# Source 'dict_v1:rates' has distinct source objects with one content hash in step 'first' and step 'second'. Build the source once and reuse the object, or give each source its own source_id.
+# Source 'dict_v1:rates' has distinct source objects with one content hash in step 'first' and step 'second'. Build the source once and reuse the object. If the source ID contributes to the hash, give each source its own source_id.
 ```
 
 A kind's version moves when a row read before a change of its implementation could read
