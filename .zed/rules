@@ -822,15 +822,15 @@ convenient call and pod.process(a, b) the exact primitive:
   must equal those of a pipeline with that select written by hand (the stream's
   `select_data_columns` method builds the same operator, and `a.join(b)` the same `Join`).
   Nothing to drop means no step. One info log names the dropped columns; it is not a warning.
-- pod(a, b, strict=True) and pod.process(a, b) reject an extra column. strict is part of
-  no identity. process never takes a strict argument and never drops a column.
+- pod(a, b, strict_columns=True) and pod.process(a, b) reject an extra column.
+  strict_columns is part of no identity. process always uses the exact column contract.
 - A missing required column is an error in every form. Tags are never dropped. A data column
   shared by two inputs fails at the join, used or not: no special handling.
 - No select is added when the data function's accepts_arbitrary_keywords is true (no kind
   today; PythonDataFunction rejects variadic keyword arguments).
 - Function pods only. An operator's and a SideEffectPod's __call__ stay aliases of
-  process with no strict argument. There is no global setting.
-- A test of the exact input contract uses process or strict=True.
+  process with no strict_columns argument. There is no global setting.
+- A test of the exact input contract uses process or strict_columns=True.
 
 Operator (core/operators/) — structural pod transforming streams without adding or
 synthesizing data; it may add a tag (AddTags). All subclass StaticOutputPod:
@@ -1726,7 +1726,9 @@ data. The rules:
   tag on one side and data on the other, is ignored (by name only); the right input's data
   columns are never read. No shared tag column: every left row is returned. Ignored names
   raise `SemiJoinIgnoredColumnWarning` once per operator and set of names (provisional in
-  v0.3: may become an error); the async path warns only when no validation ran.
+  v0.3: may become an error); the job's async path warns only without validation of the
+  current pair. Direct row-channel calls always require `validate_inputs(left, right)`
+  for that exact pair.
 - `Join`, `MergeJoin` and `SemiJoin` accept a shared TAG key whose types differ only in
   nullability (`T` against `T | None`), because a null key matches nothing (developer,
   November 13, 2026, ITL-829). `Join` and `MergeJoin` give the key `T` when any input has it

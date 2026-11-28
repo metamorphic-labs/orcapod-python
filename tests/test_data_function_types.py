@@ -34,6 +34,8 @@ from orcapod.core.data_function import (
     declaration_for,
 )
 from orcapod.core.datagrams import Data
+from orcapod.core.executors import LocalPythonFunctionExecutor
+from orcapod.core.executors.ray import RayExecutor
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.data_function_types import snapshot_path
 from orcapod.core.result_cache import COMMON_RESULT_COLUMNS
@@ -146,6 +148,18 @@ def test_the_python_function_type_is_v1_rev1() -> None:
     assert set(DECLARATIONS) == {"python.function.v1"}
     with pytest.raises(ValueError, match="python.function.v0"):
         declaration_for("python.function.v0")
+
+
+def test_the_declared_executor_type_meaning_lists_the_stored_values() -> None:
+    column = next(c for c in PYTHON_FUNCTION.execution if c.name == "executor_type")
+    declared_values = column.meaning.split("(", 1)[1].removesuffix(")").split(", ")
+    # Reading the identifier does not require initializing a Ray executor.
+    ray_executor = RayExecutor.__new__(RayExecutor)
+    assert set(declared_values) == {
+        LocalPythonFunctionExecutor().executor_type_id,
+        ray_executor.executor_type_id,
+        "none",
+    }
 
 
 @pytest.mark.parametrize("name", list(FUNCTIONS))

@@ -10,19 +10,33 @@ Covers:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pyarrow as pa
 
 import pytest
 
 from orcapod.contexts import get_default_context
+from orcapod.core import result_cache
 from orcapod.core.datagrams import Datagram, Data
 from orcapod.core.datagrams.tag_data import EmptyData
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.result_cache import ResultCache
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.databases import (
+    ConnectorArrowDatabase,
+    DeltaTableDatabase,
+    ExtensionAwareDatabase,
+    InMemoryArrowDatabase,
+    SpiralDBConnector,
+)
+from orcapod.errors import UnrecordedTableSchemaWarning
+from orcapod.protocols.core_protocols.datagrams import DataProtocol
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.semantic_types import UniversalTypeConverter
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
+from tests.test_databases import fake_spiral_sdk
 
 # The data context key the caches in this module read and write under.
 CONTEXT_KEY = get_default_context().context_key
@@ -72,6 +86,110 @@ def _compute_and_store(cache: ResultCache, pf: PythonDataFunction, input_data: D
         data_context_key=CONTEXT_KEY,
     )
     return output
+
+
+TIE_ORDERS = [(0, 1), (1, 0), (0, 2, 1), (2, 1, 0)]
+
+
+def check_result_lookup_timestamp_tie(
+    database: ArrowDatabaseProtocol,
+    order: tuple[int, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    spiral_root: Path | None = None,
+) -> None:
+    """Store actual cache rows and exercise the same lookup on each backend."""
+    now = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+
+    class StoreTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(result_cache, "datetime", StoreTime)
+    cache = ResultCache(
+        result_database=database, record_path=("test",), revision="rev1"
+    )
+    pf = _make_pf()
+    input_data = Data({"x": 10})
+    outputs = []
+    for _ in range(len(order) + 1):
+        output = pf.direct_call(input_data)
+        assert output is not None
+        outputs.append(output)
+    outputs.sort(key=lambda output: output.datagram_uuid.bytes)
+    later, *tied = outputs
+
+    # Scalar metadata also fits the PostgreSQL connector's supported column types.
+    variation = Datagram({"function_name": "double"})
+    execution = Datagram({"executor": "test"})
+
+    def store(output: DataProtocol) -> None:
+        cache.store(
+            input_data, output, variation, execution, data_context_key=CONTEXT_KEY
+        )
+
+    for index in order:
+        store(tied[index])
+
+    def check(cache: ResultCache, expected: DataProtocol) -> None:
+        cached = cache.lookup(input_data, data_context_key=CONTEXT_KEY)
+        assert cached is not None
+        assert cached.datagram_uuid == expected.datagram_uuid
+
+    if spiral_root is None:
+        check(cache, tied[-1])
+        now += timedelta(seconds=1)
+        store(later)
+        check(cache, later)
+        return
+
+    # SpiralDB's read-only connector reads a synthetic snapshot of real cache
+    # rows. The fake SDK's write API refuses Orcapod's reserved column names.
+    key = ConnectorArrowDatabase.RECORD_ID_COLUMN
+    name = "__".join(cache.record_path)
+    with fake_spiral_sdk.install(spiral_root), SpiralDBConnector("p") as connector:
+        project = fake_spiral_sdk.FakeClient().project("p")
+        table = project.create_keyed_table(
+            "default",
+            name,
+            pa.schema([pa.field(key, pa.large_binary(), nullable=False)]),
+        )
+
+        def seed_snapshot() -> None:
+            rows = database.get_all_records(cache.record_path, record_id_column=key)
+            assert rows is not None
+            _ = fake_spiral_sdk._Store(spiral_root).write(table.resource_id, rows)  # pyright: ignore[reportPrivateUsage]  # inject a snapshot through the fake's fixture storage
+
+        seed_snapshot()
+        reader = ResultCache(
+            result_database=ConnectorArrowDatabase(connector),
+            record_path=("test",),
+            revision="rev1",
+        )
+        with pytest.warns(UnrecordedTableSchemaWarning, match="has no row"):
+            check(reader, tied[-1])
+        now += timedelta(seconds=1)
+        store(later)
+        seed_snapshot()
+        check(reader, later)
+
+
+@pytest.mark.parametrize("order", TIE_ORDERS)
+@pytest.mark.parametrize("backend", ["memory", "delta", "extension", "spiral"])
+def test_result_lookup_timestamp_tie(
+    backend: str,
+    order: tuple[int, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database: ArrowDatabaseProtocol = InMemoryArrowDatabase()
+    if backend == "delta":
+        database = DeltaTableDatabase(tmp_path)
+    elif backend == "extension":
+        database = ExtensionAwareDatabase(database, UniversalTypeConverter())
+    check_result_lookup_timestamp_tie(
+        database, order, monkeypatch, tmp_path if backend == "spiral" else None
+    )
 
 
 # ---------------------------------------------------------------------------

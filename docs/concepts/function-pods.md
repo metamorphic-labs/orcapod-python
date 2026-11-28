@@ -23,7 +23,12 @@ def compute_bmi(weight: float, height: float) -> float:
 Key points:
 
 - **`output_keys`** names the output data column(s). A single string means one output
-  column; a list of strings means the function returns multiple values. A function with
+  column. With two or more keys, Orcapod assigns returned values in key order. The
+  returned container must be an instance of the annotated container, so
+  `-> tuple[int, str]` accepts a tuple or a named tuple. Each position needs a
+  declared type, so `list[int]` cannot declare several outputs. If you supply
+  `output_schema` without a return annotation, return a tuple. A container mismatch
+  raises `OutputContainerTypeError` before any outputs are stored. A function with
   no outputs (it only reads its inputs) is annotated `-> None`, or not annotated, and
   takes no `output_keys`; its pod has no output columns. `-> None` together with
   `output_keys` raises `ValueError` when the pod is created, and a value other than
@@ -158,14 +163,14 @@ Each call that drops columns logs one message at `INFO` level (logger
 value: a misspelt column (`Height` for a parameter `height=1.0`) is dropped like any other
 unused column and the default is used, and that message is the only trace.
 
-### Exact calls: `strict=True` and `.process()`
+### Exact calls: `strict_columns=True` and `.process()`
 
-To have an extra column rejected instead of dropped, pass `strict=True`, or call
+To have an extra column rejected instead of dropped, pass `strict_columns=True`, or call
 `.process()`, which is the exact primitive and never drops a column:
 
 ```python
 try:
-    compute_bmi.pod(wide, strict=True)
+    compute_bmi.pod(wide, strict_columns=True)
 except ValueError as err:
     print(type(err).__name__)
 # ValueError
@@ -182,9 +187,9 @@ The error message names both schemas and the first column that does not fit, for
 compatible with expected input schema Schema({'weight': float, 'height': float}): column
 'age' is not a parameter of the function`.
 
-`strict` decides only whether an extra column is an error. It is not part of any hash: when
-there is nothing to drop, `pod(stream)`, `pod(stream, strict=True)` and `pod.process(stream)`
-build the same pipeline.
+`strict_columns` controls whether an extra column is an error. When there is nothing to
+drop, `pod(stream)`, `pod(stream, strict_columns=True)` and `pod.process(stream)` build
+the same pipeline and produce identical hashes.
 
 ### What is an error in every form
 

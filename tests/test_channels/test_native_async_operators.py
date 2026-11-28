@@ -23,26 +23,32 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 
 import pyarrow as pa
 import pytest
 
-from orcapod.channels import Channel, ChannelClosed
+from orcapod.channels import Channel, ChannelClosed, ReadableChannel
 from orcapod.core.operators import (
     Batch,
     DropDataColumns,
     DropTagColumns,
+    Index,
     Join,
     MapData,
     MapTags,
+    Pick,
     SelectDataColumns,
     SelectTagColumns,
     SemiJoin,
 )
+from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.sources import DictSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
-from orcapod.types import ContentHash
+from orcapod.types import ContentHash, DataType, DataValue
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +200,8 @@ async def run_binary(
     op, left: ArrowTableStream, right: ArrowTableStream
 ) -> list[tuple]:
     """Run a binary operator async and collect results."""
+    if isinstance(op, SemiJoin):
+        op.validate_inputs(left, right)
     left_ch = Channel(buffer_size=1024)
     right_ch = Channel(buffer_size=1024)
     output_ch = Channel(buffer_size=1024)
@@ -958,6 +966,7 @@ class TestSemiJoinBuildProbe:
     @pytest.mark.asyncio
     async def test_empty_left_returns_empty(self):
         """Empty left input produces empty output regardless of right."""
+        left = make_left_stream()
         right_table = pa.table(
             {
                 "id": pa.array([1, 2], type=pa.int64()),
@@ -974,19 +983,25 @@ class TestSemiJoinBuildProbe:
         await feed(right, right_ch)
 
         op = SemiJoin()
+        op.validate_inputs(left, right)
         await op.async_execute(
             [left_ch.reader, right_ch.reader],
             output_ch.writer,
-            input_pipeline_hashes=[root_hash("id", "value"), right.pipeline_hash()],
+            input_pipeline_hashes=hashes(left, right),
         )
         results = await output_ch.reader.collect()
         assert results == []
 
+    @pytest.mark.parametrize(
+        ("make_right", "expected"),
+        [(make_right_stream, 0), (make_disjoint_stream, 3)],
+        ids=["shared-tags", "disjoint-tags"],
+    )
     @pytest.mark.asyncio
-    async def test_empty_right_returns_empty_or_all(self):
-        """Empty right: if common keys, result is empty; if no common keys, left passes through.
-        Since both sides are empty-right, we rely on the barrier fallback."""
+    async def test_empty_right_returns_empty_or_all(self, make_right, expected):
+        """An empty right channel uses the keys validated for that input pair."""
         left = make_left_stream()
+        right = make_right()
 
         left_ch = Channel(buffer_size=64)
         right_ch = Channel(buffer_size=4)
@@ -996,15 +1011,14 @@ class TestSemiJoinBuildProbe:
         await right_ch.writer.close()
 
         op = SemiJoin()
+        op.validate_inputs(left, right)
         await op.async_execute(
             [left_ch.reader, right_ch.reader],
             output_ch.writer,
-            input_pipeline_hashes=[left.pipeline_hash(), root_hash("id", "value")],
+            input_pipeline_hashes=hashes(left, right),
         )
         results = await output_ch.reader.collect()
-        # With empty right and no schema information available,
-        # the implementation falls back to passing left through
-        assert len(results) == 3
+        assert len(results) == expected
 
     @pytest.mark.asyncio
     async def test_matches_sync_output(self):
@@ -1062,6 +1076,96 @@ def _id_stream(ids: list[int], column: str) -> ArrowTableStream:
 
 
 _Row = tuple[TagProtocol, DataProtocol]
+
+
+class _ReaderWithStream:
+    """A structural row reader whose owner uses ``stream`` for its own purpose."""
+
+    def __init__(self, reader: ReadableChannel[_Row], stream: object) -> None:
+        self._reader = reader
+        self.stream = stream
+
+    async def receive(self) -> _Row:
+        """Read a row from the wrapped channel."""
+        return await self._reader.receive()
+
+    def __aiter__(self) -> _ReaderWithStream:
+        return self
+
+    async def __anext__(self) -> _Row:
+        return await self._reader.__anext__()
+
+    async def collect(self) -> list[_Row]:
+        """Read every remaining row from the wrapped channel."""
+        return await self._reader.collect()
+
+
+@pytest.mark.parametrize("validated", [False, True], ids=["unknown", "validated"])
+@pytest.mark.parametrize(
+    "right_has_rows", [False, True], ids=["empty-right", "nonempty-right"]
+)
+@pytest.mark.asyncio
+async def test_semijoin_ignores_custom_reader_stream(
+    validated: bool, right_has_rows: bool
+) -> None:
+    """The reader's own attribute neither supplies keys nor stands in for validation."""
+    left, full_right = make_left_stream(), make_right_stream()
+    right = (
+        full_right
+        if right_has_rows
+        else ArrowTableStream(full_right.as_table().slice(0, 0), tag_columns=["id"])
+    )
+    expected = [tag["id"] for tag, _ in SemiJoin()(left, right).iter_data()]
+    assert expected == ([2, 3] if right_has_rows else [])
+    left_channel, right_channel, output = (Channel[_Row](16) for _ in range(3))
+    await feed(left, left_channel)
+    await feed(right, right_channel)
+    readers = (
+        _ReaderWithStream(left_channel.reader, left),
+        _ReaderWithStream(right_channel.reader, make_disjoint_stream()),
+    )
+    assert all(isinstance(reader, ReadableChannel) for reader in readers)
+
+    op = SemiJoin()
+    if validated:
+        op.validate_inputs(left, right)
+        await op.async_execute(
+            readers, output.writer, input_pipeline_hashes=hashes(left, right)
+        )
+        assert [tag["id"] for tag, _ in await output.reader.collect()] == expected
+    else:
+        with pytest.raises(InputValidationError, match="validate_inputs"):
+            await op.async_execute(
+                readers, output.writer, input_pipeline_hashes=hashes(left, right)
+            )
+        assert await output.reader.collect() == []
+
+
+@pytest.mark.parametrize(
+    ("op", "value", "column_type"),
+    [(Index("c", 0), [1], list[int]), (Pick("c", "k"), {"k": 1}, dict[str, int])],
+    ids=["index", "pick"],
+)
+@pytest.mark.asyncio
+async def test_projection_ignores_custom_reader_stream(
+    op: UnaryOperator, value: DataValue, column_type: DataType
+) -> None:
+    """Direct projections use their validated type with an arbitrary reader stream."""
+    source = DictSource([{"c": value}], data_schema={"c": column_type})
+    expected = [data["c"] for _, data in op(source).iter_data()]
+    assert expected == [1]
+    incoming, output = Channel[_Row](16), Channel[_Row](16)
+    for row in source.iter_data():
+        await incoming.writer.send(row)
+    await incoming.writer.close()
+
+    with BytesIO() as stream:
+        reader = _ReaderWithStream(incoming.reader, stream)
+        assert isinstance(reader, ReadableChannel)
+        await op.async_execute(
+            [reader], output.writer, input_pipeline_hashes=hashes(source)
+        )
+    assert [data["c"] for _, data in await output.reader.collect()] == expected
 
 
 class _FailingChannel:
@@ -1138,8 +1242,10 @@ class TestSemiJoinRightEndsWhileLeftOpen:
         await left_ch.writer.send(left_rows[0])
         await feed(right, right_ch)
 
+        op = SemiJoin()
+        op.validate_inputs(left, right)
         task = asyncio.create_task(
-            SemiJoin().async_execute(
+            op.async_execute(
                 [left_ch.reader, right_ch.reader],
                 output_ch.writer,
                 input_pipeline_hashes=hashes(left, right),
@@ -1160,16 +1266,19 @@ class TestSemiJoinRightEndsWhileLeftOpen:
         left_ch, output_ch = Channel[_Row](4), Channel[_Row](4)
         left_reader = _SignallingReader(left_ch, signal_on_call=2)
         await left_ch.writer.send(next(iter(left.iter_data())))
+        right = _id_stream([3], "b")
+        op = SemiJoin()
+        op.validate_inputs(left, right)
 
         # The right input fails once the second left receive waits on the open,
         # empty left channel. ``asyncio.timeout``, unlike ``asyncio.wait_for`` on
         # 3.11, adds no task.
         with pytest.raises(RuntimeError, match="right input failed"):
             async with asyncio.timeout(_HANG_GUARD_SECONDS):
-                await SemiJoin().async_execute(
+                await op.async_execute(
                     [left_reader, _FailingChannel(after=left_reader.waiting)],
                     output_ch.writer,
-                    input_pipeline_hashes=hashes(left, left),
+                    input_pipeline_hashes=hashes(left, right),
                 )
         assert await output_ch.reader.collect() == []  # the output is closed
         # Nothing is left reading the left input.
@@ -1193,8 +1302,10 @@ class TestSemiJoinRightEndsWhileLeftOpen:
         for row in right.iter_data():
             await right_ch.writer.send(row)  # the right input stays open for now
 
+        op = SemiJoin()
+        op.validate_inputs(left, right)
         task = asyncio.create_task(
-            SemiJoin().async_execute(
+            op.async_execute(
                 [left_reader, right_ch.reader],
                 output_ch.writer,
                 input_pipeline_hashes=hashes(left, right),
@@ -1956,6 +2067,7 @@ class TestStreamingPipelineIntegration:
         right = make_right_stream()  # id=[2,3,4]
 
         semi_op = SemiJoin()
+        semi_op.validate_inputs(left, right)
         batch_op = Batch(batch_size=2)
 
         ch_l = Channel(buffer_size=16)

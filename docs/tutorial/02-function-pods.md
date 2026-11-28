@@ -120,12 +120,15 @@ print(units.drop_data_columns(["region", "n_spikes"]).keys())
 !!! note "Why drop the other columns?"
     Dropped columns are not part of the inputs Orcapod stores a result under. A change in an
     unused column therefore does not make Orcapod compute the result again (Part 6 shows
-    this). To reject extra columns instead, pass `strict=True`:
-    `to_mm.pod(units, strict=True)` raises `ValueError`. See [Input columns](../concepts/function-pods.md#input-columns).
+    this). To reject extra columns instead, pass `strict_columns=True`:
+    `to_mm.pod(units, strict_columns=True)` raises `ValueError`. See [Input columns](../concepts/function-pods.md#input-columns).
 
 ## Returning more than one output
 
-Give `output_keys` a list, return a tuple, and annotate the return type as a tuple:
+Give `output_keys` a list and annotate one tuple element per key. Return a tuple
+or a tuple subclass, such as a named tuple, with the values in the same order
+as the keys. A list or dictionary returned for a tuple annotation raises
+`OutputContainerTypeError` before any values are stored.
 
 ```python
 @function_pod(output_keys=["depth_mm", "layer"])
