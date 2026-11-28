@@ -27,7 +27,7 @@ trials = DictSource(
     ],
     tag_columns=["animal", "trial"],
     tag_only_columns=True,
-    source_id="trials",
+    source_id="trials", label="trials",
     record_id_columns=["animal", "trial"],
 )
 

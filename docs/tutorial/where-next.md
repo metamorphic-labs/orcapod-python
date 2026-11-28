@@ -48,6 +48,7 @@ database = InMemoryArrowDatabase()
 def run_announcements():
     job = PipelineJob(name="announcements", database=database)
     with job:
+        durations = sessions.select_data_columns(["duration_s"])
         announce(durations, label="announce")
     job.run()
 
@@ -187,6 +188,7 @@ the job a new name, and run it twice. How many deliveries are there after each r
     def run_long():
         job = PipelineJob(name="long_announcements", database=database)
         with job:
+            durations = sessions.select_data_columns(["duration_s"])
             announce_long(
                 durations.filter(col("duration_s") > 100.0), label="announce_long"
             )

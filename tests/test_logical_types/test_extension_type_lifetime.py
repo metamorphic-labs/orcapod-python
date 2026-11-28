@@ -1562,6 +1562,7 @@ _CHILD = '''
             tag_columns=TAGS,
             tag_only_columns=True,
             source_id="readings",
+            label="readings",
         )
 
     def run(job, **options):

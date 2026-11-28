@@ -13,7 +13,7 @@ The content hash captures schema, topology, and the **identity of the sources** 
 pipeline. It is computed recursively: each element's content hash depends on its own identity
 plus the content hashes of all its upstream elements, all the way back to the sources.
 
-A source's identity is its class, its schema, its `source_id` and its key columns (the
+A source's identity is its schema, its `source_id` and its key columns (the
 `record_id_columns` that name its rows, or none when rows are named by position). What the
 `source_id` is depends on how the source was created:
 
@@ -23,13 +23,15 @@ A source's identity is its class, its schema, its `source_id` and its key column
 - File- and table-backed sources default to a name derived from their location (the file
   path for `CSVSource`, the table folder's path or URI for `DeltaTableSource`), not from the
   rows.
-- If you pass `source_id` yourself, you are naming the source: two sources with the same
-  class, schema, `source_id` and key columns have the same content hash even when their rows
-  differ.
+- If you pass `source_id` yourself, you are naming the source. The kind is part of the
+  canonical ID. Two sources with the same ID, schema and key columns have the same
+  content hash even when their rows differ. A pipeline or job registers one source
+  object per content hash at capture, binding, loading and execution.
+  See [source consistency](sources.md#source-ids-name-the-kind-that-reads-the-data).
 
 Two sources that differ only in their key columns name the same rows differently, so they
-are two sources: different content hashes (each gets its own cache), the same pipeline hash
-and the same `source_id`.
+have different content hashes and the same pipeline hash and `source_id`. A pipeline or
+job currently refuses to use both readings under that shared ID (ITL-1506).
 
 Rows are still identified individually. Each row carries its own content hash, and that
 per-row hash is what caching uses.
@@ -124,6 +126,10 @@ the types its rows have. Sources with the same column names and Arrow types have
 pipeline hash, regardless of their data; an input slot declared with Python types stands for
 one Arrow type per Python type (`int` is `int64`, `datetime` is `timestamp[us, tz=UTC]`), and
 a slot can also be declared with Arrow schemas.
+
+A captured source slot has a label that identifies the role in the job. Its label
+enters the content identity while the slot is unbound. A bound slot takes its
+content identity from the dataset that fills it.
 
 ### Recursive case: downstream elements
 

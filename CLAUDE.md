@@ -632,7 +632,7 @@ algorithm produced it.**
   preimage table or digest input, feed `to_prefixed_digest()` (binary) or `to_string()`
   (text), never `.digest` or `to_hex()`. A logical-type cell is
   `<identifier>::<label>:<digest>`. Renaming a label moves every hash it feeds.
-- A hash inside a name (path component, column name, `uri`, slot name, run URI) is the bare
+- A hash inside a name (path component, column name, `uri`, run URI) is the bare
   hex digest: `to_hex()`. A name later fed into a hash (the function `uri` in a pod's
   identity, system-tag column names in an entry-id table) is still a name.
 - Source ids: every source id is `<kind>_v<N>:<name>` (ITL-1425). A default name built from
@@ -1496,6 +1496,14 @@ data. The rules:
   binds each leaf through `SourceJobNode.from_stream`, so a pipeline built directly over a
   raw `ArrowTableStream` is refused (developer, November 14, 2026; wrap the table as a
   source). Never pass a bound stream's own system tags through.
+- A job's source slot uses its captured label as its name (ITL-1565). The source's
+  assigned label or class name is the default. Use source.as_slot(name) to label only
+  the slot. Two slots sharing a name are refused, and slot labels are reserved before
+  generated step labels. A graph-owned slot cannot be renamed (ITL-1559). Dataset IDs,
+  system tags and source tokens use the source's identity. A bound slot takes the
+  content identity of its source, and the pipeline identity uses its Arrow schema.
+  For now, jobs refuse multiple slots with one live source identity and prebuilt
+  non-source leaves (ITL-1559). Capture the step within the job or pass node.as_source().
 - A source id is the source's name (developer, November 11, 2026; ITL-957; every source,
   November 15, 2026, ITL-1154), and every source id is `<kind>_v<N>:<name>` (developer,
   November 23, 2026, ITL-1425). The kind part names the kind and implementation version that
@@ -1513,10 +1521,7 @@ data. The rules:
   id). A saved config holds `source_name`, `source_name_given` (given or default:
   read back, never guessed, by `RootSource._from_saved_name`) and `source_version` apart (the kind is
   `source_type`); loaded where the class declares another version, the source has the
-  installed version's id (`SourceVersionWarning`), never a rewritten one. A slot (a
-  `job.nodes` and `bind` key) is named by the source's name, not its full id, and two
-  different sources with one name are refused in a job (`SourceSlotNameCollisionError`,
-  `pipeline/base._refuse_sources_sharing_a_slot_name`). A `CachedSource` presents its
+  installed version's id (`SourceVersionWarning`), never a rewritten one. A `CachedSource` presents its
   wrapped source's id and refuses, when the cache is first read or checked and before the
   wrapped source is checked or read, a cache table whose rows name
   another id (`CachedSourceIdMismatchError`; once found, no wrapped row is read or returned
@@ -1647,6 +1652,23 @@ data. The rules:
   match its previous one (bind does not compare the two), but `bind` refuses, before replacing
   any binding, a bind after which two slots would read one source identity under different
   restrictions (below). A job run over a restricted source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
+  Each source content hash belongs to one source object per pipeline or job
+  (ITL-1469). Capture, compile, binding through either API, loading and running
+  check the sources the graph reads. A slot binding replaces its former source.
+  A job accepts new steps only while every slot holds the exact source object
+  it held when that slot was first compiled. A slot originally compiled unbound
+  must be unbound. Rebinding or unbinding a slot blocks recording until all
+  original bindings are restored. InconsistentSourceError names the changed
+  slots. Restore the original bindings or build a new job. A job can compile
+  and run with its replacement bindings. ITL-1559 tracks capture after rebinding.
+  As a stopgap pending ITL-1559, a job refuses another job's or a standalone
+  SourceJobNode, including through prebuilt streams. Its bound_source can change
+  even if currently unbound. Pass the source itself, or use node.as_source()
+  for another job's stored results. The job's own slots are allowed with their
+  original bindings. A schema-only SourceNode declares a new unbound slot.
+  Call where() once and reuse the resulting object. A source object conflict
+  raises InconsistentSourceError before the separate restriction check, which
+  can see restrictions beneath wrappers.
   A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
   identity unchanged), so one table restricted two ways (or with and without a restriction) in
   one pipeline is refused (`restrictions.require_one_restriction`, over the sources the streams
@@ -1654,9 +1676,11 @@ data. The rules:
   what they read) at capture, at compile, by `bind` before it binds and at the start of every
   run (`refuse_restriction_conflicts`), whatever streams lead there: projections, operator
   chains, streams built before the capture. A bind's walk matches the job's own slots by object
-  (`Rebinding`), never by name. `RunSummary` keeps one condition and one limit per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
-  a `SourceProxy`'s delegate and a `CachedSource`'s source (`_streams_beneath`); a
-  `DerivedSource` is a root. A `CachedSource`
+  (`Rebinding`), never by name. `RunSummary` keeps one condition and one limit per slot (ITL-1293).
+  Capture and restriction checks follow job bindings and the live_source_inputs
+  declared by wrappers. A wrapper over stored results ends this walk. Source
+  registration uses the wrapper itself and its content hash.
+  A `CachedSource`
   over a restricted source is refused at construction (a cache is kept under the table's
   identity; developer, November 18, 2026), and so is an operator job node that caches (`LOG` or
   `REPLAY`) over a restricted source (developer, November 19, 2026: its cache is kept under the

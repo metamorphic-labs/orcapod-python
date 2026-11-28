@@ -75,6 +75,7 @@ def _source(name: str, column: str, ids: list[int], tag_only: object = ("t",)):
         table,
         tag_columns=["id", "t"],
         tag_only_columns=tag_only,  # pyright: ignore[reportArgumentType]  # the test varies it
+        label=name,
         source_id=name,
     )
 

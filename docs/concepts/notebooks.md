@@ -23,12 +23,12 @@ data_dir = make_dataset()
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
     tag_columns=["subject_id", "session"], tag_only_columns=True,
-    source_id="sessions",
+    source_id="sessions", label="sessions",
 )
 units = CSVSource(
     str(data_dir / "units.csv"),
     tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
-    source_id="units",
+    source_id="units", label="units",
 )
 
 
@@ -127,7 +127,7 @@ units_by_probe = CSVSource(
     str(data_dir / "units.csv"),
     tag_columns=["subject_id", "session", "probe", "unit"],
     tag_only_columns=["subject_id", "session"],
-    source_id="units",
+    source_id="units", label="units",
 )
 print(units_by_probe.head(2))
 # CSVSource[units] — first 2 of 64 rows

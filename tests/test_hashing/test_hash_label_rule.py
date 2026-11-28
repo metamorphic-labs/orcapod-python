@@ -72,6 +72,7 @@ def _source() -> DictSource:
         data=[{"id": "a", "x": 1}, {"id": "b", "x": 2}],
         tag_columns=["id"],
         tag_only_columns=True,
+        label="label_rule_source",
         source_id="label_rule_source",
     )
 
@@ -82,6 +83,7 @@ def _other_source() -> DictSource:
         data=[{"id": "a", "y": 10}, {"id": "b", "y": 20}],
         tag_columns=["id"],
         tag_only_columns=True,
+        label="label_rule_other",
         source_id="label_rule_other",
     )
 
@@ -412,6 +414,7 @@ class TestRenamingALabelMovesEveryHashItFeeds:
         stream = DictSource(
             data=[{"id": "a", "arr": np.arange(3)}],
             tag_columns=["id"],
+            label="label_rule_arrays",
             source_id="label_rule_arrays",
             tag_only_columns=True,
         )
@@ -675,6 +678,7 @@ class TestStoredHashValuesCarryTheirLabel:
                 {"id": "b", "cohort": "x", "v": 2},
             ],
             tag_columns=["id", "cohort"],
+            label="label_rule_fold",
             source_id="label_rule_fold",
             tag_only_columns=True,
         )

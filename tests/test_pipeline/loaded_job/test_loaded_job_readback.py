@@ -90,13 +90,14 @@ def _loaded_and_filled(saved: pathlib.Path) -> PipelineJob:
         ),
         tag_columns=["id"],
         tag_only_columns=True,
+        label="asrc",
         source_id="asrc",
     )
     loaded.bind(
         sources={
             "dsrc": _dict_source(),
             "asrc": arrow,
-            "lsrc": ListSource("z", [1, 2], source_id="lsrc"),
+            "lsrc": ListSource("z", [1, 2], label="lsrc", source_id="lsrc"),
         }
     )
     _ = loaded.run(load_only=True)
@@ -109,6 +110,7 @@ def _dict_source() -> DictSource:
         [{"id": 0, "x": 5}, {"id": 1, "x": 10}],
         tag_columns=["id"],
         tag_only_columns=True,
+        label="dsrc",
         source_id="dsrc",
     )
 
@@ -258,6 +260,7 @@ def test_path_output_feeding_join_still_allows_job_load(tmp_path: pathlib.Path) 
             [{"id": 0, "y": 1}, {"id": 1, "y": 2}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="other",
             source_id="other",
         )
         Join()(paths, other, label="joined")
@@ -667,6 +670,7 @@ def test_store_with_only_another_runs_records_reads_none_with_a_warning(
             [{"id": 0, "x": 7}, {"id": 1, "x": 8}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="other",
             source_id="other",
         )
         _ = double.pod(other, label="dbl")
@@ -824,12 +828,14 @@ def _loaded_operator_only_job(tmp_path: pathlib.Path) -> PipelineJob:
             str(tmp_path / "a.csv"),
             tag_columns=["id"],
             tag_only_columns=True,
+            label="a",
             source_id="a",
         )
         right = CSVSource(
             str(tmp_path / "b.csv"),
             tag_columns=["id"],
             tag_only_columns=True,
+            label="b",
             source_id="b",
         )
         _ = Join()(left, right, label="joined")

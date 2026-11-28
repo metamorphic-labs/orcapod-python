@@ -42,6 +42,7 @@ def _save(tmp_path: Path, function: Any) -> Path:
             [{"id": 1, "n": 3}, {"id": 2, "n": 4}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="n",
             source_id="n",
         )
         result = op.function_pod(output_keys="value")(function).pod(
@@ -51,6 +52,7 @@ def _save(tmp_path: Path, function: Any) -> Path:
             [{"id": 1, "other": 2}, {"id": 2, "other": 3}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="other",
             source_id="other",
         )
         Join()(result, other, label="joined")

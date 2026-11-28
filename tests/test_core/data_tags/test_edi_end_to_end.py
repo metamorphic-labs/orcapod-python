@@ -84,15 +84,16 @@ def align(spike_time: list[int], gaze_time: list[int], unit: int) -> str:
 def _streams() -> tuple[Any, Any, Any]:
     """Return the grouped spikes, the grouped gaze and the trials table."""
     spikes = op.sources.DictSource(
-        SPIKES, tag_columns=[*KEYS, "timestamp"], source_id="spikes"
+        SPIKES, tag_columns=[*KEYS, "timestamp"], label="spikes", source_id="spikes"
     )
     gaze = op.sources.DictSource(
-        GAZE, tag_columns=[*KEYS, "timestamp"], source_id="gaze"
+        GAZE, tag_columns=[*KEYS, "timestamp"], label="gaze", source_id="gaze"
     )
     trials = op.sources.DictSource(
         TRIALS,
         tag_columns=["lab", "subject"],
         tag_only_columns=["lab", "subject"],
+        label="trials",
         source_id="trials",
     )
     # A data-tag renamed with map_tags is renamed in both roles; grouping then

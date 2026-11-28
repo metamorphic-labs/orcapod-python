@@ -90,7 +90,11 @@ def _source(
     else:
         tag_only = [tags[-1]]
     return ArrowTableSource(
-        table, tag_columns=list(tags), source_id=source_id, tag_only_columns=tag_only
+        table,
+        tag_columns=list(tags),
+        label=source_id,
+        source_id=source_id,
+        tag_only_columns=tag_only,
     )
 
 

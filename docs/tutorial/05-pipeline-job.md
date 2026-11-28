@@ -24,12 +24,12 @@ data_dir = make_dataset()
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
     tag_columns=["subject_id", "session"], tag_only_columns=True,
-    source_id="sessions",
+    source_id="sessions", label="sessions",
 )
 units = CSVSource(
     str(data_dir / "units.csv"),
     tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
-    source_id="units",
+    source_id="units", label="units",
 )
 
 calls = []  # every function call adds an entry, so we can see when functions really run
@@ -46,6 +46,11 @@ def mean_rate(rate_hz: list[float]) -> float:
     calls.append("mean_rate")
     return sum(rate_hz) / len(rate_hz)
 ```
+
+The two CSV sources have distinct labels, `sessions` and `units`, so the job can
+give each its own input slot. A source without a label uses its class name, so two
+unlabelled CSV sources in one job would both claim `CSVSource`. The `source_id`
+identifies each dataset in its rows.
 
 These are the two functions from Part 4. The `calls` list counts how often each function was
 called.
@@ -106,7 +111,7 @@ print(sorted(job.nodes))
 
 
 
-- A source is listed under its `source_id`.
+- A source slot is listed under its captured label.
 - A function pod is listed under the `label` you gave it. Without a label it gets the
   function's name.
 - Operators are named after their kind, numbered when there are several.
@@ -301,7 +306,7 @@ with job:
     units = CSVSource(
         str(data_dir / "units.csv"),
         tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
-        source_id="units",
+        source_id="units", label="units",
     )
     to_mm.pod(units.select_data_columns(["depth_um"]), label="depth_mm")
 job.run()

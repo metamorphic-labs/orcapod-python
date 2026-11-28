@@ -571,9 +571,10 @@ class SpiralDBTableSource(RootSource):
         built beforehand is accepted as it is. The source's ``limit`` is its own and
         is not changed.
 
-        This source is not changed. ``where`` is a copy of the source with the
-        restriction applied to the copy in place; a later version offers those two
-        steps (``copy()`` and ``apply_restriction``) on their own.
+        Each call to ``where()`` makes a new source object. Call it once and reuse
+        the resulting object when the same restriction feeds multiple parts of a
+        pipeline. A later version offers ``copy()`` and ``apply_restriction`` as
+        separate steps.
 
         Args:
             *conditions: Mappings of column name to value, and conditions (built with

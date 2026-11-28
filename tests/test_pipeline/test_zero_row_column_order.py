@@ -109,6 +109,7 @@ def _source(
         _table(groups, data),
         tag_columns=["g", "id"],
         tag_only_columns=TAG_ONLY,
+        label=name,
         source_id=name,
     )
     return PolarsFilter(constraints={"g": "g1"})(source)
@@ -348,7 +349,7 @@ def _join_job(ids: list[int]) -> PipelineJob:
             {"id": pa.array(ids, pa.int64()), column: pa.array(ids, pa.int64())}
         )
         return ArrowTableSource(
-            table, tag_columns=["id"], tag_only_columns=True, source_id=name
+            table, tag_columns=["id"], tag_only_columns=True, label=name, source_id=name
         )
 
     job = PipelineJob(name="itl1133", database=InMemoryArrowDatabase())

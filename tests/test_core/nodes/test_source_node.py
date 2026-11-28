@@ -529,24 +529,16 @@ class TestFromStreamNonRootSource:
         table = pa.table({"id": [1, 2], "value": [1.0, 2.0]})
         return ArrowTableStream(table, tag_columns=["id"])
 
-    def test_source_node_from_stream_slot_name_uses_full_hash(self):
-        """SourceNode.from_stream(non-RootSource) builds name as label + full content hash."""
+    def test_raw_stream_requires_an_explicit_slot_declaration(self):
         from orcapod.core.nodes.source_node import SourceNode
 
         stream = self._make_arrow_stream()
-        node = SourceNode.from_stream(stream)
+        with pytest.raises(ValueError, match="ArrowTableSource .*ITL-1559"):
+            SourceNode.from_stream(stream)
+        assert SourceNode.from_stream(stream, name="input").name == "input"
 
-        expected_name = f"{stream.label}:{stream.content_hash().to_hex()}"
-        assert node.name == expected_name
-        # Confirm the hash is full-length — SHA-256 produces a 64-character hex digest.
-        assert len(stream.content_hash().to_hex()) == 64
-
-    def test_source_job_node_from_stream_slot_name_uses_full_hash(self):
-        """SourceJobNode.from_stream(non-RootSource) builds name as label + full content hash."""
+    def test_prebuilt_step_is_not_an_implicit_slot(self):
         from orcapod.core.nodes.source_node import SourceJobNode
-
-        # A stream derived from a source: not a RootSource, and it carries the one
-        # system-tag pair a bound stream must have (ITL-1126; a raw stream has none).
         from orcapod.core.operators import MapData
         from orcapod.core.sources import DictSource
 
@@ -554,9 +546,5 @@ class TestFromStreamNonRootSource:
             [{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
         )
         stream = MapData({"value": "v"})(source)
-        job_node = SourceJobNode.from_stream(stream)
-
-        expected_name = f"{stream.label}:{stream.content_hash().to_hex()}"
-        assert job_node.name == expected_name
-        # Confirm the hash is full-length — SHA-256 produces a 64-character hex digest.
-        assert len(stream.content_hash().to_hex()) == 64
+        with pytest.raises(ValueError, match=r"node\.as_source\(\).*ITL-1559"):
+            SourceJobNode.from_stream(stream)

@@ -85,11 +85,15 @@ def test_pipeline_store_reads_match_default_reader_for_logical_types(
         files.append(f)
     paths = op.sources.DictSource(
         [{"id": i, "f": files[i]} for i in range(3)],
+        label="paths",
         tag_columns=["id"],
         tag_only_columns=True,
     )
     numbers = op.sources.DictSource(
-        [{"id": i, "x": i} for i in range(3)], tag_columns=["id"], tag_only_columns=True
+        [{"id": i, "x": i} for i in range(3)],
+        label="numbers",
+        tag_columns=["id"],
+        tag_only_columns=True,
     )
 
     @op.function_pod(output_keys=["path"])

@@ -57,6 +57,7 @@ def _csv(tmp_path: Path, name: str, column: str) -> op.sources.CSVSource:
         str(path),
         tag_columns=["unit", "time"],
         tag_only_columns=["time"],
+        label=name,
         source_id=name,
     )
 
@@ -222,6 +223,7 @@ def test_a_tags_as_data_source_over_a_data_tag_source_round_trips(
     derived = DerivedSource(
         _csv(tmp_path, "spikes", "amp"),
         tags_as_data={"time": "t0"},
+        label="with_tags_as_data",
         source_id="with_tags_as_data",
     )
     config = derived.to_config()
@@ -248,6 +250,7 @@ def test_a_job_over_a_tags_as_data_source_saves_and_loads(
     derived = DerivedSource(
         _csv(tmp_path, "spikes", "amp"),
         tags_as_data={"time": "t0"},
+        label="with_tags_as_data",
         source_id="with_tags_as_data",
     )
     job = PipelineJob(name="tad", database=DeltaTableDatabase(tmp_path / "store"))

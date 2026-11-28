@@ -19,7 +19,7 @@ from orcapod.core.sources.display_names import (
     labelled_source,
 )
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import RestrictedAggregationWarning
+from orcapod.errors import RestrictedAggregationWarning, SourceSlotNameCollisionError
 from orcapod.sources import DictSource, SpiralDBTableSource
 from tests.test_databases import fake_spiral_sdk
 
@@ -56,9 +56,12 @@ def _job(
     pod_label: str = "sum",
     database: Any = None,
     swap: bool = False,
+    roles: tuple[str, str] | None = None,
 ) -> PipelineJob:
     job = PipelineJob(name="j", database=database or InMemoryArrowDatabase())
     with job:
+        if roles is not None:
+            left, right = left.as_slot(roles[0]), right.as_slot(roles[1])
         first, second = (right, left) if swap else (left, right)
         add.pod(first, second, label=pod_label)
     return job
@@ -73,13 +76,13 @@ def test_the_diagram_draws_the_label_and_gives_the_id_in_the_details() -> None:
     job = _job(_left(), _right())
     diagram = job.diagram()
     assert str(diagram).splitlines()[1:3] == [
-        "  units (source · DictSource · bound)",
         "  scales (source · DictSource · bound)",
+        "  units (source · DictSource · bound)",
     ]
     assert "<- scales, units" in str(diagram) or "<- units, scales" in str(diagram)
     by_label = {n["label"]: n for n in diagram.to_dict()["nodes"]}
-    assert by_label["left"]["facts"] == [["source id", "dict_v1:left"]]
-    assert by_label["right"]["facts"] == [["source id", "dict_v1:right"]]
+    assert by_label["units"]["facts"] == [["source id", "dict_v1:left"]]
+    assert by_label["scales"]["facts"] == [["source id", "dict_v1:right"]]
     for picture in (diagram.to_svg(), diagram.to_html()):
         assert ">units</" in picture and "source id: dict_v1:left" in picture
         assert ">left</" not in picture
@@ -87,14 +90,17 @@ def test_the_diagram_draws_the_label_and_gives_the_id_in_the_details() -> None:
 
 def test_the_node_preview_shows_the_label() -> None:
     job = _job(_left(), _right(label=None))
-    job_html: Any = job.nodes["left"]._repr_html_()
-    assert "units" in job_html
-    plain: Any = _job(_left(None), _right(None)).nodes["left"]._repr_html_()
-    assert "units" not in plain and "left" in plain
+    job_html: Any = job.nodes["units"]._repr_html_()
+    assert "units (dict_v1:left)" in job_html
+    plain = _job(_left(None), _right(None), roles=("left", "right"))
+    assert "left (dict_v1:left)" in plain.nodes["left"]._repr_html_()
 
 
 def test_explain_and_trace_values_are_those_without_a_label() -> None:
-    jobs = [_job(_left(), _right()), _job(_left(None), _right(None))]
+    jobs = [
+        _job(_left(), _right()),
+        _job(_left(None), _right(None), roles=("units", "scales")),
+    ]
     for job in jobs:
         job.run()
     labelled, plain = (job.nodes["sum"] for job in jobs)
@@ -120,7 +126,13 @@ def test_only_the_shown_text_changes(swap: bool) -> None:
     """Names, hashes, ids, stored paths, order and topology are those without labels."""
     labelled_db, plain_db = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     labelled = _job(_left(), _right(), database=labelled_db, swap=swap)
-    plain = _job(_left(None), _right(None), database=plain_db, swap=swap)
+    plain = _job(
+        _left(None),
+        _right(None),
+        database=plain_db,
+        swap=swap,
+        roles=("units", "scales"),
+    )
     assert list(labelled.nodes) == list(plain.nodes)
     for name, node in plain.nodes.items():
         other: Any = labelled.nodes[name]
@@ -141,20 +153,17 @@ def test_only_the_shown_text_changes(swap: bool) -> None:
     )
     ours, theirs = labelled.diagram().to_dict(), plain.diagram().to_dict()
     assert ours["edges"] == theirs["edges"]
-    for a, b in zip(ours["nodes"], theirs["nodes"], strict=True):
-        a.pop("text", None)
-        a["facts"] = [f for f in a["facts"] if f[0] != "source id"]
-        assert a == b
-    assert labelled.left is labelled.nodes["left"]
-    labelled.bind(sources={"left": _left("renamed")})
-    assert _texts(labelled)["left"] == "renamed"
+    assert ours["nodes"] == theirs["nodes"]
+    assert labelled.units is labelled.nodes["units"]
+    labelled.bind(sources={"units": _left("renamed")})
+    assert _texts(labelled)["units"] == "units"
 
 
 @pytest.mark.parametrize("order", [("left", "right"), ("right", "left")])
 def test_binding_two_sources_in_either_order_changes_the_texts_only(
     order: tuple[str, str],
 ) -> None:
-    job = _job(_left(), _right())
+    job = _job(_left(), _right(), roles=("left", "right"))
     before = {
         name: (node.label, node.content_hash(), node.pipeline_hash())
         for name, node in job.nodes.items()
@@ -162,7 +171,7 @@ def test_binding_two_sources_in_either_order_changes_the_texts_only(
     sources = {"left": _left("new"), "right": _right("new")}
     job.bind(sources={name: sources[name] for name in order})
     texts = _texts(job)
-    assert (texts["left"], texts["right"]) == ("new (left)", "new (right)")
+    assert (texts["left"], texts["right"]) == ("left", "right")
     assert before == {
         name: (node.label, node.content_hash(), node.pipeline_hash())
         for name, node in job.nodes.items()
@@ -170,17 +179,22 @@ def test_binding_two_sources_in_either_order_changes_the_texts_only(
 
 
 def test_without_a_label_the_texts_are_unchanged() -> None:
-    job = _job(_left(None), _right(None))
+    job = _job(_left(None), _right(None), roles=("left", "right"))
     job.run()
     assert job.diagram().to_text().splitlines()[1] == (
         "  left (source · DictSource · bound)"
     )
     assert all("text" not in n for n in job.diagram().to_dict()["nodes"])
-    assert "source id" not in job.diagram().to_html().split("<script>")[0]
+    assert "source id: dict_v1:left" in job.diagram().to_html()
 
 
 def test_a_loaded_job_shows_the_slot_names(tmp_path: Path) -> None:
-    job = _job(_left(), _right(), database=DeltaTableDatabase(tmp_path / "db"))
+    job = _job(
+        _left(),
+        _right(),
+        database=DeltaTableDatabase(tmp_path / "db"),
+        roles=("left", "right"),
+    )
     job.run()
     path = str(tmp_path / "job.json")
     job.save(path)
@@ -190,22 +204,20 @@ def test_a_loaded_job_shows_the_slot_names(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("swap", [False, True])
-def test_shared_labels_are_told_apart(swap: bool) -> None:
-    assert _texts(_job(_left("t"), _right("t"), swap=swap)) == {
-        "left": "t (left)",
-        "right": "t (right)",
-        "Join": "Join",
-        "SelectDataColumns": "SelectDataColumns",
-        "sum": "sum",
-    }
+def test_shared_labels_require_explicit_roles(swap: bool) -> None:
+    with pytest.raises(SourceSlotNameCollisionError, match="as_slot"):
+        _job(_left("t"), _right("t"), swap=swap)
+    assert set(
+        _texts(_job(_left("t"), _right("t"), swap=swap, roles=("left", "right")))
+    ) == {"left", "right", "Join", "SelectDataColumns", "sum"}
 
 
-def test_a_label_equal_to_a_pods_or_another_slots_is_told_apart() -> None:
-    assert _texts(_job(_left("sum"), _right()))["left"] == "sum (left)"
-    assert _texts(_job(_left("sum"), _right()))["sum"] == "sum"
+def test_an_explicit_role_resolves_collisions_with_a_pod_label() -> None:
+    with pytest.raises(SourceSlotNameCollisionError, match="explicit step label"):
+        _job(_left("sum"), _right())
+    assert _texts(_job(_left("sum"), _right(), roles=("left", "right")))["sum"] == "sum"
     crossed = _texts(_job(_left("right"), _right("left")))
-    assert (crossed["left"], crossed["right"]) == ("right (left)", "left (right)")
-    assert _texts(_job(_left("left"), _right()))["left"] == "left"
+    assert (crossed["left"], crossed["right"]) == ("left", "right")
 
 
 def test_no_two_texts_are_ever_equal() -> None:
@@ -269,8 +281,8 @@ def _spiral(project: str, dataset: str, tag_only: Any = True) -> SpiralDBTableSo
 @pytest.mark.parametrize(
     ("other", "shown"),
     [
-        (("p1", "d2"), {"units (d1)", "units (d2)"}),
-        (("p2", "d1"), {"units (p1)", "units (p2)"}),
+        (("p1", "d2"), {"first_units", "second_units"}),
+        (("p2", "d1"), {"first_units", "second_units"}),
     ],
 )
 @pytest.mark.parametrize("swap", [False, True])
@@ -278,6 +290,7 @@ def test_one_table_of_two_datasets_or_projects(
     spiral: None, other: tuple[str, str], shown: set[str], swap: bool
 ) -> None:
     sources = [_spiral("p1", "d1"), _spiral(*other)]
+    sources[0].label, sources[1].label = "first_units", "second_units"
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
         first, second = reversed(sources) if swap else sources
@@ -294,6 +307,7 @@ def test_the_restricted_aggregation_warning_names_the_label(
     spiral: None, use_async: bool, by: list[str], tag_only: Any
 ) -> None:
     sources = [_spiral("p1", dataset, tag_only).where(g=0) for dataset in ("d1", "d2")]
+    sources[0].label, sources[1].label = "first_units", "second_units"
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
         for source, label in zip(sources, ("one", "two"), strict=True):
@@ -311,10 +325,11 @@ def test_the_restricted_aggregation_warning_names_the_label(
     ]
     one, two = sources
     assert (
-        "'units (d1)' feeds GroupBy 'one'; 'units (d2)' feeds GroupBy 'two'" in message
+        "'first_units' feeds GroupBy 'one'; 'second_units' feeds GroupBy 'two'"
+        in message
     )
     assert message.endswith(
-        f" 'units (d1)' is {one.source_id}. 'units (d2)' is {two.source_id}."
+        f" 'first_units' is {one.source_id}. 'second_units' is {two.source_id}."
     )
 
 
@@ -407,7 +422,7 @@ def test_no_metaclass_hook_runs(
         source.select_data_columns(["x"], label="selected")
     monkeypatch.setattr(_HookedMeta, "armed", True)
     found = labelled_source(source)
-    trace = job.nodes["left"].trace({"k": 1}, "x")
+    trace = job.nodes[source.label].trace({"k": 1}, "x")
     monkeypatch.setattr(_HookedMeta, "armed", False)
     assert trace.status == "unavailable"
     assert (found and (found.label, found.source_id)) == (
@@ -494,6 +509,6 @@ def test_a_label_that_cannot_be_read_falls_back(
         raise RuntimeError("no id")
 
     monkeypatch.setattr("orcapod.core.sources.source_ids.build_source_id", fail)
-    assert "  left (source · DictSource · bound)" in str(job.diagram()).splitlines()
-    html: Any = job.nodes["left"]._repr_html_()
-    assert "SourceJobNode[left]" in html
+    assert "  units (source · DictSource · bound)" in str(job.diagram()).splitlines()
+    html: Any = job.nodes["units"]._repr_html_()
+    assert "SourceJobNode[units]" in html

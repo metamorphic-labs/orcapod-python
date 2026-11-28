@@ -27,7 +27,7 @@ def compute_bmi(weight: float, height: float) -> float:
 
 
 def mice(rows):
-    return DictSource(data=rows, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice")
+    return DictSource(data=rows, tag_columns=["subject_id"], tag_only_columns=True, source_id="mice", label="mice")
 
 
 cohort_a = [
@@ -83,7 +83,7 @@ node:
 
 | Kind of step | Name in `job.nodes` |
 |---|---|
-| Source | Its `source_id` |
+| Source slot | Its captured label, which defaults to the source's class name |
 | Function pod | The `label=` passed when it was applied; otherwise the function's name |
 | Operator | The operator's class name (`Join`, `GroupBy`), numbered when there are several (`SelectDataColumns_1`) |
 
@@ -110,6 +110,15 @@ Three more things a job node offers:
 - **`as_source()`** returns a `DerivedSource` over the same stored records, whether or not
   the node has run in this process, to use as the input of another pipeline.
 - **`upstreams`** and **`label`** let you walk the pipeline backwards.
+
+As a stopgap pending ITL-1559, a job cannot absorb steps from another job by
+capturing compiled nodes or other streams that depend on the other job's
+bindable source slots (`SourceJobNode`). The same restriction applies to
+standalone `SourceJobNode` objects, even when unbound. Pass the source itself to
+record a new chain, or use `node.as_source()` to read the stored results of an
+earlier job. A prebuilt non-source stream cannot be a job input. Record its steps
+inside the job to include them in the graph. A job can use its own slots while their original bindings are in
+place. A schema-only `SourceNode` declares an independent slot for each job.
 
 ## The database
 
@@ -360,8 +369,19 @@ print(job_a.nodes["bmi"].as_table().num_rows, job_b.nodes["bmi"].as_table().num_
 # 3 1
 ```
 
-`sources` maps a source slot's name (the `source_id` used when the blueprint was recorded)
-to the source to use. A source bound to a slot must have the slot's tag and data columns
+`sources` maps each slot's captured label to the source to use. The same label
+is the slot's key in `job.nodes` and `job.sources`. Set `label=` on a source
+before capture, or pass `source.as_slot("role")` to a step to name just that slot.
+Two inputs claiming the same label raise `SourceSlotNameCollisionError`. Rebuild
+the graph to rename a captured slot (ITL-1559).
+
+A graph uses a single slot for each live source identity for now (ITL-1559).
+An older saved job with shared bindings can be loaded, saved and read directly
+when the slots feed different function pods. Saved slots that shared a source
+and fed the same function pod still fail to load (ITL-1554). Running a job with
+shared bindings, including in load-only mode, requires distinct bindings.
+
+A source bound to a slot must have the slot's tag and data columns
 with the same Arrow types (a column the slot declares nullable also accepts a non-null one);
 any other source raises `SourceSpecMismatchError`, and an unknown slot name raises
 `ValueError`. A slot made from a source keeps that source's Arrow types, so an `int32`
@@ -441,16 +461,10 @@ function of a function pod, the class of a bound source), and for a job its stat
 
 A selected node also shows the row counts of the job's last run (`job.last_run`).
 
-A source bound with a label (`DictSource(..., label="mice")`, `SpiralDBTableSource(...,
-label="units")`) is shown in a job's diagram, in its node's preview, and in
-`RestrictedAggregationWarning` by that label; the diagram's details (`source id`) and the
-warning give its full source id. `explain()` and `trace()` name it by its id. Two sources with one
-label, or a label that is another node's name, are shown as `label (part)`: a SpiralDB
-table's dataset, else its project, else the source's name. A single node's preview shows the label
-alone. This is display only: the slot
-keeps its name, the one `job.nodes[...]` and `bind` take. In a diagram, a source without a label is shown
-by its slot's name, as is every source of a `Pipeline` (which binds none) and of a loaded
-job (a source's label is not saved).
+The diagram, node preview, `explain()` and restriction warnings name a slot
+by its captured label and show the bound dataset's full source ID when available.
+A source's own label can be changed before it is captured. Rebinding a slot
+keeps the slot label.
 
 The options:
 

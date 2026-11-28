@@ -369,6 +369,7 @@ def _poller(fetched_order: tuple[str, ...]) -> Any:
         _TableImpl(fetched, declared),
         tag_columns=["k", "j"],
         record_id_columns=["k", "j"],
+        label="poller",
         source_id="poller",
     )
 
@@ -448,6 +449,7 @@ def test_an_async_held_node_sends_the_rows_the_plan_took() -> None:
             [{"k": i, "d1": i} for i in range(3)],
             tag_columns=["k"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         plus_one.pod(doubled.pod(source, label="twice"), label="plus")
@@ -493,6 +495,7 @@ def test_describing_a_poller_that_has_not_polled_reads_nothing() -> None:
         Counting(table, table.schema),
         tag_columns=["k"],
         record_id_columns=["k"],
+        label="unpolled",
         source_id="unpolled",
     )
     first = poller.arrow_schema()
@@ -522,7 +525,7 @@ def test_an_operator_stream_declares_its_tags_in_its_rows_order() -> None:
         }
     )
     source = ArrowTableSource(
-        table, tag_columns=["b", "a"], tag_only_columns=True, source_id="s"
+        table, tag_columns=["b", "a"], tag_only_columns=True, label="s", source_id="s"
     )
     stream = SelectDataColumns(["x"])(source)
     built, _, _ = StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))  # pyright: ignore[reportPrivateUsage]  # the rows' order
@@ -559,6 +562,7 @@ def test_a_value_decided_source_info_depth_is_a_named_exception() -> None:
         [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     ).as_table(columns={"source": True, "system_tags": True})
     position = table.schema.get_field_index("_source_x")
@@ -607,6 +611,7 @@ def test_describing_an_undeclared_poller_that_has_not_polled_reads_nothing() -> 
         Undeclared(table, table.schema),
         tag_columns=["k"],
         record_id_columns=["k"],
+        label="undeclared",
         source_id="undeclared",
     )
     modified = poller.last_modified

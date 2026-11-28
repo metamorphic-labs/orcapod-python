@@ -532,7 +532,7 @@ def _build_model(
                 # A highlight shows the provenance question only: no run status.
                 status="" if highlight is not None else statuses.get(label, ""),
                 facts=facts,
-                shown=source_text,
+                shown=source_text if source_text != label else "",
                 keeps=keeps or (),
                 highlighted=highlight is not None and label in highlight.nodes,
                 mark="" if highlight is None else highlight.mark(label),

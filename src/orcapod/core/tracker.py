@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Any
+from functools import partial
+from typing import TYPE_CHECKING, Any
 
 from orcapod.protocols import core_protocols as cp
+
+if TYPE_CHECKING:
+    from orcapod.pipeline.pod_invocation import PodInvocation
 
 
 class BasicTrackerManager:
@@ -35,13 +39,14 @@ class BasicTrackerManager:
 
     def record_operator_pod_invocation(
         self,
-        pod: cp.PodProtocol,
+        pod: cp.OperatorPodProtocol,
         upstreams: tuple[cp.StreamProtocol, ...] = (),
         label: str | None = None,
     ) -> None:
         """Record the invocation of a pod in the tracker."""
-        for tracker in self.get_active_trackers():
-            tracker.record_operator_pod_invocation(pod, upstreams, label=label)
+        from orcapod.pipeline.pod_invocation import OperatorInvocation
+
+        self._record(partial(OperatorInvocation, pod, upstreams, label))
 
     def record_function_pod_invocation(
         self,
@@ -50,8 +55,9 @@ class BasicTrackerManager:
         label: str | None = None,
     ) -> None:
         """Record the invocation of a data function to the tracker."""
-        for tracker in self.get_active_trackers():
-            tracker.record_function_pod_invocation(pod, input_stream, label=label)
+        from orcapod.pipeline.pod_invocation import FunctionInvocation
+
+        self._record(partial(FunctionInvocation, pod, (input_stream,), label))
 
     def record_side_effect_pod_invocation(
         self,
@@ -60,8 +66,19 @@ class BasicTrackerManager:
         label: str | None = None,
     ) -> None:
         """Record a side-effect pod invocation in all active trackers."""
-        for tracker in self.get_active_trackers():
-            tracker.record_side_effect_pod_invocation(pod, input_stream, label=label)
+        from orcapod.pipeline.pod_invocation import SideEffectInvocation
+
+        self._record(partial(SideEffectInvocation, pod, (input_stream,), label))
+
+    def _record(self, make_invocation: Callable[[], PodInvocation]) -> None:
+        """Prepare every active tracker's recording before committing in order."""
+        trackers = self.get_active_trackers()
+        if not trackers:
+            return
+        invocation = make_invocation()
+        recordings = [tracker.prepare_invocation(invocation) for tracker in trackers]
+        for record in recordings:
+            record()
 
     @contextmanager
     def no_tracking(self) -> Generator[None, Any, None]:
@@ -89,6 +106,9 @@ class AutoRegisteringContextBasedTracker(ABC):
 
     def is_active(self) -> bool:
         return self._active
+
+    @abstractmethod
+    def prepare_invocation(self, invocation: PodInvocation) -> Callable[[], None]: ...
 
     @abstractmethod
     def record_operator_pod_invocation(

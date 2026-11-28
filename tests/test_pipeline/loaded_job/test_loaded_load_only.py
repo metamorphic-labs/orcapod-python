@@ -43,6 +43,7 @@ def _dict_source() -> DictSource:
         [{"id": 0, "x": 5}, {"id": 1, "x": 10}],
         tag_columns=["id"],
         tag_only_columns=True,
+        label="dsrc",
         source_id="dsrc",
     )
 
@@ -58,7 +59,7 @@ def _arrow_source() -> ArrowTableSource:
         ),
     )
     return ArrowTableSource(
-        table, tag_columns=["id"], tag_only_columns=True, source_id="asrc"
+        table, tag_columns=["id"], tag_only_columns=True, label="asrc", source_id="asrc"
     )
 
 
@@ -72,7 +73,11 @@ def _save(tmp_path: Path, db: Any, cache_mode: CacheMode | None = None) -> Path:
         Join()(double.pod(_dict_source(), label="dbl"), _arrow_source(), label="joined")
         increment.pod(
             CSVSource(
-                str(csv), tag_columns=["id"], tag_only_columns=True, source_id="csrc"
+                str(csv),
+                tag_columns=["id"],
+                tag_only_columns=True,
+                label="csrc",
+                source_id="csrc",
             ),
             label="inc",
         )

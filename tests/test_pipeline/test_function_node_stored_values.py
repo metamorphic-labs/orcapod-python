@@ -184,6 +184,7 @@ def _source(values: Column, name: str = "s", data: str = "x") -> ArrowTableSourc
         pa.Table.from_arrays(arrays, schema=schema),
         tag_columns=["k", "n"],
         tag_only_columns=True,
+        label=name,
         source_id=name,
     )
 

@@ -43,6 +43,7 @@ from orcapod.utils.provisional import provisional_class_name
 if TYPE_CHECKING:
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.protocols.core_protocols import StreamProtocol
 
 
 def validate_tags_as_data(
@@ -470,6 +471,11 @@ class DerivedSource(RootSource):
         checks against the node's keys on every read; over a source, the source's own.
         """
         return stream_data_tags(self._origin)
+
+    @property
+    def live_source_inputs(self) -> tuple[StreamProtocol, ...] | None:
+        """Tag copies over a source read it live. Job nodes give stored results."""
+        return (self._origin,) if isinstance(self._origin, RootSource) else None
 
     def _origin_records(self) -> "pa.Table | None":
         """Return the origin's rows, or ``None`` when a job node has none stored.

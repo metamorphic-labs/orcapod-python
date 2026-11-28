@@ -52,7 +52,11 @@ def _source(name: str, x: list[int]) -> ArrowTableSource:
         ),
     )
     return ArrowTableSource(
-        table, tag_columns=["id", "grp"], source_id=name, tag_only_columns=True
+        table,
+        tag_columns=["id", "grp"],
+        source_id=name,
+        label=name,
+        tag_only_columns=True,
     )
 
 

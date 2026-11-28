@@ -46,7 +46,11 @@ def _make_source(tag_col: str, data_col: str, data: dict) -> ArrowTableSource:
         }
     )
     return ArrowTableSource(
-        table, tag_columns=[tag_col], tag_only_columns=True, infer_nullable=True
+        table,
+        tag_columns=[tag_col],
+        tag_only_columns=True,
+        infer_nullable=True,
+        label=data_col,
     )
 
 
@@ -300,6 +304,7 @@ class TestLabelAccess:
         """Two nodes with same label get _1, _2 sorted by content hash."""
         src_a = _make_source("k", "value", {"k": ["a"], "value": [1]})
         src_b = _make_source("k", "value", {"k": ["b"], "value": [2]})
+        src_a.label, src_b.label = "first_values", "second_values"
 
         pf1 = PythonDataFunction(double_value, output_keys="result")
         pf2 = PythonDataFunction(double_value, output_keys="result")
@@ -630,8 +635,8 @@ class TestSourceNodesInPipeline:
         ]
         assert len(source_nodes) > 0
 
-    def test_source_node_accessible_by_source_id(self, pipeline_db):
-        """SourceNode is accessible in nodes via its source_id (the identity key)."""
+    def test_source_node_accessible_by_label(self, pipeline_db):
+        """SourceNode is accessible in nodes via its captured label."""
         src = ArrowTableSource(
             table=pa.table(
                 {
@@ -641,6 +646,7 @@ class TestSourceNodesInPipeline:
             ),
             tag_columns=["key"],
             tag_only_columns=True,
+            label="my_source",
             source_id="my_source",
             infer_nullable=True,
         )
@@ -693,8 +699,8 @@ class TestSourceNodeNoCaching:
         """CachedSource as pipeline input works and caches source data separately."""
         src_a, src_b = _make_two_sources()
         source_db = InMemoryArrowDatabase()
-        cached_a = CachedSource(src_a, cache_database=source_db)
-        cached_b = CachedSource(src_b, cache_database=source_db)
+        cached_a = CachedSource(src_a, cache_database=source_db, label=src_a.label)
+        cached_b = CachedSource(src_b, cache_database=source_db, label=src_b.label)
         pf = PythonDataFunction(add_values, output_keys="total")
         pod = FunctionPod(data_function=pf)
         job = PipelineJob(database=pipeline_db)

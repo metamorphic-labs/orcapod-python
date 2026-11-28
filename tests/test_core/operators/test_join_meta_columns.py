@@ -56,12 +56,14 @@ def _dict_sources() -> tuple[DictSource, DictSource]:
             data=[{"k": 1, "a": 1}, {"k": 2, "a": 2}],
             tag_columns=["k"],
             source_id="sa",
+            label="sa",
             tag_only_columns=True,
         ),
         DictSource(
             data=[{"k": 1, "b": 1}, {"k": 2, "b": 2}],
             tag_columns=["k"],
             source_id="sb",
+            label="sb",
             tag_only_columns=True,
         ),
     )

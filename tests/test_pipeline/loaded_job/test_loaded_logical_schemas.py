@@ -86,6 +86,7 @@ def _save_logical_job(tmp_path: Path, function: Any, *, with_join: bool = True) 
     with job:
         source = DictSource(
             [{"id": 1, "x": str(source_file)}],
+            label="data_input",
             tag_columns=["id"],
             tag_only_columns=True,
         )
@@ -94,7 +95,10 @@ def _save_logical_job(tmp_path: Path, function: Any, *, with_join: bool = True) 
         )
         if with_join:
             other = DictSource(
-                [{"id": 1, "other": 2}], tag_columns=["id"], tag_only_columns=True
+                [{"id": 1, "other": 2}],
+                tag_columns=["id"],
+                tag_only_columns=True,
+                label="join_metadata",
             )
             Join()(result, other, label="joined")
     job.run()
@@ -205,9 +209,9 @@ def make_payload(x: int) -> WriterOnly:
 root = Path(sys.argv[1])
 job = PipelineJob(name="unknown", database=DeltaTableDatabase(root / "store"))
 with job:
-    source = DictSource([{"id": 1, "x": 2}], tag_columns=["id"], tag_only_columns=True)
+    source = DictSource([{"id": 1, "x": 2}], tag_columns=["id"], tag_only_columns=True, label="payload_input")
     result = make_payload.pod(source, label="producer")
-    other = DictSource([{"id": 1, "other": 3}], tag_columns=["id"], tag_only_columns=True)
+    other = DictSource([{"id": 1, "other": 3}], tag_columns=["id"], tag_only_columns=True, label="join_metadata")
     Join()(result, other, label="joined")
 job.run()
 job.save(root / "job.json")
@@ -250,11 +254,11 @@ root = Path(sys.argv[1])
 left = ArrowTableSource(
     pa.table({"id": pa.array([1, 2], pa.int32()), "k": pa.array([3, 4], pa.int16()),
               "x": pa.array([5, 6], pa.int64())}, schema=pa.schema([pa.field("id", pa.int32(), nullable=False), pa.field("k", pa.int16(), nullable=False), pa.field("x", pa.int64(), nullable=False)])),
-    tag_columns=["id", "k"], tag_only_columns=True, source_id="left")
+    tag_columns=["id", "k"], tag_only_columns=True, source_id="left", label="left")
 right = ArrowTableSource(
     pa.table({"id": pa.array([1, 2], pa.int32()), "k": pa.array([3, 4], pa.int16()),
               "other": pa.array([7, None], pa.int16())}),
-    tag_columns=["id", "k"], tag_only_columns=True, source_id="right")
+    tag_columns=["id", "k"], tag_only_columns=True, source_id="right", label="right")
 job = PipelineJob(name="unknown", database=DeltaTableDatabase(root / "store"))
 with job:
     produced = make_payload.pod(left, label="producer")

@@ -41,6 +41,7 @@ def _source() -> DictSource:
         [{"k": i, "x": i} for i in range(3)],
         tag_columns=["k"],
         tag_only_columns=True,
+        label="s",
         source_id="s",
     )
 
@@ -133,6 +134,7 @@ def _base_stream() -> Any:
         pa.table({"id": [1, 2], "x": [1, 2]}, schema=schema),
         tag_columns=["id"],
         tag_only_columns=True,
+        label="base",
         source_id="base",
     )
 
@@ -425,6 +427,7 @@ def _job_over_source_bound_to_a_delivering_stream() -> PipelineJob:
             [{"id": 1, "x": 1}, {"id": 2, "x": 2}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         _twice_pod(source, label="tw")
@@ -587,6 +590,7 @@ def test_a_load_only_run_refuses_a_source_slot_bound_to_a_computing_stream(
             [{"id": 1, "x": 1}, {"id": 2, "x": 2}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         _twice_pod(source, label="tw")
@@ -678,6 +682,7 @@ def test_a_load_only_run_refuses_a_source_slot_bound_to_a_side_effect_node(
             [{"id": 1, "x": 1}, {"id": 2, "x": 2}],
             tag_columns=["id"],
             tag_only_columns=True,
+            label="s",
             source_id="s",
         )
         _twice_pod(source, label="tw")

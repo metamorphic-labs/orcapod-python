@@ -100,6 +100,7 @@ def _source() -> op.sources.DictSource:
         [{"unit": 1, "time": 10, "amp": 0.5}, {"unit": 2, "time": 20, "amp": 1.5}],
         tag_columns=["unit", "time"],
         tag_only_columns=["time"],
+        label="spikes",
         source_id="spikes",
     )
 
@@ -172,7 +173,9 @@ def test_a_function_node_refuses_an_undeclared_database() -> None:
 def test_an_operator_node_refuses_an_undeclared_database(mode: CacheMode) -> None:
     def source(name: str, column: str) -> op.sources.ArrowTableSource:
         table = pa.table({"id": [1, 2], column: [1.0, 2.0]})
-        return op.sources.ArrowTableSource(table, tag_columns=["id"], source_id=name)
+        return op.sources.ArrowTableSource(
+            table, tag_columns=["id"], label=name, source_id=name
+        )
 
     job = PipelineJob(name="ops", database=InMemoryArrowDatabase())
     with job:
@@ -211,6 +214,7 @@ def test_plain_tags_ask_nothing_of_an_undeclared_database() -> None:
         [{"unit": 1, "amp": 0.5}],
         tag_columns=["unit"],
         tag_only_columns=True,
+        label="plain",
         source_id="plain",
     )
     with job:

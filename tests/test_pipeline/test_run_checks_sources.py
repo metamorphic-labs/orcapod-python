@@ -106,6 +106,7 @@ def _polling(impl: _GrowingImpl) -> PollingSource[int]:
         polling_config=PollingConfig(
             interval=0.02, duration=0.1, max_missed_intervals=50
         ),
+        label="growing",
         source_id="growing",
     )
 
@@ -230,7 +231,7 @@ def _checked_job(source: _CheckedSource) -> PipelineJob:
 
 
 def _source() -> _CheckedSource:
-    return _CheckedSource(ROWS, tag_columns=["k"], source_id="s")
+    return _CheckedSource(ROWS, tag_columns=["k"], source_id="s", label="s")
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))

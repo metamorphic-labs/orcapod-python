@@ -37,12 +37,12 @@ with job:
     units = CSVSource(
         str(data_dir / "units.csv"),
         tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
-        source_id="units",
+        source_id="units", label="units",
     )
     sessions = CSVSource(
         str(data_dir / "sessions.csv"),
         tag_columns=["subject_id", "session"], tag_only_columns=True,
-        source_id="sessions",
+        source_id="sessions", label="sessions",
     )
     rates = firing_rate.pod(
         units.select_data_columns(["n_spikes"]),

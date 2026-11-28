@@ -64,6 +64,7 @@ def units() -> ArrowTableSource:
         table,
         tag_columns=["unit", "session", "subject"],
         tag_only_columns=True,
+        label="units",
         source_id="units",
     )
 
@@ -85,6 +86,7 @@ def sessions() -> ArrowTableSource:
         table,
         tag_columns=["session", "subject"],
         tag_only_columns=True,
+        label="sessions",
         source_id="sessions",
     )
 
@@ -446,6 +448,7 @@ def test_reader_keeps_the_nodes_own_entries(tmp_path: Path) -> None:
                 renamed.as_table(),
                 tag_columns=["unit", "session", "subject"],
                 tag_only_columns=True,
+                label="units_b",
                 source_id="units_b",
             )
         )

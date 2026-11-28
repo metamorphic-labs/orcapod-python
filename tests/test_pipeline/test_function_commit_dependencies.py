@@ -67,6 +67,7 @@ def source(start: int, *, reversed_tags: bool = False) -> DictSource:
         data=rows,
         tag_columns=["group", "tag"] if reversed_tags else ["tag", "group"],
         tag_only_columns=True,
+        label=f"source_{start}",
         source_id=f"source_{start}",
     )
 

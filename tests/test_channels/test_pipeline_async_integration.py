@@ -96,12 +96,14 @@ def _build_job() -> PipelineJob:
             tag_columns=["student_id"],
             infer_nullable=True,
             tag_only_columns=True,
+            label="students",
         )
         grades = ArrowTableSource(
             GRADES,
             tag_columns=["student_id"],
             infer_nullable=True,
             tag_only_columns=True,
+            label="grades",
         )
 
         joined = Join()(students, grades, label="join")

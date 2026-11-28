@@ -13,6 +13,7 @@ import dataclasses
 import functools
 import json
 import logging
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping, Sequence
 from datetime import datetime
@@ -65,6 +66,8 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
+    from orcapod.pipeline.job import PipelineJob
+    from orcapod.core.sources.base import RootSource
     from orcapod.types.explanation import Explanation
     from orcapod.channels import WritableChannel
     from orcapod.protocols.core_protocols import StreamProtocol
@@ -509,6 +512,21 @@ def _closed_feed(node: SourceNodeBase) -> CompleteStreamFeed:
     return feed
 
 
+def source_slot_name(stream: StreamProtocol) -> str:
+    """Resolve the default input name when capturing a stream."""
+    from orcapod.core.sources.base import RootSource
+
+    if isinstance(stream, SourceNodeBase):
+        return stream.name
+    if isinstance(stream, RootSource):
+        return stream.label
+    raise ValueError(
+        f"Cannot capture {stream.label!r} as a source slot. "
+        "Use node.as_source() to read another job's stored results, capture the "
+        "step inside this pipeline, or wrap raw rows in ArrowTableSource (ITL-1559)."
+    )
+
+
 class SourceNodeBase(TraceableBase, ABC):
     """Abstract base for SourceNode and SourceJobNode.
 
@@ -566,7 +584,11 @@ class SourceNodeBase(TraceableBase, ABC):
             arrow_schemas = (tag_schema, data_schema)
             tag_schema = Schema(converter.arrow_schema_to_python_schema(tag_schema))
             data_schema = Schema(converter.arrow_schema_to_python_schema(data_schema))
-        self._name = name
+        if not name or label == "":
+            raise ValueError("A source slot name cannot be empty.")
+        self._name = name if label is None else label
+        self._original_name = name
+        self._name_frozen = False
         self._tag_schema = tag_schema
         self._data_schema = data_schema
         # The Arrow types of the slot's columns, which its identity is built from
@@ -645,7 +667,6 @@ class SourceNodeBase(TraceableBase, ABC):
         self._saved_pipeline_hash = other._saved_pipeline_hash
         self._given_arrow_schemas = other._given_arrow_schemas
         if self._name == other._name:
-            self._label = other._label
             self._saved_content_hash = other._saved_content_hash
         self._saved_arrow_texts = other._saved_arrow_texts
 
@@ -842,16 +863,35 @@ class SourceNodeBase(TraceableBase, ABC):
         """The input-slot name used as the key in ``PipelineJob.bind(sources={...})``."""
         return self._name
 
-    def computed_label(self) -> str | None:
-        """Resolve the node label to the slot name.
-
-        Implements ``LabelableMixin.computed_label()`` so that ``self.label``
-        resolves to the slot name without an explicit label assignment.
-
-        Returns:
-            The slot name.
-        """
+    @property
+    def label(self) -> str:
+        """The slot name shown by the graph and used when binding."""
         return self.name
+
+    @label.setter
+    def label(self, label: str | None) -> None:
+        name = self._original_name if label is None else label
+        if not name:
+            raise ValueError("A source slot name cannot be empty.")
+        if name == self.name:
+            return
+        if self._name_frozen:
+            raise ValueError(
+                f"Cannot rename captured source slot {self.name!r}. "
+                "Rebuild the pipeline with the new slot label (ITL-1559)."
+            )
+        self._name = name
+        self._label = label
+        self._saved_content_hash = None
+        self._invalidate_content_hash_cache()
+
+    def computed_label(self) -> str:
+        """Return the default presentation label for this slot."""
+        return self.name
+
+    def freeze_slot_name(self) -> None:
+        """Keep this graph-owned slot's public key fixed (ITL-1559)."""
+        self._name_frozen = True
 
     @property
     def tag_schema(self) -> Schema:
@@ -1496,59 +1536,61 @@ class SourceNode(SourceNodeBase):
         stream: StreamProtocol,
         name: str | None = None,
     ) -> SourceNode:
-        """Wrap *stream* in a ``SourceNode``, or return it unchanged if already one.
-
-        Derives tag and data schemas from ``stream.output_schema()``.  The slot
-        name is resolved in priority order:
-
-        1. *name* parameter (explicit override — highest priority).
-        2. ``stream.source_name`` when *stream* is a ``RootSource``: its source id
-           without the kind part (ITL-1425), so a slot keeps its name whichever kind
-           or implementation version reads the data, stable across pipeline
-           serialisation / deserialisation.
-        3. ``"{stream.label}:{hash_prefix}"`` for any other concrete stream type,
-           combining the cosmetic label with a short content-hash suffix to ensure
-           uniqueness.
+        """Declare a slot with the given name or the stream's default slot name.
 
         Args:
-            stream: The upstream stream to wrap.
-            name: Optional explicit slot name.
+            stream: The stream whose schemas the slot declares.
+            name: Explicit slot name, if given.
 
         Returns:
-            The original *stream* if it is already a ``SourceNode``; otherwise
-            a new ``SourceNode`` with schemas derived from *stream*.
+            A fresh declaration without a source binding.
         """
-        if isinstance(stream, SourceNode):
-            return stream
+        slot_name = source_slot_name(stream) if name is None else name
         tag_schema, data_schema = stream.output_schema()
-        if name is not None:
-            slot_name = name
-        else:
-            # Local import avoids a module-level circular dependency between
-            # core.nodes and core.sources.
-            from orcapod.core.sources.base import RootSource
-
-            if isinstance(stream, RootSource):
-                slot_name = stream.source_name
-            else:
-                slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
         if not isinstance(stream, SourceNodeBase):
             _require_stream_arrow_types(stream, slot_name)
         node = cls(
             name=slot_name,
             tag_schema=tag_schema,
             data_schema=data_schema,
+            data_context=stream.data_context
+            if isinstance(stream, SourceNodeBase)
+            else None,
             arrow_schemas=(
-                stream._given_arrow_schemas  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
+                stream._given_arrow_schemas
                 if isinstance(stream, SourceNodeBase)
                 else typed_arrow_schemas(stream)
             ),
         )
         if isinstance(stream, SourceNodeBase):
-            # A loaded job's slot keeps all its saved state (ITL-1138, ITL-640),
-            # through the one method every copy of a slot uses.
             node._take_saved_state_of(stream)
         return node
+
+
+class SourceSlotDeclaration(SourceNode):
+    """A source slot input with an initial source and no replaceable binding."""
+
+    def __init__(self, source: RootSource, name: str | None = None) -> None:
+        slot_name = source.label if name is None else name
+        _require_stream_arrow_types(source, slot_name)
+        tags, data = source.output_schema()
+        super().__init__(
+            name=slot_name,
+            tag_schema=tags,
+            data_schema=data,
+            data_context=source.data_context,
+            arrow_schemas=typed_arrow_schemas(source),
+        )
+        self._initial_source = source
+
+    @property
+    def initial_source(self) -> RootSource:
+        """The source from which a job can make its own binding."""
+        return self._initial_source
+
+    def identity_structure(self) -> Any:
+        """Use the initial source's identity when recording a concrete input."""
+        return self.initial_source.identity_structure()
 
 
 class SourceJobNode(ProvenanceMethods, SourceNodeBase):
@@ -1630,6 +1672,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         )
         self._bound_source: StreamProtocol | None = None
         self._declared_form: _DeclaredForm | None = None
+        self._binding_owner: weakref.ReferenceType[PipelineJob] | None = None
         if bound_source is not None:
             # Checks the source and, for a narrower one, records how its rows become
             # rows of the declared schema (ITL-1112), as the setter does, but does not
@@ -1655,12 +1698,15 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             load_only: Accepted for every job node; a source reads its rows either way.
 
         Raises:
+            InconsistentSourceError: If the bound stream reads conflicting sources.
             UnboundSourceError: When no concrete source is bound.
             ValueError: If ``load_only`` and the bound stream computes or delivers
                 when read (``node_run.refuse_unloadable_inputs``).
         """
         from orcapod.pipeline.node_run import check_sources, refuse_unloadable_inputs
+        from orcapod.pipeline.source_consistency import require_consistent_sources
 
+        require_consistent_sources([(f"node {self.label!r}", self)])
         _ = check_sources([self])
         if load_only:
             refuse_unloadable_inputs(self)
@@ -1675,33 +1721,55 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
     def bound_source(self, value: StreamProtocol | None) -> None:
         """Bind *value* as the concrete source and invalidate both hash caches.
 
-        A source is checked against the slot's declared schema first (``validate``), so
-        one that does not fit is refused before anything changes. A narrower source
-        (``x: int`` for a slot declaring ``x: int | None``) is accepted, and the node
-        gives its rows as rows of the declared schema (ITL-1112). ``None`` unbinds.
+        A source must fit the slot's declared schema before the binding changes.
+        A narrower source (``x: int`` for a slot declaring ``x: int | None``) is
+        accepted, and the node gives its rows as rows of the declared schema
+        (ITL-1112). ``None`` unbinds.
+        In a job, assignment uses the binding checks of ``PipelineJob.bind()``.
         Binding stamps the slot as modified, so every job node fed by it is stale and
         reads empty until it runs again (ITL-1095).
 
         Raises:
+            InconsistentSourceError: If the replacement introduces conflicting sources.
             SourceSpecMismatchError: If *value* does not fit the declared schema.
         """
-        self._bind(value)
-        self._update_modified_time()
+        owner = self._binding_owner() if self._binding_owner is not None else None
+        if owner is None:
+            self._bind(value)
+            self._update_modified_time()
+        else:
+            owner._replace_source_binding(self, value)  # pyright: ignore[reportPrivateUsage]  # the setter uses the job's binding transaction
+
+    def _set_binding_owner(self, owner: PipelineJob | None) -> None:
+        """Route changes to a job while this is one of its active slots."""
+        self._binding_owner = weakref.ref(owner) if owner is not None else None
 
     def _bound_stream(self) -> StreamProtocol | None:
         """The concrete stream bound to this slot, or ``None``."""
         return self._bound_source
 
     def _bind(self, value: StreamProtocol | None) -> None:
-        """Check *value* and bind it, invalidating both hash caches.
+        """Check and install a binding without a job-wide transaction.
 
         The binding the setter and ``__init__`` share. Only the setter stamps the slot
         as modified (ITL-1095): a node built with its source is not a rebinding.
 
         Raises:
+            InconsistentSourceError: If the bound stream reads conflicting sources.
             SourceSpecMismatchError: If *value* does not fit the declared schema.
         """
-        form = None if value is None else self._declared_form_for(value)
+        from orcapod.pipeline.source_consistency import require_consistent_sources
+
+        form = None
+        if value is not None:
+            require_consistent_sources([(f"slot {self.name!r}", value)])
+            form = self._declared_form_for(value)
+        self._apply_binding(value, form)
+
+    def _apply_binding(
+        self, value: StreamProtocol | None, form: _DeclaredForm | None
+    ) -> None:
+        """Install a validated binding and invalidate its cached hashes."""
         self._bound_source = value
         self._declared_form = form
         self._invalidate_content_hash_cache()
@@ -1949,14 +2017,11 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         return self._declared_form.apply(table)
 
     def _display_name(self) -> str:
-        """The name a preview header shows: the bound source's assigned label, else the
-        node's own. The node's label and the slot's name are not changed (ITL-1454)."""
+        """Show the captured slot name and, when known, the dataset ID."""
         from orcapod.core.sources.display_names import labelled_source
 
-        source = labelled_source(self._bound_source)
-        if source is None or self.has_assigned_label:
-            return self.label
-        return source.label
+        source = labelled_source(self._bound_source, slot_name=self.label)
+        return self.label if source is None else f"{source.label} ({source.source_id})"
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the bound source."""
@@ -2110,89 +2175,42 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         stream: StreamProtocol,
         name: str | None = None,
     ) -> "SourceJobNode":
-        """Create a ``SourceJobNode`` from *stream* using three-way logic.
-
-        The three cases are:
-
-        1. *stream* is already a ``SourceJobNode`` — copy it, preserving the
-           existing ``bound_source`` (the SJN itself is **not** used as the
-           bound source).
-        2. *stream* is a ``SourceNode`` (schema-only, no data) — create an
-           **unbound** ``SourceJobNode`` with the same name and schemas. The
-           resulting SJN has ``bound_source=None`` and the same
-           ``content_hash()`` as *stream* (schema-based).
-        3. Any other concrete stream (``ArrowTableSource``, etc.) — create a
-           **bound** ``SourceJobNode`` whose ``content_hash()`` delegates to
-           the concrete stream.
-
-        Used by ``Pipeline.compile`` for each leaf of the pipeline. The stream is
-        bound as any source is, so a leaf without exactly one source-id and one
-        record-id system-tag column (a raw ``ArrowTableStream``) is refused
-        (ITL-1126).
+        """Create a new job slot from a declaration or concrete stream.
 
         Args:
-            stream: The stream to wrap.
-            name: Optional explicit slot name. In all three cases, when *name*
-                is provided it takes precedence over the stream's own name.
-                For concrete streams (Case 3), when *name* is ``None`` the slot
-                name is resolved as: ``stream.source_name`` (the source id
-                without its kind part) for ``RootSource`` instances, or ``"{stream.label}:{hash_prefix}"`` for any other
-                concrete stream type.
+            stream: The input whose schemas and initial binding the slot takes.
+            name: Explicit slot name, if given.
 
         Returns:
-            A ``SourceJobNode`` configured according to the case above.
+            A job slot with its own binding.
         """
-        match stream:
-            case SourceJobNode():
-                # Case 1: copy — preserve bound_source, do NOT wrap the SJN itself.
-                # The copy states the slot's Arrow schemas from the start: its bound
-                # source is validated against them as it is constructed (ITL-640).
-                node = cls(
-                    name=name if name is not None else stream.name,
-                    tag_schema=stream.tag_schema,
-                    data_schema=stream.data_schema,
-                    arrow_schemas=stream._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
-                    bound_source=stream.bound_source,
-                )
-                node._take_saved_state_of(stream)
-                return node
-            case SourceNode():
-                # Case 2: unbound — schema placeholder; SJN hash = SourceNode hash.
-                node = cls(
-                    name=name if name is not None else stream.name,
-                    tag_schema=stream.tag_schema,
-                    data_schema=stream.data_schema,
-                    arrow_schemas=stream._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
-                    bound_source=None,
-                )
-                node._take_saved_state_of(stream)
-                return node
-            case _:
-                # Case 3: concrete stream — bound SJN.
-                # Slot name priority:
-                #   1. explicit *name* parameter
-                #   2. stream.source_name for RootSource (its id without the kind part)
-                #   3. label + short hash prefix for any other concrete stream type
-                tag_schema, data_schema = stream.output_schema()
-                if name is not None:
-                    slot_name = name
-                else:
-                    # Local import avoids a module-level circular dependency between
-                    # core.nodes and core.sources.
-                    from orcapod.core.sources.base import RootSource
+        slot_name = source_slot_name(stream) if name is None else name
+        if isinstance(stream, SourceNodeBase):
+            bound_source = None
+            if isinstance(stream, SourceJobNode):
+                bound_source = stream.bound_source
+            elif isinstance(stream, SourceSlotDeclaration):
+                bound_source = stream.initial_source
+            node = cls(
+                name=slot_name,
+                tag_schema=stream.tag_schema,
+                data_schema=stream.data_schema,
+                data_context=stream.data_context,
+                arrow_schemas=stream._given_arrow_schemas,
+                bound_source=bound_source,
+            )
+            node._take_saved_state_of(stream)
+            return node
 
-                    if isinstance(stream, RootSource):
-                        slot_name = stream.source_name
-                    else:
-                        slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
-                _require_stream_arrow_types(stream, slot_name)
-                return cls(
-                    name=slot_name,
-                    tag_schema=tag_schema,
-                    data_schema=data_schema,
-                    arrow_schemas=typed_arrow_schemas(stream),
-                    bound_source=stream,
-                )
+        tag_schema, data_schema = stream.output_schema()
+        _require_stream_arrow_types(stream, slot_name)
+        return cls(
+            name=slot_name,
+            tag_schema=tag_schema,
+            data_schema=data_schema,
+            arrow_schemas=typed_arrow_schemas(stream),
+            bound_source=stream,
+        )
 
     @classmethod
     def _from_loaded_slot(

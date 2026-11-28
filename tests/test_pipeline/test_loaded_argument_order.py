@@ -61,7 +61,11 @@ def _csv(tmp_path: Path, name: str, header: str, rows: str) -> Any:
     path = tmp_path / f"{name}.csv"
     path.write_text(f"id,key,{header}\n{rows}")
     return sources.CSVSource(
-        str(path), tag_columns=["id", "key"], tag_only_columns=True, source_id=name
+        str(path),
+        tag_columns=["id", "key"],
+        tag_only_columns=True,
+        label=name,
+        source_id=name,
     )
 
 
@@ -360,7 +364,7 @@ root = Path(sys.argv[1])
 (root / "a.csv").write_text("id,key,x\\n1,10,1\\n2,20,2\\n")
 (root / "b.csv").write_text("id,key,y\\n1,10,100\\n2,20,101\\n")
 a, b = (sources.CSVSource(str(root / f"{{n}}.csv"), tag_columns=["id", "key"],
-        tag_only_columns=True, source_id=n) for n in ("a", "b"))
+        tag_only_columns=True, source_id=n, label=n) for n in ("a", "b"))
 job = PipelineJob(name="unknown", database=DeltaTableDatabase(root / "store"))
 with job:
     b.select_data_columns(["y"], label="other_use")

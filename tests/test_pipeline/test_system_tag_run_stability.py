@@ -101,6 +101,7 @@ def _run_once(
         probe_source = ArrowTableSource(
             _table(probes),
             tag_columns=["probe"],
+            label="probes",
             source_id="probes",
             record_id_columns="probe",
             tag_only_columns=True,
@@ -108,6 +109,7 @@ def _run_once(
         method_source = ArrowTableSource(
             _table(methods),
             tag_columns=method_tags,
+            label="methods",
             source_id="methods",
             record_id_columns="w",
             tag_only_columns=True,
