@@ -76,8 +76,8 @@ def _require_matching_nested_flags(
     if paths:
         fields = ", ".join(repr(f"{column}.{path}") for path in paths)
         raise InputValidationError(
-            f"{operator} inputs disagree on column {column!r}: their Arrow types "
-            f"differ in the nullability of nested field {fields}. Declare the same "
+            f"{operator} inputs disagree on the Arrow type of column {column!r}. "
+            f"The types differ in the nullability of nested field {fields}. Declare the same "
             "nested flags on both inputs or drop the explicit non-null declaration."
         )
 

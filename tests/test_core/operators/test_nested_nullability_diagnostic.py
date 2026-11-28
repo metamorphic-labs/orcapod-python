@@ -11,6 +11,7 @@ from orcapod.channels import Channel
 from orcapod.errors import InputValidationError, SourceSpecMismatchError
 from orcapod.operators import Join, MapData, MergeJoin, SemiJoin
 from orcapod.sources import ArrowTableSource
+from orcapod.utils.arrow_utils import nested_nullability_differences
 
 
 def _source(
@@ -85,6 +86,28 @@ def test_another_type_difference_keeps_the_generic_message():
     with pytest.raises(InputValidationError, match="not compatible") as error:
         Join()(left, right).as_table()
     assert "drop the explicit non-null declaration" not in str(error.value)
+
+
+def test_a_flag_and_a_logical_identifier_are_two_differences():
+    """Logical identifiers in Arrow field metadata can also distinguish types."""
+    left = pa.struct(
+        [
+            pa.field(
+                "value", pa.large_string(), metadata={b"ARROW:extension:name": b"path"}
+            )
+        ]
+    )
+    right = pa.struct(
+        [
+            pa.field(
+                "value",
+                pa.large_string(),
+                nullable=False,
+                metadata={b"ARROW:extension:name": b"file"},
+            )
+        ]
+    )
+    assert nested_nullability_differences(left, right) == ()
 
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])

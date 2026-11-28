@@ -403,6 +403,11 @@ def nested_nullability_differences(
         Paths to the differing fields, or an empty tuple if the types agree or
         have any difference beyond nested nullability.
     """
+    from orcapod.logical_types.canonical_form import (
+        EXTENSION_METADATA_KEY,
+        EXTENSION_NAME_KEY,
+    )
+
     paths: list[str] = []
 
     def compare(left: pa.DataType, right: pa.DataType, prefix: str) -> bool:
@@ -434,6 +439,11 @@ def nested_nullability_differences(
         for index in range(left.num_fields):
             a, b = left.field(index), right.field(index)
             if isinstance(left, pa.StructType) and a.name != b.name:
+                return False
+            if any(
+                (a.metadata or {}).get(key) != (b.metadata or {}).get(key)
+                for key in (EXTENSION_NAME_KEY, EXTENSION_METADATA_KEY)
+            ):
                 return False
             path = f"{prefix}{a.name}"
             if not compare(a.type, b.type, f"{path}."):
