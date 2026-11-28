@@ -767,7 +767,7 @@ class StreamBase(TraceableBase, IdentityChainsMixin):
         return self.upstreams
 
     def _identity_symmetry(self, inputs: tuple[StreamProtocol, ...]) -> ArgumentGroup:
-        """Respect the producer's symmetry, or the saved order when it is absent."""
+        """Respect the producer's symmetry, or the input order with no producer."""
         producer = self.producer
         return inputs if producer is None else producer.argument_symmetry(inputs)
 
@@ -779,7 +779,15 @@ class StreamBase(TraceableBase, IdentityChainsMixin):
             return None
         from orcapod.core.sources.base import RootSource
 
-        name = self.source_name if isinstance(self, RootSource) else None
+        name = None
+        if isinstance(self, RootSource):
+            try:
+                name = self.source_name
+            except ValueError:
+                # The saved-source fallback already names an anonymous source.
+                if self.source_id != "unknown":
+                    raise
+                name = "unknown"
         return name, self.content_hash()
 
     @property

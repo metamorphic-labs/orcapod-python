@@ -3,22 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from typing_extensions import override
 
 from orcapod import Pipeline, PipelineJob, SourceNode, function_pod
-from orcapod.core.identity_chains import NAME_CHAIN_HASH_LABEL, SOURCE_CHAIN_HASH_LABEL
+from orcapod.core.identity_chains import (
+    NAME_CHAIN_HASH_LABEL,
+    NODE_HASH_LABEL,
+    SLOT_NAME_HASH_LABEL,
+    SOURCE_CHAIN_HASH_LABEL,
+)
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import UnboundSourceError
 from orcapod.hashing.semantic_hashing.semantic_hasher import SemanticAwarePythonHasher
 from orcapod.operators import Index, Join, MergeJoin, Rejoin
-from orcapod.sources import DictSource
+from orcapod.sources import DictSource, SourceProxy
 from orcapod.types import ContentHash
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from collections.abc import Collection
 
     from orcapod.protocols.core_protocols import ArgumentGroup, StreamProtocol
@@ -223,7 +228,7 @@ def test_unbound_blueprint_names_all_upstream_slots() -> None:
 
 
 @pytest.mark.filterwarnings("ignore:Index is provisional")
-def test_loaded_blueprint_computes_names_through_a_missing_pod(tmp_path: Path) -> None:
+def test_loaded_blueprint_chains_require_the_operator(tmp_path: Path) -> None:
     source = _source("reading", False)
     lists = DictSource(
         [{"item": 1, "region": "north", "values": [1, 2], "y": 3}],
@@ -235,16 +240,21 @@ def test_loaded_blueprint_computes_names_through_a_missing_pod(tmp_path: Path) -
     with pipeline:
         add.pod(source, label="first")
         Index(column="values", i=0)(lists, label="picked")
-    expected = {label: node.node_hash() for label, node in pipeline.nodes.items()}
+    expected = pipeline.nodes["first"].node_hash()
     path = tmp_path / "blueprint.json"
     pipeline.save(path)
     loaded = Pipeline.load(path)
-    for label, slot in (("first", "reading"), ("picked", "lists")):
-        node = loaded.nodes[label]
-        assert node.producer is None
-        assert node.node_hash() == expected[label]
-        with pytest.raises(UnboundSourceError, match=f"unbound.*{slot}"):
-            node._chain_content_hash()
+    function = loaded.nodes["first"]
+    assert function.producer is None
+    assert function.node_hash() == expected
+    with pytest.raises(UnboundSourceError, match="unbound.*reading"):
+        function._chain_content_hash()
+
+    operator = loaded.nodes["picked"]
+    assert operator.producer is None
+    assert operator.pipeline_hash() == pipeline.nodes["picked"].pipeline_hash()
+    with pytest.raises(ValueError, match="saved form does not carry input symmetry"):
+        operator.node_hash()
 
 
 def _data_tags(name: str, reverse: bool = False) -> DictSource:
@@ -318,10 +328,10 @@ def test_equal_structure_join_pipeline_hash_depends_only_on_structure() -> None:
 
 
 @pytest.mark.parametrize("missing_builtin", [False, True])
-def test_loaded_commutative_stub_keeps_chains(
+def test_loaded_commutative_stub_requires_unsaved_symmetry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_builtin: bool
 ) -> None:
-    """A missing producer must still pool its inputs in symmetric order."""
+    """The saved legacy hashes are available when the new chains are undefined."""
     from orcapod.pipeline.serialization import OPERATOR_REGISTRY
     from orcapod.sources import CSVSource
 
@@ -339,19 +349,92 @@ def test_loaded_commutative_stub_keeps_chains(
     with job:
         (Join() if missing_builtin else UnregisteredJoin())(*inputs, label="joined")
     job.run()
-    expected = _hashes(job.nodes["joined"])
+    original = job.nodes["joined"]
     path = tmp_path / "job.json"
     job.save(path)
     if missing_builtin:
         monkeypatch.delitem(OPERATOR_REGISTRY, "Join")
-    loaded = PipelineJob.load(path, database=job.database)
-    assert loaded.nodes["joined"].producer is None
-    assert _hashes(loaded.nodes["joined"]) == expected
-    loaded.save(path)
-    assert (
-        _hashes(PipelineJob.load(path, database=job.database).nodes["joined"])
-        == expected
+    for _ in range(2):
+        loaded = PipelineJob.load(path, database=job.database)
+        node = loaded.nodes["joined"]
+        assert node.producer is None
+        assert node.pipeline_hash() == original.pipeline_hash()
+        assert node.content_hash() == original.content_hash()
+        for accessor in (
+            node.source_chain,
+            node.name_chain,
+            node.node_hash,
+            node._chain_content_hash,
+        ):
+            with pytest.raises(
+                ValueError, match="saved form does not carry input symmetry"
+            ):
+                accessor()
+        loaded.save(path)
+
+
+def test_saved_job_bytes_match_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed job writes exactly the bytes produced before the chain change."""
+    monkeypatch.setattr("orcapod.__version__", "test-version")
+    left = _source("left", False)
+    right = _source("right", False, right=True)
+    job = PipelineJob(name="saved_job_compat", database=InMemoryArrowDatabase())
+    with job:
+        _ = Join()(left, right, label="join")
+        _ = MergeJoin()(left, right, label="merge")
+        x = left.select_data_columns(["x"], label="select_x")
+        y = left.select_data_columns(["y"], label="select_y")
+        _ = Rejoin()(x, y, label="rejoin")
+    _ = job.run()
+    monkeypatch.setattr(job, "_run_id", "fixed-run-id")
+    path = tmp_path / "job.json"
+    job.save(path)
+    # Captured with this same job on main at 37f784318931.
+    expected = Path(__file__).with_name("data") / "three_chain_step_1_saved_job.json"
+    assert path.read_bytes() == expected.read_bytes()
+
+
+def test_nested_symmetry_keeps_repeated_ordered_pairs() -> None:
+    """Each ordered pair contributes to the enclosing symmetric pool."""
+
+    class PairJoin(Join):
+        @override
+        def argument_symmetry(
+            self, streams: Collection[StreamProtocol]
+        ) -> ArgumentGroup:
+            a, b, c, d = streams
+            return frozenset(((a, b), (c, d)))
+
+    left, right = _data_tags("a"), _data_tags("b")
+    result = PairJoin()(left, right, left, right)
+    pair = MergeJoin()(left, right)
+    for label, group_chain, result_chain in (
+        (SOURCE_CHAIN_HASH_LABEL, pair.source_chain(), result.source_chain()),
+        (NAME_CHAIN_HASH_LABEL, pair.name_chain(), result.name_chain()),
+    ):
+        hasher = SemanticAwarePythonHasher(hasher_id=label)
+        assert result_chain == hasher.hash_object((group_chain, group_chain))
+
+
+def test_anonymous_source_proxy_uses_saved_identity_and_slot_name() -> None:
+    """A proxy's anonymous saved ID is usable as its implicit slot name."""
+    source = _source("reading", False)
+    proxy = SourceProxy(
+        "unknown",
+        source.content_hash().to_string(),
+        source.pipeline_hash().to_string(),
+        *source.output_schema(),
     )
+    name = SemanticAwarePythonHasher(hasher_id=SLOT_NAME_HASH_LABEL).hash_object(
+        ("slot", "unknown")
+    )
+    assert proxy.source_chain() == source.content_hash()
+    assert proxy.name_chain() == name
+    assert proxy.node_hash() == SemanticAwarePythonHasher(
+        hasher_id=NODE_HASH_LABEL
+    ).hash_object((source.pipeline_hash(), name))
 
 
 @pytest.mark.parametrize("downstream", [False, True])
@@ -496,7 +579,7 @@ def test_copying_a_slot_under_a_new_name_recomputes_the_name_chain() -> None:
     assert _hashes(original) == before
 
 
-def test_custom_operator_symmetry_receives_streams_on_save(tmp_path: Path) -> None:
+def test_custom_operator_symmetry_receives_streams(tmp_path: Path) -> None:
     """A custom operator can require concrete stream objects in its callback."""
     from orcapod.core.nodes.source_node import SourceNodeBase
 
@@ -631,3 +714,24 @@ def test_identity_terms_accept_canonical_semantic_values(
         )
         assert chain() == expected
         assert chain() == expected
+
+
+def test_name_term_memo_respects_semantic_types_after_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python-equal terms can encode distinct semantic values."""
+    source = _source("reading", False)
+    job = PipelineJob(name="name_terms", database=InMemoryArrowDatabase())
+    with job:
+        _ = source.select_data_columns(["x"], label="result")
+    result = job.nodes["result"]
+    term: bool | int = True
+    monkeypatch.setattr(result, "_identity_terms", lambda: (None, term))
+    first = result.name_chain()
+    term = 1
+    job.bind({"reading": _source("rebound", False)})
+    expected = SemanticAwarePythonHasher(hasher_id=NAME_CHAIN_HASH_LABEL).hash_object(
+        ("term", job.nodes["reading"].name_chain(), term)
+    )
+    assert first != expected
+    assert result.name_chain() == expected

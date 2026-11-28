@@ -1860,3 +1860,34 @@ def test_polling_leaf_chains_stay_stable_when_a_batch_supplies_schema() -> None:
     assert (source.source_chain(), source.name_chain()) == before
     assert source.node_hash() != pending_hash
     assert source._chain_content_hash()
+
+
+def test_cached_polling_source_has_node_hash_without_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cache preserves the pending structure term of a polling source."""
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.sources import CachedSource
+
+    source = PollingSource(
+        FakeDynamicSource(batches=[_batch(1, 10)]),
+        tag_columns="id",
+        source_id="pending",
+        record_id_columns="id",
+    )
+    cached = CachedSource(source, InMemoryArrowDatabase())
+    with monkeypatch.context() as guard:
+
+        def unexpected_fetch() -> None:
+            pytest.fail("pending identities must not fetch for a schema")
+
+        guard.setattr(source, "_sync_poll_and_commit", unexpected_fetch)
+        assert cached.source_chain() == source.source_chain()
+        assert cached.name_chain() == source.name_chain()
+        pending = cached.node_hash()
+        assert pending == source.node_hash()
+        with pytest.raises(ValueError, match="requires a schema"):
+            _ = cached._chain_content_hash()
+    assert list(source)
+    assert cached.node_hash() == source.node_hash() != pending
+    assert cached._chain_content_hash() == source._chain_content_hash()

@@ -1,0 +1,406 @@
+{
+  "orcapod_pipeline_job_version": "0.4.0",
+  "orcapod_version": "test-version",
+  "run": {
+    "run_id": "fixed-run-id",
+    "status": "complete",
+    "unbound_sources": [],
+    "node_job_content_hashes": {
+      "select_x": "semantic_v1:954cae2b749baf7f1cb1d8adc5a3a55e21ca4448932b7d2117a494cee9b07c42",
+      "merge": "semantic_v1:245faafe6354085f63afa1812bb597650796f1f081d2560b0e98e5424aec7f01",
+      "join": "semantic_v1:ec08c2288c86e46db46956ed1115700edaece4bee186cb6dc14175f0feeadc73",
+      "select_y": "semantic_v1:49e9383590e3f8055ce986712729d34f022fc8d94c56c8815434ef40350b4bb1",
+      "rejoin": "semantic_v1:e5a6c507d1b38e9a78c423e4e0a50adda0953541ba1a235ccf2bdd80ca7c45c5"
+    },
+    "expected_rows": {
+      "select_x": 0,
+      "merge": 0,
+      "join": 0,
+      "select_y": 0,
+      "rejoin": 0
+    }
+  },
+  "pipeline": {
+    "orcapod_pipeline_version": "0.4.0",
+    "orcapod_version": "test-version",
+    "pipeline": {
+      "name": [
+        "saved_job_compat"
+      ]
+    },
+    "nodes": {
+      "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe": {
+        "node_type": "source",
+        "label": "left",
+        "content_hash": "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe",
+        "pipeline_hash": "semantic_v1:eff5e7f34fbf02243dcc66d68814b1c4c6b8f51993acf6596535fa3f14d9e4aa",
+        "output_schema": {
+          "tag": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data": {
+            "x": "int64",
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "source_node",
+          "left"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "source_config": {
+          "source_type": "node",
+          "name": "left",
+          "tag_schema": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data_schema": {
+            "x": "int64",
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "reconstructable": true
+      },
+      "semantic_v1:305832bb36171c9b6d0edd8ba776dbf30e86884b1050d55eeae0da26303057eb": {
+        "node_type": "source",
+        "label": "right",
+        "content_hash": "semantic_v1:305832bb36171c9b6d0edd8ba776dbf30e86884b1050d55eeae0da26303057eb",
+        "pipeline_hash": "semantic_v1:010a68e7352ee0070ac28e2b0ea6b934080d52d2d9c51ad8c626031c71e40ea4",
+        "output_schema": {
+          "tag": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data": {
+            "u": "int64",
+            "v": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "source_node",
+          "right"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "source_config": {
+          "source_type": "node",
+          "name": "right",
+          "tag_schema": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data_schema": {
+            "u": "int64",
+            "v": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "reconstructable": true
+      },
+      "semantic_v1:8305b9cbe4c8e4033639fe7fd28976c09df777dd5b88af43cccee1ea9a178c11": {
+        "node_type": "operator",
+        "label": "select_x",
+        "content_hash": "semantic_v1:8305b9cbe4c8e4033639fe7fd28976c09df777dd5b88af43cccee1ea9a178c11",
+        "pipeline_hash": "semantic_v1:2f2e2c2932ab11b4b8ae12ead822b2d90ac6b5f6f23d020303118ea85b3a85f3",
+        "output_schema": {
+          "tag": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data": {
+            "x": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "SelectDataColumns",
+          "6a76fccd6a5401a68d34aa9f8b8fe23eaab30dba75bc061364e2f9ec83b8a302"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "inputs": [
+          "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe"
+        ],
+        "operator_config": {
+          "class_name": "SelectDataColumns",
+          "module_path": "orcapod.core.operators.column_selection",
+          "config": {
+            "columns": [
+              "x"
+            ],
+            "strict": true
+          }
+        },
+        "table_scope": "pipeline_hash"
+      },
+      "semantic_v1:a663f199323c30423fdc1d0e368db868e95babc5e34b2167b1ae5a3855bbc86c": {
+        "node_type": "operator",
+        "label": "merge",
+        "content_hash": "semantic_v1:a663f199323c30423fdc1d0e368db868e95babc5e34b2167b1ae5a3855bbc86c",
+        "pipeline_hash": "semantic_v1:5ab3866d866c7ba40af959906c636d66aa45e54a2b847207cdd3be69da10d5fc",
+        "output_schema": {
+          "tag": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data": {
+            "x": "int64",
+            "y": "int64",
+            "u": "int64",
+            "v": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "MergeJoin",
+          "cc4a3c03deacdd328626d12e95ace2f5d8a27ca8f6180a22872addf92cf46627"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "inputs": [
+          "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe",
+          "semantic_v1:305832bb36171c9b6d0edd8ba776dbf30e86884b1050d55eeae0da26303057eb"
+        ],
+        "operator_config": {
+          "class_name": "MergeJoin",
+          "module_path": "orcapod.core.operators.merge_join",
+          "config": {}
+        },
+        "table_scope": "pipeline_hash"
+      },
+      "semantic_v1:5fdf59d2241101a2e3585cdbe87e7153f334ea1472cac4f697163b29198cceae": {
+        "node_type": "operator",
+        "label": "join",
+        "content_hash": "semantic_v1:5fdf59d2241101a2e3585cdbe87e7153f334ea1472cac4f697163b29198cceae",
+        "pipeline_hash": "semantic_v1:a39fca094af0ab19137a63bc97731ce2e6e6cf43fe7b724cefbbb37dcd2e7fba",
+        "output_schema": {
+          "tag": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data": {
+            "u": "int64",
+            "v": "int64",
+            "x": "int64",
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "Join",
+          "295ca9336dc1935b209d140b0b4cdda1d61024372adfee6f4b746781972e4e83"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "inputs": [
+          "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe",
+          "semantic_v1:305832bb36171c9b6d0edd8ba776dbf30e86884b1050d55eeae0da26303057eb"
+        ],
+        "operator_config": {
+          "class_name": "Join",
+          "module_path": "orcapod.core.operators.join",
+          "config": {}
+        },
+        "table_scope": "pipeline_hash"
+      },
+      "semantic_v1:ada002923024d25c5d7cb59710fe7ef2689147d2893479a38c50d019c9ea018b": {
+        "node_type": "operator",
+        "label": "select_y",
+        "content_hash": "semantic_v1:ada002923024d25c5d7cb59710fe7ef2689147d2893479a38c50d019c9ea018b",
+        "pipeline_hash": "semantic_v1:affa4d80f90965b0d90e1badee7e8b54b561c3c86071faf4f18de1e68aba4166",
+        "output_schema": {
+          "tag": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data": {
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "SelectDataColumns",
+          "b825c9b09b01160b3c3c8d7183370f31228977e33eff2f029e349d7c4b75b9f5"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "inputs": [
+          "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe"
+        ],
+        "operator_config": {
+          "class_name": "SelectDataColumns",
+          "module_path": "orcapod.core.operators.column_selection",
+          "config": {
+            "columns": [
+              "y"
+            ],
+            "strict": true
+          }
+        },
+        "table_scope": "pipeline_hash"
+      },
+      "semantic_v1:eab9a57fa5b50f86133f392e0f0613c0883200ab44b07562a486cb416e2373b8": {
+        "node_type": "operator",
+        "label": "rejoin",
+        "content_hash": "semantic_v1:eab9a57fa5b50f86133f392e0f0613c0883200ab44b07562a486cb416e2373b8",
+        "pipeline_hash": "semantic_v1:8394a3f839b83cc529efd8899e5680dd4e7179afcdcc373bf7fe1af7b02e92cb",
+        "output_schema": {
+          "tag": {
+            "region": "large_string",
+            "item": "int64"
+          },
+          "data": {
+            "x": "int64",
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "Rejoin",
+          "ac249d197a1dca981ce8ddc10aa5e11d1e969e1aff6130a64c8a810779250335"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "inputs": [
+          "semantic_v1:8305b9cbe4c8e4033639fe7fd28976c09df777dd5b88af43cccee1ea9a178c11",
+          "semantic_v1:ada002923024d25c5d7cb59710fe7ef2689147d2893479a38c50d019c9ea018b"
+        ],
+        "operator_config": {
+          "class_name": "Rejoin",
+          "module_path": "orcapod.core.operators.rejoin",
+          "config": {}
+        },
+        "table_scope": "pipeline_hash"
+      }
+    },
+    "edges": [
+      [
+        "semantic_v1:305832bb36171c9b6d0edd8ba776dbf30e86884b1050d55eeae0da26303057eb",
+        "semantic_v1:5fdf59d2241101a2e3585cdbe87e7153f334ea1472cac4f697163b29198cceae"
+      ],
+      [
+        "semantic_v1:305832bb36171c9b6d0edd8ba776dbf30e86884b1050d55eeae0da26303057eb",
+        "semantic_v1:a663f199323c30423fdc1d0e368db868e95babc5e34b2167b1ae5a3855bbc86c"
+      ],
+      [
+        "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe",
+        "semantic_v1:5fdf59d2241101a2e3585cdbe87e7153f334ea1472cac4f697163b29198cceae"
+      ],
+      [
+        "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe",
+        "semantic_v1:8305b9cbe4c8e4033639fe7fd28976c09df777dd5b88af43cccee1ea9a178c11"
+      ],
+      [
+        "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe",
+        "semantic_v1:a663f199323c30423fdc1d0e368db868e95babc5e34b2167b1ae5a3855bbc86c"
+      ],
+      [
+        "semantic_v1:659e1f6113487e62207c559c4555fad2705b08d8131e76e53392dd2fb4de52fe",
+        "semantic_v1:ada002923024d25c5d7cb59710fe7ef2689147d2893479a38c50d019c9ea018b"
+      ],
+      [
+        "semantic_v1:8305b9cbe4c8e4033639fe7fd28976c09df777dd5b88af43cccee1ea9a178c11",
+        "semantic_v1:eab9a57fa5b50f86133f392e0f0613c0883200ab44b07562a486cb416e2373b8"
+      ],
+      [
+        "semantic_v1:ada002923024d25c5d7cb59710fe7ef2689147d2893479a38c50d019c9ea018b",
+        "semantic_v1:eab9a57fa5b50f86133f392e0f0613c0883200ab44b07562a486cb416e2373b8"
+      ]
+    ]
+  },
+  "bindings": {
+    "sources": {
+      "left": {
+        "source_type": "dict",
+        "tag_columns": [
+          "region",
+          "item"
+        ],
+        "tag_only_columns": true,
+        "source_name": "left",
+        "source_name_given": true,
+        "source_version": 1,
+        "full_source_id": "dict_v1:left",
+        "content_hash": "semantic_v1:6ac99d445997b31f49a4ea089cf02a39b4b6e057a956f3708a1e5479fbe1c822",
+        "pipeline_hash": "semantic_v1:eff5e7f34fbf02243dcc66d68814b1c4c6b8f51993acf6596535fa3f14d9e4aa",
+        "tag_schema": {
+          "region": "large_string",
+          "item": "int64"
+        },
+        "data_schema": {
+          "x": "int64",
+          "y": "int64"
+        },
+        "nullable": {
+          "tag": [],
+          "data": []
+        }
+      },
+      "right": {
+        "source_type": "dict",
+        "tag_columns": [
+          "region",
+          "item"
+        ],
+        "tag_only_columns": true,
+        "source_name": "right",
+        "source_name_given": true,
+        "source_version": 1,
+        "full_source_id": "dict_v1:right",
+        "content_hash": "semantic_v1:8a97b841d50404d1ef29340171b2d0401dce7361d62c43b61465ddc23a695022",
+        "pipeline_hash": "semantic_v1:010a68e7352ee0070ac28e2b0ea6b934080d52d2d9c51ad8c626031c71e40ea4",
+        "tag_schema": {
+          "region": "large_string",
+          "item": "int64"
+        },
+        "data_schema": {
+          "u": "int64",
+          "v": "int64"
+        },
+        "nullable": {
+          "tag": [],
+          "data": []
+        }
+      }
+    },
+    "database": {
+      "type": "in_memory",
+      "base_path": [],
+      "max_hierarchy_depth": 10
+    },
+    "result_database": null
+  }
+}

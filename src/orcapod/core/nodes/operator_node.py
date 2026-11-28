@@ -29,7 +29,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod import contexts
-from orcapod.core.identity_chains import INPUT_SYMMETRY_KEY, InputSymmetry
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.data_tags import (
     mark_data_tags,
@@ -298,7 +297,12 @@ class OperatorNodeBase(StreamBase):
         return self.pipeline_identity_structure()
 
     def _identity_leaf(self, walk: IdentityWalkProtocol) -> None:
-        """An operator remains a computation when its pod is unavailable."""
+        """Refuse to compute provisional chains without the operator's grouping."""
+        if self._operator is None:
+            raise ValueError(
+                "Cannot compute operator identity chains because the saved form "
+                "does not carry input symmetry yet and the operator is unavailable."
+            )
         return None
 
     def pipeline_identity_structure(self) -> Any:
@@ -337,14 +341,6 @@ class OperatorNodeBase(StreamBase):
     # ------------------------------------------------------------------
     # Stream interface
     # ------------------------------------------------------------------
-
-    def _identity_input_symmetry(
-        self, inputs: tuple[StreamProtocol, ...]
-    ) -> InputSymmetry | None:
-        """Recover the grouping of a saved operator when its producer is missing."""
-        if self._operator is None:
-            return self._descriptor.get(INPUT_SYMMETRY_KEY)
-        return super()._identity_input_symmetry(inputs)
 
     @property
     def producer(self) -> OperatorPodProtocol:

@@ -313,14 +313,13 @@ contributing slot is unbound. The chain-based content hash is available internal
 `_chain_content_hash()` until the switch to `content_hash()`. Orcapod continues to use
 the existing hashes for graph keys and persistence. ITL-1590 tracks cases where the
 existing pipeline hash depends on source equality within a commutative input tie.
-An operator descriptor records nondefault input grouping in its optional
-`input_symmetry` field. A read-only operator uses that grouping when its pod cannot
-be restored. Older descriptors without this field use their saved argument order
-when the pod is unavailable.
+The saved job format does not carry input symmetry yet. When an operator is
+unavailable on load, accessing either chain or combined hash raises an error.
+The legacy pipeline and content hashes remain available from the descriptor.
 
-A polling source can report its source chain, name chain, and node hash before it
-knows its schema. In this state the node hash combines a pending polling-source
-structure term with the name chain, without initiating a poll. Once a batch
+A polling source, including one wrapped in a cache, can report its source chain,
+name chain, and node hash before it knows its schema. The node hash combines a
+pending polling-source structure term with the name chain without polling. Once a batch
 supplies the schema, the node hash combines the pipeline hash with the same name
 chain. The chain-based content hash requires the schema.
 

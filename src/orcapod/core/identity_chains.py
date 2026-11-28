@@ -64,9 +64,14 @@ class IdentityWalk:
             self._consumer = consumer
 
 
-# JSON needs one explicit marker to distinguish symmetric groups from lists.
-INPUT_SYMMETRY_KEY = "input_symmetry"
-InputSymmetry = int | list["InputSymmetry"] | dict[str, list["InputSymmetry"]]
+@dataclass(slots=True)
+class _SymmetricInputs:
+    """An unordered group of argument positions and nested groups."""
+
+    children: list[InputSymmetry]
+
+
+InputSymmetry = int | list["InputSymmetry"] | _SymmetricInputs
 
 
 def encode_input_symmetry(
@@ -78,42 +83,61 @@ def encode_input_symmetry(
         return None
 
     remaining = dict(enumerate(inputs))
-    symmetric: list[tuple[frozenset[ArgumentGroup], list[InputSymmetry]]] = []
+    symmetric: list[tuple[ArgumentGroup, InputSymmetry, list[InputSymmetry]]] = []
 
-    def encode(group: ArgumentGroup) -> InputSymmetry:
+    def encode(
+        group: ArgumentGroup, available: dict[int, StreamProtocol], *, repeat: bool
+    ) -> InputSymmetry:
         if isinstance(group, tuple):
-            return [encode(child) for child in group]
+            return [encode(child, available, repeat=repeat) for child in group]
         if isinstance(group, frozenset):
-            children = [encode(child) for child in group]
-            symmetric.append((group, children))
-            return {"symmetric": children}
-        for index, stream in remaining.items():
-            if stream is group:
-                del remaining[index]
-                return index
+            children: list[InputSymmetry] = []
+            for child in group:
+                position = encode(child, available, repeat=repeat)
+                children.append(position)
+                if not repeat:
+                    symmetric.append((child, position, children))
+            return _SymmetricInputs(children)
+        index = next(
+            (index for index, stream in available.items() if stream is group), None
+        )
+        if index is None and repeat:
+            index = next(
+                (index for index, stream in available.items() if stream == group),
+                None,
+            )
+        if index is not None:
+            del available[index]
+            return index
         raise ValueError("argument_symmetry did not group arguments by occurrence")
 
     group = symmetry(inputs)
     try:
-        grouped = encode(group)
+        grouped = encode(group, remaining, repeat=False)
     except ValueError:
-        # Positions are optional metadata. A legacy descriptor can use input order
-        # when a custom grouping cannot be expressed with argument positions.
+        # Use argument order when the callback does not return the input streams.
         return None
 
-    # A frozenset can collapse repeated or content-equal streams. Restore their
-    # positions after claiming the explicit leaves, including leaves of ordered groups.
-    symmetric.sort(
-        key=lambda entry: min(_input_positions(entry[1]), default=len(inputs))
-    )
-    for index, stream in remaining.items():
-        for members, children in symmetric:
-            if stream in members:
-                children.append(index)
-                break
-
-    for _, children in symmetric:
-        children.sort(key=repr)
+    # A frozenset can collapse an equal leaf or an entire equal subgroup.
+    # Claim repeats of larger members first so their leaves stay together.
+    if remaining:
+        members = [
+            (child, siblings, _input_positions(encoded))
+            for child, encoded, siblings in symmetric
+        ]
+        members.sort(
+            key=lambda member: (-len(member[2]), min(member[2], default=len(inputs)))
+        )
+        for child, siblings, positions in members:
+            while positions and len(remaining) >= len(positions):
+                available = remaining.copy()
+                try:
+                    siblings.append(encode(child, available, repeat=True))
+                except ValueError:
+                    break
+                remaining = available
+    if remaining:
+        return None
     return None if grouped == list(range(len(inputs))) else grouped
 
 
@@ -121,7 +145,7 @@ def _input_positions(group: InputSymmetry) -> tuple[int, ...]:
     """Return every explicit position in a grouping."""
     if isinstance(group, int):
         return (group,)
-    children = group if isinstance(group, list) else group["symmetric"]
+    children = group.children if isinstance(group, _SymmetricInputs) else group
     return tuple(index for child in children for index in _input_positions(child))
 
 
@@ -144,7 +168,9 @@ def _pool(
     pooled = inputs[0] if len(inputs) == 1 else hash_term(label, inputs)
     if own_term is None:
         return pooled
-    return hash_term(label, ("term", pooled, own_term))
+    # Extension terms may compare equal in Python while encoding differently.
+    # The enclosing chain memo already caches their result until invalidation.
+    return _hash(label, ("term", pooled, own_term))
 
 
 def _pool_group(
@@ -158,8 +184,8 @@ def _pool_group(
     if isinstance(group, int):
         return inputs[group]
 
-    symmetric = isinstance(group, dict)
-    group_children = group["symmetric"] if isinstance(group, dict) else group
+    symmetric = isinstance(group, _SymmetricInputs)
+    group_children = group.children if isinstance(group, _SymmetricInputs) else group
     children = [_pool_group(child, inputs, hash_term) for child in group_children]
     if symmetric:
         children.sort(key=lambda child: child.structure_key)
@@ -248,11 +274,7 @@ class IdentityChainsMixin(ABC):
                 self._identity_name_hashes = {}
             hashes = self._identity_name_hashes
         key = (label, preimage)
-        try:
-            cached = hashes.get(key)
-        except TypeError:
-            # Semantic terms can contain values that Python cannot use as dict keys.
-            return _hash(label, preimage)
+        cached = hashes.get(key)
         if cached is None:
             cached = hashes[key] = _hash(label, preimage)
         return cached
@@ -279,12 +301,6 @@ class IdentityChainsMixin(ABC):
     def _identity_symmetry(self, inputs: tuple[StreamProtocol, ...]) -> ArgumentGroup:
         """Group inputs according to the producer's argument symmetry."""
         return inputs
-
-    def _identity_input_symmetry(
-        self, inputs: tuple[StreamProtocol, ...]
-    ) -> InputSymmetry | None:
-        """Return positional grouping when it differs from argument order."""
-        return encode_input_symmetry(inputs, self._identity_symmetry)
 
     def _identity_node_pipeline_hash(
         self, hasher: SemanticHasherProtocol
@@ -349,7 +365,7 @@ class IdentityChainsMixin(ABC):
             )
 
         # Symmetric groups use structural ordering. Occurrences keep repeats.
-        group = self._identity_input_symmetry(inputs) if inputs else None
+        group = encode_input_symmetry(inputs, self._identity_symmetry)
         if group is None:
             group = list[InputSymmetry](range(len(inputs)))
         children = tuple(
