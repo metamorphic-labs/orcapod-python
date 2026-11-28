@@ -20,9 +20,11 @@ from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
 from orcapod.errors import (
+    ObserverEventsLostWarning,
     OrcapodDatabaseError,
     OrcapodDatabaseReadError,
     OrcapodDatabaseWriteError,
+    RowFailuresWarning,
 )
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
@@ -50,10 +52,12 @@ from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
 from orcapod.types import NodeConfig
 from orcapod.utils.database_errors import database_write_path, flush_best_effort
+from orcapod.utils.warning_utils import WarningLocation
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Coroutine, Mapping
     from pathlib import Path
+    from types import FrameType
 
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.pipeline.execution_context import ExecutionContext
@@ -127,6 +131,32 @@ def _with_counter(
     from orcapod.pipeline.composite_observer import CompositeObserver
 
     return CompositeObserver(observer, counter)._with_run_losses(losses)  # pyright: ignore[reportPrivateUsage, reportReturnType]  # forwards every hook; its **kwargs signatures do not match the protocol structurally
+
+
+def _warn_run_completion(
+    summary: RunSummary,
+    caller: FrameType,
+    *,
+    observer_location: WarningLocation | None = None,
+) -> None:
+    """Issue both completion warnings while preserving the row warning's precedence."""
+    row_warning: RowFailuresWarning | None = None
+    if not summary.ok:
+        try:
+            warn_row_failures(summary, caller)
+        except RowFailuresWarning as error:
+            row_warning = error
+    if summary.lost_observer_events:
+        try:
+            warn_lost_observer_events(
+                summary, observer_location or WarningLocation.from_frame(caller)
+            )
+        except ObserverEventsLostWarning as error:
+            if row_warning is None:
+                raise
+            raise row_warning from error
+    if row_warning is not None:
+        raise row_warning
 
 
 class PipelineJob(AbstractPipelineBase[JobNode]):
@@ -1129,13 +1159,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             lost_observer_events=losses.by_kind(),
         )
         caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warnings are shown
-        if not summary.ok:
-            warn_row_failures(summary, caller)
-        if summary.lost_observer_events:
-            warn_lost_observer_events(summary, caller)
+        _warn_run_completion(summary, caller)
         return summary
 
-    async def run_async(
+    def run_async(
         self,
         orchestrator: "AsyncPipelineOrchestrator | None" = None,
         observer: "ExecutionObserverProtocol | None" = None,
@@ -1143,7 +1170,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         commit_every_rows: int = 100,
         *,
         load_only: bool = False,
-    ) -> RunSummary:
+    ) -> Coroutine[Any, Any, RunSummary]:
         """Execute the job with the async orchestrator, from async code.
 
         The awaitable form of ``run``: ``await job.run_async()`` runs on the caller's
@@ -1161,7 +1188,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only: As for ``run``.
 
         Returns:
-            The run's ``RunSummary``, as ``run`` returns.
+            A coroutine that returns the run's ``RunSummary``.
 
         Raises:
             TypeError: If ``orchestrator`` is not an ``AsyncPipelineOrchestrator``;
@@ -1171,6 +1198,28 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             OrcapodDatabaseWriteError: As for ``run``.
             OrcapodDatabaseReadError: As for ``run``.
         """
+        # A scheduler may resume the coroutine after its caller has moved on.
+        caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]
+        return self._run_async(
+            orchestrator,
+            observer,
+            materialize_results,
+            commit_every_rows,
+            load_only=load_only,
+            observer_location=WarningLocation.from_frame(caller),
+        )
+
+    async def _run_async(
+        self,
+        orchestrator: AsyncPipelineOrchestrator | None,
+        observer: ExecutionObserverProtocol | None,
+        materialize_results: bool,
+        commit_every_rows: int,
+        *,
+        load_only: bool,
+        observer_location: WarningLocation,
+    ) -> RunSummary:
+        """Execute the job and warn on completion using the captured call site."""
         from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 
         if orchestrator is None:
@@ -1206,11 +1255,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             asynchronous=True,
             lost_observer_events=losses.by_kind(),
         )
-        caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warnings are shown
-        if not summary.ok:
-            warn_row_failures(summary, caller)
-        if summary.lost_observer_events:
-            warn_lost_observer_events(summary, caller)
+        caller = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]  # keep the existing row warning location
+        _warn_run_completion(summary, caller, observer_location=observer_location)
         return summary
 
     def _prepare_run(

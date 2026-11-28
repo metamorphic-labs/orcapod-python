@@ -22,11 +22,9 @@ Example::
 
 from __future__ import annotations
 
-from copy import copy
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.pipeline.observer import NoOpLogger
-from orcapod.pipeline.observer_losses import RunLossObserver
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
 
@@ -57,18 +55,32 @@ class CompositeObserver:
             *[o.contextualize(*identity_path) for o in self._observers]
         )
 
-    def _with_run_losses(self, losses: RunLosses) -> Self:
-        """Copy this composite and bind its built-in children to a job execution."""
-        observer = copy(self)
-        observer._observers = [
-            child._with_run_losses(losses)
-            if isinstance(child, CompositeObserver)
-            else child.with_run_losses(losses)
-            if isinstance(child, RunLossObserver)
-            else child
-            for child in self._observers
-        ]
-        return observer
+    def _with_run_losses(self, losses: RunLosses) -> CompositeObserver:
+        """Bind concrete built-in children while preserving custom observer instances."""
+        from orcapod.pipeline.logging_observer import (
+            LoggingObserver,
+            _ContextualizedLoggingObserver,  # pyright: ignore[reportPrivateUsage]
+        )
+        from orcapod.pipeline.status_observer import (
+            StatusObserver,
+            _ContextualizedStatusObserver,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        built_ins = (
+            LoggingObserver,
+            StatusObserver,
+            _ContextualizedLoggingObserver,
+            _ContextualizedStatusObserver,
+        )
+        children: list[Any] = []
+        for child in self._observers:
+            # Custom hooks must keep running on the observer the caller supplied.
+            if type(child) is CompositeObserver:
+                child = child._with_run_losses(losses)
+            elif type(child) in built_ins:
+                child = child.with_run_losses(losses)
+            children.append(child)
+        return CompositeObserver(*children)
 
     def on_run_start(self, run_id: str, **kwargs: Any) -> None:
         for o in self._observers:

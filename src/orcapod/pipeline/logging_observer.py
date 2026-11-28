@@ -110,33 +110,33 @@ class DataLogger:
         """
         import pyarrow as pa
 
-        log_id = uuid7().bytes
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        # Context columns — prefixed with "_log_" to follow system column conventions
-        columns: dict[str, pa.Array] = {
-            "_log_id": pa.array([log_id], type=pa.binary(16)),
-            "_log_run_id": pa.array([self._run_id], type=pa.large_utf8()),
-            "_log_timestamp": pa.array([timestamp], type=pa.large_utf8()),
-        }
-
-        # Execution output columns from kwargs — prefixed with "_log_"
-        for key, value in kwargs.items():
-            col_name = f"_log_{key}"
-            if isinstance(value, bool):
-                columns[col_name] = pa.array([value], type=pa.bool_())
-            else:
-                columns[col_name] = pa.array(
-                    [str(value) if value is not None else None],
-                    type=pa.large_utf8(),
-                )
-
-        # Dynamic tag columns — each tag key becomes its own column (unprefixed)
-        for key, value in self._tag_data.items():
-            columns[key] = pa.array([str(value)], type=pa.large_utf8())
-
-        row = pa.table(columns)
         try:
+            log_id = uuid7().bytes
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            # Context columns — prefixed with "_log_" to follow system column conventions
+            columns: dict[str, pa.Array[Any]] = {
+                "_log_id": pa.array([log_id], type=pa.binary(16)),
+                "_log_run_id": pa.array([self._run_id], type=pa.large_utf8()),
+                "_log_timestamp": pa.array([timestamp], type=pa.large_utf8()),
+            }
+
+            # Execution output columns from kwargs — prefixed with "_log_"
+            for key, value in kwargs.items():
+                col_name = f"_log_{key}"
+                if isinstance(value, bool):
+                    columns[col_name] = pa.array([value], type=pa.bool_())
+                else:
+                    columns[col_name] = pa.array(
+                        [str(value) if value is not None else None],
+                        type=pa.large_utf8(),
+                    )
+
+            # Dynamic tag columns — each tag key becomes its own column (unprefixed)
+            for key, value in self._tag_data.items():
+                columns[key] = pa.array([str(value)], type=pa.large_utf8())
+
+            row = pa.Table.from_pydict(columns)
             self._db.add_record(self._log_path, log_id, row, flush=True)
         except Exception as error:
             # The run goes on: its results do not depend on this row. The loss is

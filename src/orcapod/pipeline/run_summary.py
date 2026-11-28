@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
     from orcapod.pipeline.restrictions import RestrictedSource
     from orcapod.types import Condition, SchemaLike
+    from orcapod.utils.warning_utils import WarningLocation
 
 _NOOP_LOGGER = NoOpLogger()
 _ASYNC_ATTRIBUTION_NOTE = (
@@ -455,7 +456,7 @@ def warn_row_failures(summary: RunSummary, caller: FrameType) -> None:
     warn_at_frame(summary.failures_message(), RowFailuresWarning, caller)
 
 
-def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
+def warn_lost_observer_events(summary: RunSummary, location: WarningLocation) -> None:
     """Issue the run's ``ObserverEventsLostWarning``, at the end of the run (ITL-1556).
 
     At the end and not at the first loss: the count and each kind's first error are
@@ -466,19 +467,17 @@ def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
 
     Args:
         summary: The run's summary, with lost observer events.
-        caller: The frame that called ``run``; the warning is shown at its line.
+        location: The line that called ``run`` or ``run_async``.
     """
     from orcapod.errors import ObserverEventsLostWarning
-    from orcapod.utils.warning_utils import warn_at_frame
 
-    warn_at_frame(
+    location.warn(
         "Observer events were not recorded in this run: "
         + f"{summary.lost_observer_events_message()}. The run's results are not "
         + "affected, but its status and log records are incomplete. Each failed "
         + "write was logged with its traceback; the counts are in the run "
         + "summary's lost_observer_events.",
         ObserverEventsLostWarning,
-        caller,
     )
 
 

@@ -9,6 +9,7 @@ first error's text, and one ``ObserverEventsLostWarning`` is issued at the end o
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import threading
 import warnings
@@ -22,7 +23,7 @@ from typing_extensions import override
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.errors import ObserverEventsLostWarning
+from orcapod.errors import ObserverEventsLostWarning, RowFailuresWarning
 from orcapod.pipeline import (
     AsyncPipelineOrchestrator,
     CompositeObserver,
@@ -60,6 +61,29 @@ LABEL = "described"
 @function_pod(output_keys=("n", "s"))
 def describe(d1: int, d3: str) -> tuple[int, str]:
     """Return ``d1 + 1`` and ``d3`` doubled."""
+    return d1 + 1, d3 + d3
+
+
+@function_pod(output_keys=("n", "s"))
+def describe_and_log(d1: int, d3: str) -> tuple[int, str]:
+    """Log a filename before returning the row's result."""
+    logging.getLogger(__name__).warning("filename: bad\udcff")
+    return d1 + 1, d3 + d3
+
+
+@function_pod(output_keys=("n", "s"))
+def describe_except_first(d1: int, d3: str) -> tuple[int, str]:
+    """Raise for one of the six input rows."""
+    if d1 == 10:
+        raise ValueError("bad row")
+    return d1 + 1, d3 + d3
+
+
+@function_pod(output_keys=("n", "s"))
+def describe_except_unencodable_error(d1: int, d3: str) -> tuple[int, str]:
+    """Raise with a filesystem-decoded filename for the first row."""
+    if d1 == 10:
+        raise ValueError("filename: bad\udcff")
     return d1 + 1, d3 + d3
 
 
@@ -119,11 +143,13 @@ def _database(accept_first: int | None = 0, *, error: type[OSError] = OSError) -
     return _RefusingDatabase(InMemoryArrowDatabase(), _Refusals(accept_first, error))
 
 
-def _job(arrangement: Arrangement, store: Any = None) -> PipelineJob:
+def _job(
+    arrangement: Arrangement, store: Any = None, *, pod: Any = describe
+) -> PipelineJob:
     """``MAIN`` in ``arrangement`` feeding ``describe`` under ``LABEL``."""
     job = PipelineJob(name="losses", database=store or InMemoryArrowDatabase())
     with job:
-        describe.pod(make_source(MAIN, arrangement), label=LABEL)
+        pod.pod(make_source(MAIN, arrangement), label=LABEL)
     return job
 
 
@@ -310,6 +336,154 @@ def test_run_async_reports_lost_events(arrangement: Arrangement) -> None:
     ]
     assert len(lost_warnings) == 1
     assert _rows(job) == EXPECTED_ROWS
+
+
+class _CompletionCounter:
+    """An observer subclass must receive its own lifecycle events."""
+
+    finished: int = 0
+
+    def __copy__(self) -> Any:
+        """Require lifecycle hooks to use the original instance."""
+        raise AssertionError("custom observers cannot be copied")
+
+
+class _CustomComposite(_CompletionCounter, CompositeObserver):
+    """A composite with a stateful lifecycle hook."""
+
+    @override
+    def on_run_end(self, run_id: str) -> None:
+        self.finished += 1
+        super().on_run_end(run_id)
+
+
+class _CustomStatus(_CompletionCounter, StatusObserver):
+    """A status observer with a stateful lifecycle hook."""
+
+    @override
+    def on_run_end(self, run_id: str) -> None:
+        self.finished += 1
+        super().on_run_end(run_id)
+
+
+class _CustomLogging(_CompletionCounter, LoggingObserver):
+    """A logging observer with a stateful lifecycle hook."""
+
+    @override
+    def on_run_end(self, run_id: str) -> None:
+        self.finished += 1
+        super().on_run_end(run_id)
+
+
+@pytest.fixture(params=["sync", "async", "run_async"])
+def run_job(request: pytest.FixtureRequest) -> Callable[[PipelineJob, Any], RunSummary]:
+    """Run a job through each public run path."""
+    if request.param == "run_async":
+        return lambda job, observer: asyncio.run(job.run_async(observer=observer))
+    return lambda job, observer: job.run(
+        orchestrator=ORCHESTRATORS[request.param](), observer=observer
+    )
+
+
+@pytest.mark.parametrize("kind", ["composite", "status", "logging"])
+def test_custom_observers_keep_their_lifecycle(
+    kind: str,
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+) -> None:
+    """Job accounting leaves the caller's custom observer in place."""
+    observers = {
+        "composite": _CustomComposite(StatusObserver(InMemoryArrowDatabase())),
+        "status": _CustomStatus(InMemoryArrowDatabase()),
+        "logging": _CustomLogging(InMemoryArrowDatabase()),
+    }
+    observer = observers[kind]
+    job = _job(arrangement)
+
+    assert run_job(job, observer).ok
+    assert observer.finished == 1
+    assert _rows(job) == EXPECTED_ROWS
+
+
+def test_unencodable_log_event_preserves_rows(
+    arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
+) -> None:
+    """A filename containing a surrogate can lose a log row but not a result."""
+    observer = LoggingObserver(InMemoryArrowDatabase())
+    job = _job(arrangement, pod=describe_and_log)
+
+    with pytest.warns(ObserverEventsLostWarning, match="UnicodeEncodeError") as caught:
+        summary = run_job(job, observer)
+
+    assert len(caught) == 1
+    assert summary.nodes[LABEL].computed == N_ROWS
+    assert summary.ok
+    assert summary.lost_observer_events["logging"].count == N_ROWS
+    assert _rows(job) == EXPECTED_ROWS
+
+
+def test_promoted_row_warning_still_reports_observer_losses(
+    arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
+) -> None:
+    """A completed run reports losses even when the row warning raises."""
+    job = _job(arrangement, pod=describe_except_first)
+    observer = StatusObserver(_database())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ObserverEventsLostWarning)
+        warnings.simplefilter("error", RowFailuresWarning)
+        with pytest.raises(RowFailuresWarning):
+            _ = run_job(job, observer)
+
+    summary = job.last_run
+    assert summary is not None
+    assert summary.nodes[LABEL].computed == N_ROWS - 1
+    assert summary.nodes[LABEL].failed == 1
+    assert summary.lost_observer_events["status"].count == 2 * N_ROWS
+    assert [warning.category for warning in caught] == [ObserverEventsLostWarning]
+
+
+def test_unencodable_status_event_preserves_other_rows(
+    arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
+) -> None:
+    """A status row with an unencodable error is lost and the job still finishes."""
+    job = _job(arrangement, pod=describe_except_unencodable_error)
+    observer = StatusObserver(InMemoryArrowDatabase())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RowFailuresWarning)
+        warnings.simplefilter("always", ObserverEventsLostWarning)
+        summary = run_job(job, observer)
+
+    assert summary.nodes[LABEL].computed == N_ROWS - 1
+    assert summary.nodes[LABEL].failed == 1
+    assert summary.lost_observer_events["status"].count == 1
+    assert summary.lost_observer_events["status"].first_error.startswith(
+        "UnicodeEncodeError:"
+    )
+    assert [warning.category for warning in caught] == [
+        RowFailuresWarning,
+        ObserverEventsLostWarning,
+    ]
+    assert _rows(job) == [row for row in EXPECTED_ROWS if row[3] != 11]
+
+
+def test_scheduled_run_async_warning_points_to_the_call(
+    arrangement: Arrangement,
+) -> None:
+    """Scheduling the coroutine later still attributes the loss warning to its call."""
+    job = _job(arrangement)
+    observer = StatusObserver(_database())
+    frame = inspect.currentframe()
+    assert frame is not None
+
+    with pytest.warns(ObserverEventsLostWarning) as caught:
+        call_line = frame.f_lineno + 1
+        pending = job.run_async(observer=observer)
+        _ = asyncio.run(pending)
+
+    assert len(caught) == 1
+    assert (caught[0].filename, caught[0].lineno) == (__file__, call_line)
 
 
 def test_a_load_only_run_reports_lost_events(

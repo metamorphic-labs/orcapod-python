@@ -5,7 +5,9 @@ from __future__ import annotations
 import linecache
 import sys
 import warnings
+from dataclasses import dataclass
 from types import FrameType
+from typing import Any
 
 
 def outside_orcapod_stacklevel() -> int:
@@ -27,6 +29,32 @@ def outside_orcapod_stacklevel() -> int:
         frame = frame.f_back
         level += 1
     return 2
+
+
+@dataclass(frozen=True)
+class WarningLocation:
+    """Capture a warning's location without retaining the caller's frame."""
+
+    filename: str
+    lineno: int
+    module_globals: dict[str, Any]
+
+    @classmethod
+    def from_frame(cls, frame: FrameType) -> WarningLocation:
+        """Capture the frame's current line and module."""
+        return cls(frame.f_code.co_filename, frame.f_lineno, frame.f_globals)
+
+    def warn(self, message: str, category: type[Warning]) -> None:
+        """Issue a warning at this location, respecting the active filters."""
+        _ = linecache.lazycache(self.filename, self.module_globals)
+        warnings.warn_explicit(
+            message,
+            category,
+            self.filename,
+            self.lineno,
+            module=self.module_globals.get("__name__"),
+            registry=None,
+        )
 
 
 def warn_at_frame(message: str, category: type[Warning], frame: FrameType) -> None:
@@ -65,13 +93,4 @@ def warn_at_frame(message: str, category: type[Warning], frame: FrameType) -> No
         category: The warning's class.
         frame: The frame whose file, line and module name the warning is shown at.
     """
-    filename = frame.f_code.co_filename
-    _ = linecache.lazycache(filename, frame.f_globals)
-    warnings.warn_explicit(
-        message,
-        category,
-        filename,
-        frame.f_lineno,
-        module=frame.f_globals.get("__name__"),
-        registry=None,
-    )
+    WarningLocation.from_frame(frame).warn(message, category)
