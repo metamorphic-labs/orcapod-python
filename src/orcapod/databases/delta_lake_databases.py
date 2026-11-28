@@ -1929,9 +1929,10 @@ class DeltaTableDatabase:
         if record_key in self._absent_tables:
             return None
 
-        delta_table = self._load_delta_table(
-            self._get_table_uri(record_path), self._path_prefix + record_path
-        )
+        try:
+            delta_table = self._load_delta_table(self._get_table_uri(record_path))
+        except Exception as load_error:
+            raise self._read_failed(record_path) from load_error
         if delta_table is None:
             # Table doesn't exist: remembered until the next flush (ITL-1173).
             self._absent_tables.add(record_key)
@@ -1940,42 +1941,35 @@ class DeltaTableDatabase:
             logger.debug(f"Loaded existing Delta table for {record_key}")
         return delta_table
 
-    def _load_delta_table(
-        self, table_uri: str, record_path: tuple[str, ...]
-    ) -> deltalake.DeltaTable | None:
+    def _load_delta_table(self, table_uri: str) -> deltalake.DeltaTable | None:
         """Open the current Delta log, checking a missing log for existing data.
 
         Args:
             table_uri: The table's storage location.
-            record_path: Full path including the database view's prefix.
 
         Returns:
             The loaded table, or ``None`` when neither a log nor data files exist.
 
         Raises:
-            OrcapodDatabaseReadError: If the log cannot be opened or the location
-                cannot be checked for data files.
+            FileNotFoundError: If the folder holds data files and the log is missing.
         """
         from deltalake.exceptions import TableNotFoundError
 
         options = self._storage_options or None
         try:
-            try:
-                return deltalake.DeltaTable(table_uri, storage_options=options)
-            except TableNotFoundError as missing_log:
-                if not self._has_delta_data_files(table_uri):
-                    return None
-                for delay in _MISSING_LOG_RETRY_DELAYS:
-                    sleep(delay)
-                    try:
-                        return deltalake.DeltaTable(table_uri, storage_options=options)
-                    except TableNotFoundError:
-                        continue
-                raise FileNotFoundError(
-                    f"Found Parquet data files without a readable {_DELTA_LOG_DIRECTORY}"
-                ) from missing_log
-        except Exception as load_error:
-            raise OrcapodDatabaseReadError(table_uri, record_path) from load_error
+            return deltalake.DeltaTable(table_uri, storage_options=options)
+        except TableNotFoundError as missing_log:
+            if not self._has_delta_data_files(table_uri):
+                return None
+            for delay in _MISSING_LOG_RETRY_DELAYS:
+                sleep(delay)
+                try:
+                    return deltalake.DeltaTable(table_uri, storage_options=options)
+                except TableNotFoundError:
+                    continue
+            raise FileNotFoundError(
+                f"Found Parquet data files without a readable {_DELTA_LOG_DIRECTORY}"
+            ) from missing_log
 
     def _has_delta_data_files(self, table_uri: str) -> bool:
         """Check for Parquet files in the table folder without visiting child tables."""
@@ -2153,16 +2147,14 @@ class DeltaTableDatabase:
 
     def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
         """Read the latest Delta schema from the log or the table's first batch."""
-        table = self._load_delta_table(
-            self._get_table_uri(record_path), self._path_prefix + record_path
-        )
-        if table is None:
-            pending = self._pending_batches.get(self._get_record_key(record_path))
-            return None if pending is None else pending.schema
         try:
-            return pa.schema(_held_columns(table).values())
+            table = self._load_delta_table(self._get_table_uri(record_path))
+            if table is not None:
+                return pa.schema(_held_columns(table).values())
         except Exception as exc:
             raise self._read_failed(record_path) from exc
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        return None if pending is None else pending.schema
 
     def _ensure_record_id_column(
         self, arrow_data: pa.Table, record_id: str | bytes
@@ -3845,7 +3837,12 @@ class DeltaTableDatabase:
         # A column whose type Delta would not give back is written in its integer
         # form with its type recorded (ITL-928).
         combined_table = to_delta_layout(original_table)
-        delta_table = self._load_delta_table(table_uri, abs_path_components)
+        try:
+            delta_table = self._load_delta_table(table_uri)
+        except Exception as load_error:
+            raise OrcapodDatabaseReadError(
+                table_uri, abs_path_components
+            ) from load_error
 
         check = self._pending_commits.schema_check(record_key)
         if check is not None:
