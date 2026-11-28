@@ -15,6 +15,11 @@ representative, not every Arrow type: dictionary-encoded columns are refused by 
 stream before they reach a database (the dictionary row uses a raw Arrow table), and
 union, run-end-encoded and list-view types are not covered.
 
+Delta accepts an Arrow extension array on a struct child when the column can round-trip
+without recording its type and the extension field has no extra field metadata.
+An extension field supplied as annotated storage is refused at nested positions so the
+write verdict stays the same whether or not Arrow has registered the identifier.
+
 What a cell says:
 
 - **kept**: read back exactly: the Arrow type with the name, nullability and metadata of

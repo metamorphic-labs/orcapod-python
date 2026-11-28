@@ -28,6 +28,7 @@ from orcapod.databases._row_index import (
 )
 from orcapod.databases.delta_arrow_types import (
     ARROW_TYPE_KEY,
+    _has_extension_type,  # pyright: ignore[reportPrivateUsage]
     first_column_out_of_stored_range,
     from_delta_layout,
     merged_type,
@@ -1384,8 +1385,8 @@ def _unsupported_nested_extension(
         field: The column or nested field to check.
         extension_slot: An enclosing list item or dictionary value, where no
             Arrow extension type is supported, even through a struct.
-        annotation_slot: An enclosing list item or map key or value, where
-            a stored annotation can restore as a different field once registered.
+        annotation_slot: The nested position. A stored annotation at any nested
+            position can restore as a different field once registered.
 
     Returns:
         A description of the unsupported type and nesting, or ``None``.
@@ -1394,6 +1395,8 @@ def _unsupported_nested_extension(
     if isinstance(arrow_type, pa.BaseExtensionType):
         if extension_slot is not None:
             return f"an Arrow extension type in {extension_slot}"
+        if annotation_slot is not None and field.metadata:
+            return f"an Arrow extension field with field metadata in {annotation_slot}"
         return None
     if annotation_slot is not None and b"ARROW:extension:name" in (
         field.metadata or {}
@@ -1436,10 +1439,77 @@ def _unsupported_nested_extension(
         reason = _unsupported_nested_extension(
             arrow_type.field(i),
             extension_slot=extension_slot,
-            annotation_slot=annotation_slot,
+            annotation_slot=annotation_slot or "a struct field",
         )
         if reason is not None:
             return reason
+    return None
+
+
+_UNRECORDED_EXTENSION_SCALARS = frozenset(
+    {
+        pa.bool_(),
+        pa.int8(),
+        pa.int16(),
+        pa.int32(),
+        pa.int64(),
+        pa.float32(),
+        pa.float64(),
+        pa.string(),
+        pa.large_string(),
+        pa.binary(),
+        pa.large_binary(),
+        pa.date32(),
+    }
+)
+
+
+def _unrecorded_extension_part(arrow_type: pa.DataType) -> str | None:
+    """Describe a part of an extension column that needs Delta type recording.
+
+    A Python extension disables recording for its whole column. Keep only the
+    scalar types verified to round-trip without a record, and struct fields and
+    ordinary maps over those types. Apply the same rule to extension storage.
+
+    Args:
+        arrow_type: The composite column's type, or a type inside it.
+
+    Returns:
+        The first unsupported part, or ``None`` for a supported layout.
+    """
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        storage = arrow_type.storage_type
+        if storage != arrow_utils.normalize_to_large_types(storage, keep_null=True):
+            return f"extension storage type {storage} that Delta would widen"
+        return _unrecorded_extension_part(storage)
+    if pa.types.is_struct(arrow_type):
+        fields = list(arrow_type)
+    elif pa.types.is_map(arrow_type):
+        fields = [arrow_type.key_field, arrow_type.item_field]
+        if arrow_type.keys_sorted or any(field.metadata for field in fields):
+            return "a map with sorted keys or key/value field metadata"
+    elif arrow_type in _UNRECORDED_EXTENSION_SCALARS:
+        return None
+    else:
+        return f"the Arrow type {arrow_type}"
+    for field in fields:
+        part = _unrecorded_extension_part(field.type)
+        if part is not None:
+            return part
+    return None
+
+
+def _nested_extension_reason(field: "pa.Field[Any]") -> str | None:
+    """Describe the first unsupported logical type or layout in a column."""
+    reason = _unsupported_nested_extension(field)
+    if reason is not None:
+        return reason
+    if not isinstance(field.type, pa.BaseExtensionType) and _has_extension_type(
+        field.type
+    ):
+        part = _unrecorded_extension_part(field.type)
+        if part is not None:
+            return f"a nested extension that disables type recording with {part}"
     return None
 
 
@@ -2412,7 +2482,7 @@ class DeltaTableDatabase:
         unsupported = [
             (field, reason)
             for field in schema
-            if (reason := _unsupported_nested_extension(field)) is not None
+            if (reason := _nested_extension_reason(field)) is not None
         ]
         if unsupported:
             (field, reason), *others = unsupported

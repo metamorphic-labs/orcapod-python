@@ -120,3 +120,51 @@ def test_a_function_with_output_keys_differing_in_case_stops(
             _pair.pod(_source([1, 2], [1, 2]), label="fn")
         _run(job, use_async)
     assert not (tmp_path / "itl1403").exists()
+
+
+@pytest.mark.parametrize(
+    "registered", [False, True], ids=["unregistered", "registered"]
+)
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_annotated_list_reaches_delta_operator_log(
+    tmp_path: Path, use_async: bool, registered: bool
+) -> None:
+    """A tagged Arrow source carries annotated storage to the logging operator."""
+    from orcapod.contexts import get_default_context
+
+    path_type: Any = get_default_context().type_converter.python_type_to_arrow_type(
+        Path
+    )
+    metadata = {
+        b"ARROW:extension:name": (
+            path_type.extension_name.encode() if registered else b"itl1372.missing"
+        ),
+        b"ARROW:extension:metadata": path_type.__arrow_ext_serialize__(),
+    }
+    item = pa.field("item", path_type.storage_type, metadata=metadata)
+    extra = pa.LargeListArray.from_arrays(
+        pa.array([0, 1, 2], pa.int64()),
+        pa.array(["/one", "/two"], item.type),
+        type=pa.large_list(item),
+    )
+    source = ArrowTableSource(
+        pa.table({"k": [1, 2], "x": [10, 20], "extra": extra}),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        record_id_columns=["k"],
+        source_id="input",
+        infer_nullable=True,
+    )
+    database = DeltaTableDatabase(tmp_path)
+    job = PipelineJob(name="itl1372", database=database)
+    with job:
+        source.map_data({"x": "z"}, label="renamed")
+    job.nodes["renamed"].attach_databases(database, cache_mode=CacheMode.LOG)
+    with pytest.raises(OrcapodDatabaseWriteError) as error:
+        _run(job, use_async)
+    cause = error.value.__cause__
+    assert isinstance(cause, UnstorableColumnError)
+    assert cause.column == "extra"
+    assert "annotated storage in a list item" in cause.reason
+    database.flush()
+    assert database.list_table_paths() == []
