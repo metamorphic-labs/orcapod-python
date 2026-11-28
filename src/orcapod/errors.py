@@ -928,6 +928,28 @@ class SemiJoinIgnoredColumnWarning(UserWarning):
     """
 
 
+class PolarsFilterWarning(UserWarning):
+    """A ``PolarsFilter`` was built: it can change the values it passes through.
+
+    ``PolarsFilter`` passes every column of its input through Polars, also the columns
+    its predicates do not read, and Polars does not hold every Arrow type exactly. The
+    known case: a ``date64`` value that is not at midnight comes back at midnight, with
+    no error (ITL-1296). A ``decimal256`` column, read by a predicate or not, makes
+    Polars panic: the filter raises ``pyo3_runtime.PanicException``, a
+    ``BaseException`` that ``except Exception`` does not catch, and returns no row.
+    ``PolarsFilter`` is not recommended. ``Filter``
+    (``stream.filter(...)``) is the operator to use: it chooses rows with an Arrow mask
+    and passes every value through as it is.
+
+    The warning is issued every time a ``PolarsFilter`` is built (the class, or
+    ``stream.polars_filter(...)``), not once per process, in addition to the
+    ``ProvisionalHashWarning`` of a provisional operator.
+
+    To silence it, call ``warnings.filterwarnings("ignore",
+    category=PolarsFilterWarning)`` after importing Orcapod.
+    """
+
+
 class UpstreamFailedError(Exception):
     """An input channel's producer failed before it finished (ITL-1347).
 

@@ -27,6 +27,10 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.pipeline import PipelineJob
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 ROWS = [{"t": 10, "amp": 0.5}, {"t": 20, "amp": 0.25}]
 
 

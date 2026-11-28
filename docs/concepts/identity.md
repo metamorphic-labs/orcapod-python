@@ -279,7 +279,7 @@ hashes:
 - the order of the names, mapping entries or keywords of an argument that names several:
   the columns of `select_columns`, `drop_columns`, `drop_nulls` and the other selections,
   the entries of `map_tags`, `map_data` and `map_columns`, the constraints of
-  `polars_filter`, the conditions and keywords of `filter` (and the operands of its `&` and
+  `polars_filter` (not recommended: see [PolarsFilter](operators.md#polarsfilter)), the conditions and keywords of `filter` (and the operands of its `&` and
   `|` and the values of its `is_in`), `tag_only_columns`, `tags_as_data`;
 - the order of the inputs of an operator that declares itself commutative (`Join`), and of
   the inputs of a function pod (for the ordered operators, see the table of orders that
@@ -355,7 +355,8 @@ source and stream kind, the function pod forms and a job. Today these cases stil
 (the test marks each as an expected failure naming its issue); they are being fixed before
 data context v1 is frozen:
 
-- the order of `polars_filter`'s predicates is in its identity (ITL-1247, undecided);
+- the order of `polars_filter`'s predicates is in its identity (ITL-1247, undecided;
+  `polars_filter` is not recommended: see [PolarsFilter](operators.md#polarsfilter));
 - a function pod over data-tags: its content and pipeline hash and its node's stored paths
   depend on the input's tag order and table layout (ITL-1246);
 - a stream built directly from a table (`ArrowTableStream`): its content hash depends on

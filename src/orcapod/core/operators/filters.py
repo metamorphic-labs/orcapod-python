@@ -1,4 +1,5 @@
 import logging
+import sys
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, TypeAlias
 
@@ -8,9 +9,11 @@ import pyarrow as pa
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams import ArrowTableStream
+from orcapod.errors import PolarsFilterWarning
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
+from orcapod.utils.warning_utils import outside_orcapod_stacklevel, warn_at_frame
 
 if TYPE_CHECKING:
     import numpy as np
@@ -35,9 +38,36 @@ def _safe_text(value: object, write: Callable[[object], str]) -> str:
     return f"<{type(value).__name__}>"
 
 
-class PolarsFilter(UnaryOperator):
+_VALUE_WARNING = (
+    "PolarsFilter passes every column through Polars, also the columns its predicates "
+    "do not read, and can change values of types Polars does not hold exactly (known "
+    "case: a date64 value that is not at midnight comes back at midnight). It is not "
+    "recommended: use Filter (stream.filter(...)), which passes every value through as "
+    "it is."
+)
+"""The text of ``PolarsFilterWarning`` (ITL-1296)."""
+
+
+def warn_polars_filter_values() -> None:
+    """Issue ``PolarsFilterWarning``, shown at the first frame outside Orcapod.
+
+    Called every time a ``PolarsFilter`` is built, and by a load for a saved one it keeps
+    read-only without building it (ITL-1296). Each call has a fresh registry
+    (``warn_at_frame``), so Python's once-per-line rule hides no repeat.
     """
-    Operator that applies Polars filtering to a stream
+    caller = sys._getframe(outside_orcapod_stacklevel() - 1)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
+    warn_at_frame(_VALUE_WARNING, PolarsFilterWarning, caller)
+
+
+class PolarsFilter(UnaryOperator):
+    """Operator that applies Polars filtering to a stream. Not recommended: use ``Filter``.
+
+    Every column of the input passes through Polars, also the columns the predicates do
+    not read, and Polars does not hold every Arrow type exactly: a ``date64`` value that
+    is not at midnight comes back at midnight, with no error (ITL-1296). Building a
+    ``PolarsFilter`` therefore issues ``PolarsFilterWarning``, every time, in addition to
+    the once-per-process ``ProvisionalHashWarning``. ``Filter`` (``stream.filter(...)``)
+    chooses rows with an Arrow mask and passes every value through as it is.
     """
 
     # Data-tags (ITL-1023): handled.
@@ -62,6 +92,7 @@ class PolarsFilter(UnaryOperator):
         self.predicates = tuple(predicates)
         self.constraints = constraints if constraints is not None else {}
         super().__init__(**kwargs)
+        warn_polars_filter_values()
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         if len(self.predicates) == 0 and len(self.constraints) == 0:

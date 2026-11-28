@@ -1350,7 +1350,13 @@ data. The rules:
   A row built by `Data` still gives an untyped null the `large_string` type.
   PolarsFilter is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (arrow_utils.restore_column_types and
-  restore_schema_nullability). Every other operator takes its values from the input's Arrow
+  restore_schema_nullability). The round trip changes values (a date64 off midnight comes
+  back at midnight) and is not fixed (ITL-1296, deferred; developer, November 28, 2026):
+  building a PolarsFilter issues PolarsFilterWarning every time (not once per process; a
+  load warns once per saved PolarsFilter node, rebuilt or kept read-only; one helper,
+  filters.warn_polars_filter_values),
+  Filter is the filter the user documentation shows, and PolarsFilter is mentioned there
+  only with that warning. Every other operator takes its values from the input's Arrow
   arrays (take, a slice, list offsets; Join, SemiJoin, MergeJoin and GroupBy give
   Polars only prepared keys and row numbers), so its values are the input's, bit for bit.
   This holds for every operator, also one that passes its rows through unchanged (select,

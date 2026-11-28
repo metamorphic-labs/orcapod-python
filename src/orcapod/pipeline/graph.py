@@ -552,6 +552,14 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     saved_name = op_config.get("class_name")
                     if saved_name in PROVISIONAL_OPERATORS:
                         warn_provisional_operator(saved_name)
+                    if saved_name == "PolarsFilter":
+                        # Every load of a saved PolarsFilter warns, also one kept
+                        # read-only, whose constructor never runs (ITL-1296).
+                        from orcapod.core.operators.filters import (
+                            warn_polars_filter_values,
+                        )
+
+                        warn_polars_filter_values()
                 if operator is not None:
                     from orcapod.logical_types.identifier import (
                         LogicalTypeIdentifierError,
