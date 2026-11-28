@@ -159,6 +159,21 @@ class TestAccepted:
         assert read_hash == written_hash
 
 
+def test_plain_list_input_keeps_implicit_nullable_items() -> None:
+    """Both Python annotations describe the same Arrow schema and admit input nulls."""
+    plain = _source([None, 1], list[int])
+    optional = _source([None, 1], list[int | None])
+    assert plain.as_table().schema == optional.as_table().schema
+    assert plain.pipeline_hash() == optional.pipeline_hash()
+    assert _read_v(plain) == _read_v(optional)
+
+    @op.function_pod(output_keys="count")
+    def count_missing(v: list[int]) -> int:
+        return sum(value is None for value in v)
+
+    assert count_missing.pod(plain).as_table()["count"].to_pylist() == [1]
+
+
 class TestRaisedAtRead:
     """A stored None the read cannot restore raises instead of a wrong value."""
 

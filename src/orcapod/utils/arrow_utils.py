@@ -386,6 +386,83 @@ def shared_arrow_type(
     return None
 
 
+def nested_nullability_differences(
+    left_type: pa.DataType, right_type: pa.DataType
+) -> tuple[str, ...]:
+    """Find relative child paths when nested nullability is the only difference.
+
+    Compare large-normalized containers. Type widths, struct field names and
+    order, list length, map ordering, and logical identifiers still distinguish
+    types. For matching logical identifiers, compare the declared storage types
+    recursively.
+
+    Args:
+        left_type: The first declared Arrow type.
+        right_type: The second declared Arrow type.
+
+    Returns:
+        Paths to the differing fields, or an empty tuple if the types agree or
+        have any difference beyond nested nullability.
+    """
+    from orcapod.logical_types.canonical_form import (
+        EXTENSION_METADATA_KEY,
+        EXTENSION_NAME_KEY,
+    )
+    from orcapod.logical_types.identifier import arrow_type_identifier
+
+    paths: list[str] = []
+
+    def compare(left: pa.DataType, right: pa.DataType, prefix: str) -> bool:
+        if isinstance(left, pa.ExtensionType) and isinstance(right, pa.ExtensionType):
+            if arrow_type_identifier(left) != arrow_type_identifier(right):
+                return False
+            return compare(left.storage_type, right.storage_type, prefix)
+        if left.id != right.id or left.num_fields != right.num_fields:
+            return False
+        if (
+            isinstance(left, pa.FixedSizeListType)
+            and isinstance(right, pa.FixedSizeListType)
+            and left.list_size != right.list_size
+        ):
+            return False
+        if (
+            isinstance(left, pa.MapType)
+            and isinstance(right, pa.MapType)
+            and left.keys_sorted != right.keys_sorted
+        ):
+            return False
+        if not isinstance(
+            left,
+            (
+                pa.StructType,
+                pa.ListType,
+                pa.LargeListType,
+                pa.FixedSizeListType,
+                pa.MapType,
+            ),
+        ):
+            return shared_arrow_type(left, right) is not None
+        for index in range(left.num_fields):
+            a, b = left.field(index), right.field(index)
+            if isinstance(left, pa.StructType) and a.name != b.name:
+                return False
+            if any(
+                (a.metadata or {}).get(key) != (b.metadata or {}).get(key)
+                for key in (EXTENSION_NAME_KEY, EXTENSION_METADATA_KEY)
+            ):
+                return False
+            path = f"{prefix}{a.name}"
+            if not compare(a.type, b.type, f"{path}."):
+                return False
+            if a.nullable != b.nullable:
+                paths.append(path)
+        return True
+
+    left = normalize_to_large_types(left_type, keep_null=True)
+    right = normalize_to_large_types(right_type, keep_null=True)
+    return tuple(paths) if compare(left, right, "") else ()
+
+
 def normalize_table_to_large_types(
     table: "pa.Table", *, keep_null: bool = False
 ) -> "pa.Table":

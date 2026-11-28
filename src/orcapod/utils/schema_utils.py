@@ -210,7 +210,9 @@ def extract_function_schemas_with_container(
         output_typespec: Optional type specification for return values. Can be either:
             - A dict mapping output keys to types (TypeSpec)
             - A sequence of types that will be mapped to output_keys in order
-            These types override any inferred types from the function's return annotation.
+            For each specified output, this is the declared type used for validation,
+            including nested values. Otherwise the declared type comes from the return
+            annotation.
 
     Returns:
         A tuple containing:
