@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ import pytest
 from deltalake.exceptions import DeltaProtocolError
 
 from orcapod.databases import DeltaTableDatabase
+from orcapod.databases import delta_lake_databases
 from orcapod.errors import (
     InputValidationError,
     OrcapodDatabaseReadError,
@@ -146,6 +148,93 @@ READS: dict[str, Callable[[DeltaTableDatabase], object]] = {
         PATH, {"x": 1}
     ),
 }
+
+
+@pytest.fixture
+def missing_log(
+    base: Path, stored: DeltaTableDatabase, monkeypatch: pytest.MonkeyPatch
+) -> DeltaTableDatabase:
+    """Open a fresh handle after removing the log from a table with stored rows."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    directory = table_dir(base)
+    assert any(directory.glob("*.parquet"))
+    shutil.rmtree(directory / "_delta_log")
+    return DeltaTableDatabase(base_path=base)
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        *READS.values(),
+        lambda db: db.get_table_schema(PATH),
+        lambda db: db.table_exists(PATH),
+    ],
+    ids=[*READS, "get_table_schema", "table_exists"],
+)
+def test_missing_log_is_a_read_error(
+    base: Path,
+    missing_log: DeltaTableDatabase,
+    read: Callable[[DeltaTableDatabase], object],
+) -> None:
+    """Every read refuses to treat a folder with orphaned data as absent."""
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+        read(missing_log)
+    assert_names_table(info.value, base)
+
+
+def test_flush_refuses_a_missing_log(
+    base: Path, missing_log: DeltaTableDatabase
+) -> None:
+    """Flushing to a folder with orphaned data writes no files or log."""
+    directory = table_dir(base)
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    missing_log.add_records(
+        PATH, rows([b"c"], pa.array([3], pa.int64())), record_id_column="rid"
+    )
+
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+        missing_log.flush()
+
+    assert_names_table(info.value, base)
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+
+def test_flush_can_load_a_log_published_during_the_retry(
+    base: Path, stored: DeltaTableDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent first commit can publish its log after its data is visible."""
+    log = table_dir(base) / "_delta_log"
+    unpublished = base / "unpublished"
+    db = DeltaTableDatabase(base_path=base)
+    db.add_records(
+        PATH, rows([b"c"], pa.array([3], pa.int64())), record_id_column="rid"
+    )
+    log.rename(unpublished)
+    monkeypatch.setattr(
+        delta_lake_databases, "sleep", lambda _delay: unpublished.rename(log)
+    )
+
+    db.flush()
+
+    result = db.get_all_records(PATH)
+    assert result is not None
+    assert result.sort_by("x").column("x").to_pylist() == [1, 2, 3]
+
+
+def test_empty_table_folder_can_be_created(base: Path) -> None:
+    """An empty folder still accepts its first commit."""
+    table_dir(base).mkdir(parents=True)
+    db = DeltaTableDatabase(base_path=base)
+    assert db.get_all_records(PATH) is None
+    db.add_records(
+        PATH,
+        rows([b"a"], pa.array([1], pa.int64())),
+        record_id_column="rid",
+        flush=True,
+    )
+    result = db.get_all_records(PATH)
+    assert result is not None
+    assert result.column("x").to_pylist() == [1]
 
 
 class TestUnreadableTable:
