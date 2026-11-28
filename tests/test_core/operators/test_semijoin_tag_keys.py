@@ -431,19 +431,80 @@ async def test_empty_right_after_operator_node_is_rewired() -> None:
     assert isinstance(node, OperatorJobNode)
     node.upstreams = (other, empty)
 
-    left_channel: Channel[Row] = Channel(buffer_size=16)
-    right_channel: Channel[Row] = Channel(buffer_size=16)
-    output: Channel[Row] = Channel(buffer_size=16)
-    for row in other.iter_data():
-        await left_channel.writer.send(row)
-    await left_channel.writer.close()
-    await right_channel.writer.close()
-    await node.async_execute([left_channel.reader, right_channel.reader], output.writer)
-    actual = await output.reader.collect()
+    actual = await _execute_node_rows(node, other, empty, run_async=True)
     expected = list(node.execute(other, empty).iter_data())
     assert len(expected) == 3
     assert_equivalent(expected, actual)
     assert_same_provenance(expected, actual)
+
+
+async def _execute_node_rows(
+    node: OperatorJobNode,
+    left: StreamProtocol,
+    right: StreamProtocol,
+    *,
+    run_async: bool,
+) -> list[Row]:
+    """Execute a job node on its current inputs and return the rows it produces."""
+    if not run_async:
+        return list(node.execute(left, right).iter_data())
+    channels = [Channel[Row](16), Channel[Row](16)]
+    output: Channel[Row] = Channel(16)
+    for stream, channel in zip((left, right), channels):
+        for row in stream.iter_data():
+            await channel.writer.send(row)
+        await channel.writer.close()
+    await node.async_execute([channel.reader for channel in channels], output.writer)
+    return await output.reader.collect()
+
+
+@pytest.mark.parametrize("run_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_rewired_semijoin_warns_once_for_the_same_names(run_async: bool) -> None:
+    """Filtering an input keeps the ignored names and does not repeat their warning."""
+    left, right = left_source(), right_same_tag_other_y()
+    job = PipelineJob(name="rewired_warning", database=InMemoryArrowDatabase())
+    with pytest.warns(SemiJoinIgnoredColumnWarning) as record, job:
+        _ = SemiJoin()(left, right, label="step")
+    assert_warned_once(list(record), [("y", "data", "data")])
+    node = job.nodes["step"]
+    assert isinstance(node, OperatorJobNode)
+    filtered = left.polars_filter(x=10)
+    assert filtered.pipeline_hash() != left.pipeline_hash()
+    node.upstreams = (filtered, right)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        rows = await _execute_node_rows(node, filtered, right, run_async=run_async)
+    assert [tag["id"] for tag, _ in rows] == [1]
+
+
+@pytest.mark.parametrize("run_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_rewired_semijoin_new_warning_is_retried(run_async: bool) -> None:
+    """A new ignored name warns, including after each failed attempt to warn."""
+    left, right = left_source(), right_same_tag_other_y()
+    job = PipelineJob(name="rewired_new_warning", database=InMemoryArrowDatabase())
+    with job:
+        _ = SemiJoin()(left, right_tags_only(), label="step")
+    node = job.nodes["step"]
+    assert isinstance(node, OperatorJobNode)
+    filtered = left.polars_filter(x=10)
+    node.upstreams = (filtered, right)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        for _ in range(2):
+            with pytest.raises(SemiJoinIgnoredColumnWarning, match="'y'"):
+                _ = await _execute_node_rows(node, filtered, right, run_async=run_async)
+    with pytest.warns(SemiJoinIgnoredColumnWarning, match="'y'") as record:
+        rows = await _execute_node_rows(node, filtered, right, run_async=run_async)
+    assert len(record) == 1
+    assert [tag["id"] for tag, _ in rows] == [1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        repeated = await _execute_node_rows(node, filtered, right, run_async=run_async)
+    assert [tag["id"] for tag, _ in repeated] == [1]
 
 
 @pytest.mark.parametrize("shared_tags", [True, False], ids=["keyed", "unkeyed"])

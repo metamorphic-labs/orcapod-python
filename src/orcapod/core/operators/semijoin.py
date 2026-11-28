@@ -148,7 +148,8 @@ class SemiJoin(BinaryOperator):
 
         One application is validated more than once: when the operator is
         called, when a job builds its node and when the sync orchestrator runs
-        it over the rows it rebuilt. The ignored names are remembered on the
+        it over the rows it rebuilt. A rewired async job can reach execution
+        without validation. Both paths remember the ignored names on the
         operator, so each set is warned about once.
 
         Args:
@@ -406,16 +407,9 @@ class SemiJoin(BinaryOperator):
                     # columns, ITL-1088) and build index
                     common_keys = self._match_keys(tuple(tag.keys()), right_tag_keys)
                     # A job can reach execution without validating these inputs.
-                    # Warn about shared non-key names from the first rows.
                     if validated_keys is None:
-                        ignored = self._ignored_shared_names(
-                            tag.keys(),
-                            data.keys(),
-                            right_tag_keys,
-                            right_rows[0][1].keys(),
-                        )
-                        if ignored:
-                            self._warn_ignored(ignored)
+                        assert left_stream is not None and right_stream is not None
+                        self._warn_once_per_application(left_stream, right_stream)
 
                     if not common_keys:
                         # No common keys — pass all left rows through
