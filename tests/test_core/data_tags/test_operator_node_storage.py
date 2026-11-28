@@ -471,7 +471,7 @@ def test_operator_storage_keeps_one_declared_token_schema(
     )
 
     def stream(mixed: bool) -> ArrowTableStream:
-        rows: list[dict[str, int | str | list[list[str]] | None]] = [
+        rows: list[dict[str, int | str | list[list[int]] | list[list[str]] | None]] = [
             {
                 "k": 0,
                 "x": [[1]] if nested else 1,
