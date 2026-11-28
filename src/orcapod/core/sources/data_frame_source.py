@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence, Sized
+from itertools import chain
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import polars as pl
@@ -14,8 +15,10 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
     require_custom_system_tags,
     require_source_column_names,
+    require_source_row_names,
     require_supported_nullable_types,
 )
+from orcapod.errors import InputValidationError
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 
@@ -23,6 +26,64 @@ if TYPE_CHECKING:
     from polars._typing import FrameInitTypes
 
 logger = logging.getLogger(__name__)
+
+
+def _checked_frame_rows(
+    rows: Iterator[Any], system_tag_columns: Collection[str]
+) -> Iterator[Any]:
+    """Inspect mapping rows at their original pace and stop on a reserved name."""
+    try:
+        first = next(rows)
+    except StopIteration:
+        return
+    if not isinstance(first, Mapping):
+        yield from chain((first,), rows)
+        return
+    for row in chain((first,), rows):
+        if isinstance(row, Mapping):
+            try:
+                require_source_column_names(row.keys(), system_tag_columns)
+            except InputValidationError:
+                # Gather the remaining names for the diagnostic before inference
+                # can drop the offending row's fields.
+                try:
+                    require_source_row_names(
+                        (
+                            item
+                            for item in chain((row,), rows)
+                            if isinstance(item, Mapping)
+                        ),
+                        system_tag_columns,
+                    )
+                except InputValidationError as error:
+                    raise error from None
+        yield row
+
+
+def source_dataframe(
+    data: FrameInitTypes, system_tag_columns: Collection[str] = ()
+) -> pl.DataFrame:
+    """Check mapping names before Polars infers a schema from a sample of rows.
+
+    Args:
+        data: Raw data accepted by the Polars DataFrame constructor.
+        system_tag_columns: Columns nominated as custom system tags.
+
+    Returns:
+        The original input converted with Polars' normal inference.
+    """
+    if isinstance(data, Mapping):
+        require_source_column_names(data.keys(), system_tag_columns)
+    elif isinstance(data, Sequence):
+        if data and isinstance(data[0], Mapping):
+            require_source_row_names(data, system_tag_columns)
+    elif (
+        isinstance(data, Iterable)
+        and not isinstance(data, Sized)
+        and not hasattr(data, "__arrow_c_stream__")
+    ):
+        data = _checked_frame_rows(iter(data), system_tag_columns)
+    return pl.DataFrame(data)
 
 
 class DataFrameSource(RootSource):
@@ -66,7 +127,8 @@ class DataFrameSource(RootSource):
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
 
-        df = pl.DataFrame(data)
+        df = source_dataframe(data, system_tag_columns)
+        require_source_column_names(df.columns, system_tag_columns)
 
         # Convert any Object-dtype columns to Arrow-compatible types.
         object_columns = [c for c in df.columns if df[c].dtype == pl.Object]
@@ -84,7 +146,6 @@ class DataFrameSource(RootSource):
         require_supported_nullable_types(
             polars_data_utils.get_system_columns(df).to_arrow().schema
         )
-        require_source_column_names(df.columns, system_tag_columns)
         df = polars_data_utils.drop_system_columns(df)
 
         missing = set(tag_columns) - set(df.columns)
@@ -94,6 +155,7 @@ class DataFrameSource(RootSource):
         arrow_table = df.to_arrow()
         if schema is not None:
             require_supported_nullable_types(schema)
+            require_source_column_names(schema.names, system_tag_columns)
             require_custom_system_tags(arrow_table, system_tag_columns, schema=schema)
             arrow_table = arrow_table.cast(schema)
         else:

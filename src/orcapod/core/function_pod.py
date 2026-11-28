@@ -119,10 +119,12 @@ class _FunctionPodBase(TraceableBase):
                 f"(schema keys: {list(data_function.input_data_schema.keys())})"
             )
         self._ctx_arg_name: str | None = ctx_arg_name
+        output_schema = data_function.output_data_schema
+        schema_utils.require_names_not_system(output_schema.keys())
         # Register types for schema validation, excluding ctx (not a data column).
         self.data_context.type_converter.ensure_types_registered_for_schemas(
             self.input_data_schema,
-            data_function.output_data_schema,
+            output_schema,
         )
 
     def computed_label(self) -> str | None:

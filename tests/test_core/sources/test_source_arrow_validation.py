@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import sqlite3
 from re import escape
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -187,6 +189,90 @@ def test_raw_sources_refuse_all_reserved_columns(
     assert "'_content_hash'" in str(info.value)
 
 
+@pytest.mark.parametrize("arrow_schema", [False, True], ids=["python", "arrow"])
+def test_dict_source_refuses_reserved_fields_omitted_from_schema(
+    arrow_schema: bool,
+) -> None:
+    schema = (
+        pa.schema(
+            [
+                ("g", pa.string()),
+                ("k", pa.int64()),
+                ("x", pa.int64()),
+                ("y", pa.int64()),
+            ]
+        )
+        if arrow_schema
+        else {"g": str, "k": int, "x": int, "y": int}
+    )
+    rows = [
+        {"g": "a", "k": 1, "x": 2, "y": 3, "_foo": 4},
+        {"g": "b", "k": 2, "x": 3, "y": 4, "_source_x": 5},
+    ]
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        DictSource(rows, tag_columns=TAGS, tag_only_columns=True, data_schema=schema)
+
+
+def test_csv_refuses_reserved_declared_columns_before_parsing_values(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rows.csv"
+    path.write_text("g,k,x,y,_foo,_source_x\na,1,2,3,invalid,token\n")
+    schema = pa.schema(
+        [
+            ("g", pa.string()),
+            ("k", pa.int64()),
+            ("x", pa.int64()),
+            ("y", pa.int64()),
+            ("_foo", pa.int64()),
+            ("_source_x", pa.string()),
+        ]
+    )
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        CSVSource(str(path), tag_columns=TAGS, tag_only_columns=True, schema=schema)
+
+
+def _late_reserved_rows(reverse: bool) -> list[dict[str, int]]:
+    rows = [{"g": 0, "k": i, "x": i + 1, "y": i + 2} for i in range(1002)]
+    names = ("_foo", "_source_x")
+    if reverse:
+        names = names[::-1]
+    rows[-2][names[0]] = 3
+    rows[-1][names[1]] = 4
+    return rows
+
+
+@pytest.mark.parametrize("iterable", [list, iter], ids=["sequence", "iterator"])
+def test_dataframe_source_checks_fields_beyond_polars_inference(iterable) -> None:
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        DataFrameSource(
+            iterable(_late_reserved_rows(False)),
+            tag_columns=TAGS,
+            tag_only_columns=True,
+        )
+
+
+def test_dataframe_source_preserves_inference_for_single_pass_rows() -> None:
+    def rows() -> Iterator[dict[str, int]]:
+        row = {"g": 0, "k": 0, "x": 1, "y": 2}
+        for i in range(1002):
+            row["k"] = i
+            yield row
+
+    expected = DataFrameSource(
+        pl.DataFrame(rows()), tag_columns=TAGS, tag_only_columns=True
+    )
+    source = DataFrameSource(rows(), tag_columns=TAGS, tag_only_columns=True)
+    assert source.as_table().equals(expected.as_table())
+    assert source.source_id == expected.source_id
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -203,6 +289,35 @@ def test_raw_sources_refuse_all_reserved_columns(
 def test_list_source_refuses_reserved_value_column(name: str) -> None:
     with pytest.raises(InputValidationError, match=escape(repr(name))):
         ListSource(name, [10, 20])
+
+
+@pytest.mark.parametrize("data", [[], [10, 20]], ids=["empty", "projected"])
+def test_list_source_refuses_reserved_value_name_even_without_arrow_field(
+    data: list[int],
+) -> None:
+    schema = {"element_index": int} if data else None
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        ListSource("_foo", data, data_schema=schema)
+
+
+def test_list_source_refuses_reserved_tags_omitted_from_schema() -> None:
+    def tags(value: int, index: int) -> dict[str, int]:
+        return (
+            {"k": index, "g": value, "_foo": value}
+            if index
+            else {"k": index, "g": value, "_source_x": value}
+        )
+
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        ListSource(
+            "x",
+            [10, 20],
+            tag_function=tags,
+            expected_tag_keys=TAGS,
+            data_schema={"k": int, "g": int, "x": int},
+        )
 
 
 def test_list_source_refuses_reserved_tags() -> None:
@@ -403,7 +518,9 @@ def test_no_declared_type_for_python_none_still_infers_a_string() -> None:
 class _Poll:
     """Minimal impl for testing schema validation before the first fetch."""
 
-    def __init__(self, schema: pa.Schema | None, batch: pl.DataFrame) -> None:
+    def __init__(
+        self, schema: pa.Schema | None, batch: pl.DataFrame | list[dict[str, int]]
+    ) -> None:
         self._schema = schema
         self._batch = batch
 
@@ -425,16 +542,43 @@ class _Poll:
 
     async def fetch(
         self, cursor: Cursor[int] | None = None
-    ) -> tuple[Cursor[int], pl.DataFrame]:
+    ) -> tuple[Cursor[int], pl.DataFrame | list[dict[str, int]]]:
         """Return the prepared batch on the initial fetch."""
         return Cursor(value=0), self._batch
 
     async def poll(self, cursor: Cursor[int] | None = None) -> bool:
         """There are no rows after the initial fetch."""
-        return False
+        return cursor is None
 
     async def close(self) -> None:
         """There is no connection to close."""
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["foo-first", "source-first"])
+@pytest.mark.parametrize("as_tag", [False, True], ids=["data", "tag"])
+def test_polling_checks_raw_fields_beyond_polars_inference(
+    use_async: bool, reverse: bool, as_tag: bool
+) -> None:
+    tags = (*TAGS, "_foo") if as_tag else TAGS
+    source = PollingSource(
+        _Poll(None, _late_reserved_rows(reverse)),
+        tags,
+        source_id="poll",
+        record_id_columns="k",
+    )
+
+    async def read_first() -> None:
+        async with contextlib.aclosing(source.async_iter_data()) as rows:
+            await anext(rows)
+
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        if use_async:
+            asyncio.run(read_first())
+        else:
+            source.check_for_new_data()
 
 
 @pytest.mark.parametrize("declare", [True, False], ids=["schema", "batch"])

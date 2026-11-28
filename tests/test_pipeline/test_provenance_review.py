@@ -24,10 +24,12 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
-from orcapod import PipelineJob, function_pod
+from orcapod import FunctionPod, PipelineJob, function_pod
+from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError, ProvenanceInconsistencyError
+from orcapod.types import Schema
 from orcapod.operators import (
     Batch,
     DropTagColumns,
@@ -1018,6 +1020,44 @@ def test_a_function_refuses_a_reserved_output_name_at_definition(name: str) -> N
 
 def total_for_reserved_output(x: int, y: int) -> int:
     return x + y
+
+
+def _pair_for_reserved_outputs(x: int, y: int) -> tuple[int, int]:
+    return x, y
+
+
+@pytest.mark.parametrize(
+    "outputs", [("_foo", "_content_hash"), ("_content_hash", "_foo")]
+)
+def test_public_function_pod_validates_custom_declared_outputs(
+    outputs: tuple[str, str],
+) -> None:
+    class CustomFunction(PythonDataFunction):
+        @property
+        def output_data_schema(self) -> Schema:
+            return Schema(dict.fromkeys(outputs, int))
+
+    custom = CustomFunction(_pair_for_reserved_outputs, output_keys=["left", "right"])
+    with pytest.raises(InputValidationError, match="'_content_hash'.*'_foo'"):
+        FunctionPod(data_function=custom)
+
+
+@pytest.mark.parametrize("missing_callable", [False, True], ids=["importable", "proxy"])
+def test_saved_function_pod_refuses_reserved_outputs(missing_callable: bool) -> None:
+    config = FunctionPod.from_fn(
+        _pair_for_reserved_outputs, ["left", "right"]
+    ).to_config()
+    function_config = config["data_function"]["config"]
+    function_config["output_keys"] = ["_foo", "_content_hash"]
+    output_schema = function_config["output_data_schema"]
+    function_config["output_data_schema"] = {
+        "_foo": output_schema["left"],
+        "_content_hash": output_schema["right"],
+    }
+    if missing_callable:
+        function_config["callable_name"] = "unavailable_function"
+    with pytest.raises(InputValidationError, match="'_content_hash'.*'_foo'"):
+        FunctionPod.from_config(config, fallback_to_proxy=missing_callable)
 
 
 def test_a_data_column_of_an_empty_run_is_a_data_column() -> None:

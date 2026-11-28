@@ -10,6 +10,8 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
+    require_source_column_names,
+    require_source_row_names,
     require_supported_nullable_types,
 )
 from orcapod.types import DataValue, SchemaLike
@@ -64,13 +66,17 @@ class DictSource(RootSource):
         # Accept either a Python SchemaLike (Mapping[str, type]) or a
         # pa.Schema directly via data_schema; route to the converter accordingly.
         rows = [dict(row) for row in data]
+        require_source_row_names(rows, system_tag_columns)
         if isinstance(data_schema, pa.Schema):
             require_supported_nullable_types(data_schema)
+            require_source_column_names(data_schema.names, system_tag_columns)
             arrow_table = self.data_context.type_converter.python_dicts_to_arrow_table(
                 rows,
                 arrow_schema=data_schema,
             )
         else:
+            if data_schema is not None:
+                require_source_column_names(data_schema.keys(), system_tag_columns)
             arrow_table = self.data_context.type_converter.python_dicts_to_arrow_table(
                 rows,
                 python_schema=data_schema,

@@ -19,6 +19,7 @@ from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     SourceStreamResult,
     require_custom_system_tags,
+    require_source_column_names,
     require_supported_nullable_types,
 )
 from orcapod.utils import arrow_utils
@@ -198,6 +199,7 @@ def _read_declared(
         table = parse(as_text(text_like, []))  # text-like columns only: one parse
     else:
         table = parse(pa_csv.ConvertOptions(column_types=reader_types))
+    require_source_column_names(table.column_names, system_tag_columns)
     if table.column_names != schema.names:
         raise ValueError(
             f"the file's columns {table.column_names} are not the schema's fields "
@@ -349,8 +351,10 @@ class CSVSource(RootSource):
         if self._schema is None:
             table: pa.Table = pa_csv.read_csv(self._access_path)
             require_supported_nullable_types(table.schema)
+            require_source_column_names(table.column_names, self._system_tag_columns)
             return table.cast(arrow_utils.infer_schema_nullable(table))
         require_supported_nullable_types(self._schema)
+        require_source_column_names(self._schema.names, self._system_tag_columns)
         try:
             return _read_declared(
                 self._access_path, self._schema, self._system_tag_columns

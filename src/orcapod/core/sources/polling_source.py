@@ -23,6 +23,7 @@ import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.data_frame_source import source_dataframe
 from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.core.sources.stream_builder import (
@@ -352,6 +353,7 @@ class PollingSource(RootSource, Generic[T]):
                 )
             )
         if unified_schema is not None:
+            require_source_column_names(unified_schema.keys())
             tag_cols_set = set(self._tag_columns)
             missing = tag_cols_set - set(unified_schema.keys())
             if missing:
@@ -371,7 +373,6 @@ class PollingSource(RootSource, Generic[T]):
                     unified_schema, self.data_context.type_converter
                 )
                 require_supported_nullable_types(self._declared_arrow)
-                require_source_column_names(self._declared_arrow.names)
 
     # -------------------------------------------------------------------------
     # Schema helpers — fetch-free schema computation from declared schemas
@@ -877,7 +878,7 @@ class PollingSource(RootSource, Generic[T]):
         Returns:
             ``ArrowTableStream`` if data has rows and columns, ``None`` otherwise.
         """
-        df = pl.DataFrame(data)
+        df = source_dataframe(data)
         if len(df.columns) == 0:
             logger.debug(
                 "PollingSource %r: fetch returned data with no columns — skipping stream build",
