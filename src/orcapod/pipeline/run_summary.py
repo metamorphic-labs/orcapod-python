@@ -474,6 +474,7 @@ def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
     an error loses nothing). The first loss happens inside a node, possibly on a
     worker thread. Each failed write is still logged by its observer when it happens.
     If the warning machinery fails, report the totals through the module logger.
+    An interrupt still propagates.
 
     Args:
         summary: The run's summary, with lost observer events.
@@ -503,9 +504,11 @@ def warn_lost_observer_events(summary: RunSummary, caller: FrameType) -> None:
             raise
         try:
             logger.warning("%s", message)
-        except BaseException:
+        except Exception:
             # Application log handlers can also raise. The summary is already kept.
             pass
+        if not isinstance(error, Exception):
+            raise
 
 
 class RunCountingObserver:

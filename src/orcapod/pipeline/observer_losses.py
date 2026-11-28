@@ -56,21 +56,29 @@ class RunLosses:
         self._counts: dict[str, int] = {}
         self._first_errors: dict[str, str] = {}
 
-    def record(self, kind: str, error: BaseException) -> None:
-        """Count one lost event of ``kind``; keep the kind's first error.
+    def count(self, kind: str) -> bool:
+        """Count one lost event of ``kind`` and claim the first error if needed.
 
         Args:
             kind: The observer kind.
-            error: What the failed write raised.
+
+        Returns:
+            Whether this event is the first loss of its kind.
         """
         with self._lock:
             count = self._counts.get(kind, 0) + 1
             self._counts[kind] = count
-        if count != 1:
-            return
+            return count == 1
 
-        # The first report has claimed this kind. Formatting can invoke user code,
-        # so let other reports proceed while it runs.
+    def keep_first_error(self, kind: str, error: Exception) -> None:
+        """Format and keep the error from the event that first claimed ``kind``.
+
+        Formatting can invoke user code, so do it outside the counter's lock.
+
+        Args:
+            kind: The observer kind.
+            error: What the first failed write raised.
+        """
         try:
             name = str.__str__(type(error).__name__)
         except BaseException:
@@ -110,10 +118,12 @@ def report_lost_event(
     *args: str,
 ) -> None:
     """Count a failed observer write and log the exception from its handler."""
-    if losses is not None:
-        losses.record(kind, error)
+    first_loss = losses is not None and losses.count(kind)
     try:
         logger.exception(message, *args, stacklevel=2)
     except Exception:
         # An application log handler can raise. The observer write remains nonfatal.
         pass
+    # Give the existing traceback the first opportunity to render the exception.
+    if first_loss and losses is not None:
+        losses.keep_first_error(kind, error)

@@ -38,7 +38,7 @@ from orcapod.pipeline import (
     SyncPipelineOrchestrator,
 )
 from orcapod.pipeline.observer import NoOpObserver
-from orcapod.pipeline.observer_losses import RunLosses
+from orcapod.pipeline.observer_losses import RunLosses, report_lost_event
 from tests.test_core.operators.several_items import (
     DATA_FIRST_REVERSED,
     MAIN,
@@ -651,6 +651,46 @@ def test_promoted_row_warning_still_reports_observer_losses(
     assert [warning.category for warning in caught] == [ObserverEventsLostWarning]
 
 
+@pytest.mark.parametrize("category", [RowFailuresWarning, ObserverEventsLostWarning])
+def test_completion_warning_interrupt_propagates_after_report(
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+    category: type[Warning],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An interrupt propagates after the completed run reports its observer losses."""
+    interrupts_row_warning = category is RowFailuresWarning
+    pod = describe_except_first if interrupts_row_warning else describe
+    job = _job(arrangement, pod=pod)
+    observer = StatusObserver(_database())
+    interrupt = KeyboardInterrupt("warning interrupted")
+    shown: list[type[Warning]] = []
+
+    def show_warning(
+        _message: Warning, emitted_category: type[Warning], *args: object
+    ) -> None:
+        shown.append(emitted_category)
+        if emitted_category is category:
+            raise interrupt
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        monkeypatch.setattr(warnings, "showwarning", show_warning)
+        with pytest.raises(KeyboardInterrupt) as raised:
+            _ = run_job(job, observer)
+
+    assert raised.value is interrupt
+    summary = job.last_run
+    assert summary is not None
+    assert summary.lost_observer_events["status"].count == 2 * N_ROWS
+    if interrupts_row_warning:
+        assert shown == [RowFailuresWarning, ObserverEventsLostWarning]
+    else:
+        assert shown == [ObserverEventsLostWarning]
+        assert caplog.text.count("Observer events were not recorded in this run:") == 1
+
+
 @pytest.mark.parametrize("promote_observer_warning", [False, True])
 def test_unprintable_row_error_still_reports_observer_losses(
     arrangement: Arrangement,
@@ -1242,11 +1282,55 @@ def test_unprintable_write_error_preserves_rows(
     assert summary.ok and _rows(job) == EXPECTED_ROWS
 
 
+@pytest.mark.parametrize("kind", ["status", "logging"])
+def test_summary_formatting_preserves_observer_tracebacks(
+    kind: str,
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The existing traceback formats each error before the summary can format it."""
+
+    class WriteError(OSError):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+            self.formats = 0
+
+        @override
+        def __str__(self) -> str:
+            self.formats += 1
+            return f"format call {self.formats}"
+
+    tracebacks: list[str] = []
+
+    class TracebackHandler(logging.Handler):
+        @override
+        def emit(self, record: logging.LogRecord) -> None:
+            tracebacks.append(self.format(record).splitlines()[-1].rsplit(": ", 1)[-1])
+
+    logger = logging.getLogger(f"orcapod.pipeline.{kind}_observer")
+    monkeypatch.setattr(logger, "handlers", [TracebackHandler()])
+    monkeypatch.setattr(logger, "propagate", False)
+    database = _database(error=WriteError)
+    observer = (
+        StatusObserver(database) if kind == "status" else LoggingObserver(database)
+    )
+    job = _job(arrangement)
+
+    with pytest.warns(ObserverEventsLostWarning):
+        summary = run_job(job, observer)
+
+    count = 2 * N_ROWS if kind == "status" else N_ROWS
+    assert tracebacks == ["format call 1"] * count
+    assert summary.lost_observer_events[kind].count == count
+
+
 def test_concurrent_losses_keep_the_first_reported_error() -> None:
     """A later report cannot claim first place while the first formats its error."""
     formatting = threading.Event()
     release = threading.Event()
     losses = RunLosses()
+    logger = logging.Logger(__name__, level=logging.CRITICAL)
 
     class FirstWriteError(OSError):
         @override
@@ -1256,11 +1340,17 @@ def test_concurrent_losses_keep_the_first_reported_error() -> None:
                 raise RuntimeError("timed out waiting for the second report")
             return "failed first"
 
+    def report(error: OSError) -> None:
+        try:
+            raise error
+        except OSError as caught:
+            report_lost_event(losses, "status", caught, logger, "store refuses writes")
+
     with ThreadPoolExecutor(2) as pool:
-        first = pool.submit(losses.record, "status", FirstWriteError())
+        first = pool.submit(report, FirstWriteError())
         try:
             assert formatting.wait(timeout=10)
-            second = pool.submit(losses.record, "status", OSError("failed second"))
+            second = pool.submit(report, OSError("failed second"))
             second.result(timeout=10)
         finally:
             release.set()

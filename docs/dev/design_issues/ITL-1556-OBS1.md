@@ -22,7 +22,8 @@ encoding or write is counted and logged. Lifecycle hooks run on the caller's ori
 observers, and the built-ins derive event metadata as before.
 
 The run puts the count and first reported error for each observer kind in
-`RunSummary.lost_observer_events`. If the error's message cannot be rendered,
+`RunSummary.lost_observer_events`. The observer logs the original exception before
+rendering it for the summary. If the error's message cannot be rendered,
 the summary shows its type name. The summary display and warning escape non-ASCII
 text and ASCII control characters. If warning delivery raises, the totals are logged.
 A filter that promotes `ObserverEventsLostWarning` to an error still raises it.
@@ -31,6 +32,7 @@ keeping the completed summary. The warning points to the `run()` call, the
 `run_async()` await, or the event loop's resumption site for a separately scheduled
 coroutine. A completed run reports observer losses even when preparing or issuing the
 row-failure warning raises. The earlier error still propagates.
+An interrupt during delivery of the observer warning logs the totals and propagates.
 
 A run that raises before keeping a summary reports the losses in the logs. A job
 node's own `run()` takes no observer. Observers passed directly to an orchestrator or

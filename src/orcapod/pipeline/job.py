@@ -132,16 +132,16 @@ def _with_counter(
 
 def _warn_run_completion(summary: RunSummary, caller: FrameType) -> None:
     """Issue both completion warnings, giving any row-reporting error precedence."""
-    row_error: Exception | None = None
+    row_error: BaseException | None = None
     if not summary.ok:
         try:
             warn_row_failures(summary, caller)
-        except Exception as error:
+        except BaseException as error:
             row_error = error
     if summary.lost_observer_events:
         try:
             warn_lost_observer_events(summary, caller)
-        except Exception as error:
+        except BaseException as error:
             if row_error is None:
                 raise
             raise row_error from error
