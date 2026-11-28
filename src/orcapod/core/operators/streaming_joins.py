@@ -94,6 +94,7 @@ from orcapod.core.operators.join import (
     _matched_pairs,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     _with_common_key,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     null_token_list_error,
+    tied_pipeline_positions,
 )
 from orcapod.core.operators.base import require_shared_arrow_type
 from orcapod.core.operators.merge_join import (
@@ -668,9 +669,9 @@ class StreamingJoin(StreamingJoinKernel):
     def __init__(self, operator: Join, inputs: Sequence[StreamProtocol]) -> None:
         super().__init__(operator, inputs)
         self._join = operator
-        order = sorted(
-            range(len(inputs)), key=lambda i: inputs[i].pipeline_hash().to_hex()
-        )
+        hashes = [stream.pipeline_hash() for stream in inputs]
+        order = sorted(range(len(inputs)), key=lambda i: hashes[i].to_hex())
+        self._tied_positions = tied_pipeline_positions(hashes)
         self._position = {index: position for position, index in enumerate(order)}
         self._renames: dict[int, dict[str, str]] = {}
         self._links: list[_BinaryLink] = []
@@ -737,7 +738,9 @@ class StreamingJoin(StreamingJoinKernel):
                 return table
             for name in sorted(self._merged_source):
                 table = Join._fold_source_column(table, name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
-            return arrow_utils.sort_system_tag_values(table)
+            return arrow_utils.sort_system_tag_values(
+                table, tied_positions=self._tied_positions
+            )
 
         return finish
 
