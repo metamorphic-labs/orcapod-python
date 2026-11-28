@@ -3,6 +3,27 @@
 from __future__ import annotations
 
 
+def test_sql_store_name_v1_has_frozen_canonical_path_digest_and_boundary() -> None:
+    """Freeze compact UTF-8 JSON, SHA-256 and the o1 name's 27/32 limits."""
+    from orcapod.databases.store_table_names import (
+        store_table_digest,
+        store_table_name,
+        store_table_path_json,
+    )
+
+    path = ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "b/c", "é")
+    assert (
+        store_table_path_json(path)
+        == b'["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","b/c","\xc3\xa9"]'
+    )
+    assert store_table_digest(path) == (
+        "71fdebbe6a6f5cb2d4bb274c8345cc81983efbc7f9bf1ecb0f2f51a0c0235b67"
+    )
+    assert store_table_name(path, hint_length=27, digest_length=32) == (
+        "o1_aaaaaaaaaaaaaaaaaaaaaaaaaaa_71fdebbe6a6f5cb2d4bb274c8345cc81"
+    )
+
+
 def test_shared_rule_reproduces_the_spiraldb_name() -> None:
     from orcapod.databases.store_table_names import store_table_name
 
