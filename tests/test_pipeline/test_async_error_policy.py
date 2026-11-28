@@ -360,8 +360,8 @@ def test_fail_fast_leaves_the_nodes_with_no_run(
 
     A run that raised defines no rows (ITL-1093): each node it ran reads as a node with no
     run, which is empty (ITL-1095), also the downstream node the async run cancelled; what
-    was stored stays readable through ``as_source()``. Another job stores rows of other
-    values first, so the stored view holds both jobs' rows.
+    was stored stays readable through ``get_all_records()``. The derived source selects
+    one stored version per input lineage across both jobs.
     """
     store = InMemoryArrowDatabase()
     run_job(build(store, [100 + i for i in range(N_ROWS)]), orchestrator, "continue")
@@ -378,8 +378,8 @@ def test_fail_fast_leaves_the_nodes_with_no_run(
         node = job.nodes[label]
         assert node.as_table().num_rows == 0, label
         assert node.is_stale, label
-        # Every stored row stays: the other job's rows and this job's.
-        assert len(rows_of(node.as_source().as_table())) == 2 * N_ROWS - 1, label
+        assert len(rows_of(node.get_all_records())) == 2 * N_ROWS - 1, label
+        assert len(rows_of(node.as_source().as_table())) == N_ROWS, label
 
 
 # The row ``sibling`` leaves uncomputed until the run that is cancelled.
@@ -433,7 +433,8 @@ def test_a_node_cancelled_on_another_branch_holds_no_run() -> None:
     g = job.nodes["g"]
     assert g.as_table().num_rows == 0
     assert g.is_stale
-    assert len(rows_of(g.as_source().as_table())) == 2 * N_ROWS - 1
+    assert len(rows_of(g.get_all_records())) == 2 * N_ROWS - 1
+    assert len(rows_of(g.as_source().as_table())) == N_ROWS
 
 
 def test_an_observer_failing_at_node_end_is_called_once(orchestrator: str) -> None:

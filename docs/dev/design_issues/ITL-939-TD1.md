@@ -20,7 +20,7 @@ nullability, fresh source provenance, a schema-only `pipeline_hash`, and a defau
 saved job when its origin is. No existing hash or stored schema changed.
 
 Left open, tracked elsewhere: the same-name collisions that fail late in `Join`/`MergeJoin`
-and for a pod output key equal to a tag name (ITL-940); the gaps of the plain
-`node.as_source()` form, which has no system tags and cannot be saved, and whose zero-row
-table before the node has run takes its Arrow types from the Python schema (ITL-956);
+and for a pod output key equal to a tag name (ITL-940); the original gaps of the plain
+`node.as_source()` form (ITL-956). ITL-1564 adds one fresh system-tag pair and new
+source-info tokens to plain reads. The broader save/load work is part of ITL-1466.
 `GroupBy` promoting non-key tags into data (ITL-955, fixed separately).

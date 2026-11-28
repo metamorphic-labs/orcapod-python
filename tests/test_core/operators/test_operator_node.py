@@ -98,7 +98,7 @@ def db() -> InMemoryArrowDatabase:
 
 def _make_node(
     operator,
-    streams: tuple[ArrowTableStream, ...],
+    streams: tuple[StreamProtocol, ...],
     db: InMemoryArrowDatabase | None = None,
     cache_mode: CacheMode = CacheMode.OFF,
 ) -> OperatorJobNode:
@@ -411,8 +411,16 @@ class TestOperatorNodeDerivedSource:
         assert isinstance(source, DerivedSource)
 
     def test_as_source_round_trip(self, simple_stream, db):
+        from orcapod.core.sources import ArrowTableSource
+
+        origin = ArrowTableSource(
+            simple_stream.as_table(),
+            tag_columns=simple_stream.keys()[0],
+            tag_only_columns=True,
+            source_id="inputs",
+        )
         op = MapData({"x": "renamed_x"})
-        node = _make_node(op, (simple_stream,), db=db, cache_mode=CacheMode.LOG)
+        node = _make_node(op, (origin,), db=db, cache_mode=CacheMode.LOG)
         node.run()
         source = node.as_source(source_id="stored")
         # iter_data should yield the same data

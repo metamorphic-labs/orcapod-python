@@ -471,6 +471,8 @@ class TestDerivedSource:
             {
                 "tag_col": pa.array(["a", "b"], type=pa.large_string()),
                 "data_col": pa.array([1, 2], type=pa.int64()),
+                "_tag_source_id::origin": ["arrow_table_v1:fixture"] * 2,
+                "_tag_record_id::origin": ["row_0", "row_1"],
             }
         )
         mock_origin = self._make_mock_origin(records=records_table)

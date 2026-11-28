@@ -238,7 +238,7 @@ What each kind of object shows:
 |---|---|
 | A source | its first rows (a bounded read for a source that reads its table lazily) |
 | An operator's or function pod's output stream | the rows already computed, or none with status `not_computed` |
-| A job node | the rows of its current run (after `job.run()` or `node.run()`); before a run in this process, or once stale, none (`not_computed`), pointing to `run()` and to `node.as_source()`, the view of every stored result |
+| A job node | the rows of its current run (after `job.run()` or `node.run()`); before a run in this process, or once stale, none (`not_computed`), pointing to `run()` and to `node.as_source()`, the view of the latest stored result per lineage |
 | A pipeline blueprint node, an unbound input slot | none (`unavailable`) |
 | A job's side-effect node | the rows its last run passed on, else none (`not_computed`); it never delivers, and neither do its `as_table()`, `iter_data()` and other reads |
 | A side-effect stream outside a job | none: showing it never delivers its side effects |

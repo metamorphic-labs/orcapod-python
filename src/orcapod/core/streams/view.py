@@ -65,9 +65,7 @@ STALE_NOTE = (
 )
 NOTHING_STORED_NOTE = "nothing stored; run the job"
 # A job node shows the rows of its current run only; before one it shows none (ITL-1095).
-JOB_NODE_NOT_RUN_NOTE = (
-    "not run; run() fills it; node.as_source() shows every stored result"
-)
+JOB_NODE_NOT_RUN_NOTE = "not run; run() fills it; node.as_source() reads stored results"
 BLUEPRINT_NOTE = "pipeline blueprint; run it in a PipelineJob"
 SIDE_EFFECTS_NOTE = (
     "not run; run() delivers its side effects; displaying never delivers side effects"

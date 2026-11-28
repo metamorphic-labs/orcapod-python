@@ -647,7 +647,8 @@ algorithm produced it.**
   identifier itself, as text (`large_string`): `row_<n>`, or the canonical JSON of the key
   columns in key order (`{"unit":"u1","time":1700000000}`, built only by
   `stream_builder.key_row_identifier`). It is not a hash, holds no source id and carries no
-  label; never build it with `uuid5`. A source-info token is `<source id>::<record id>::<column>`.
+  label; never build it with `uuid5`. Derived sources also use the labelled lineage fold
+  (ITL-1564). A source-info token is `<source id>::<record id>::<column>`.
 - A hash stored as a value in its own column or field carries its label: `to_string()` as
   text, `to_prefixed_digest()` in a binary column.
 - A random identifier (`uuid7`, `uuid4`) is not a hash and carries no label.
@@ -927,6 +928,15 @@ config type key stays `derived`. `DerivedSource` without `tags_as_data` (a job n
 uses the root source identity: full source id, Arrow schema identity and an empty key
 tuple. The default source id carries the job path and the node's labelled content hash
 (ITL-1564). A given source name also enters the content hash.
+
+Both forms stamp one pair and fresh tokens through SourceStreamBuilder. The default
+record id folds all upstream pairs with arrow_utils.fold_system_tag_values, sorting by
+full record-id column name and flattening each triple (record-id column name, source-id
+value, record-id value). DerivedSource defines the derived_row_v1 label once. An explicit
+record_id_columns for tags_as_data keeps its configured key policy. A job node serves the
+most recent readable stored record per lineage, breaking a function recording-time tie by
+the greater result UUIDv7. Other selection rules are planned. The source refuses missing
+or incomplete pairs and repeated lineages that survive selection.
 
 ### Two identity chains
 
@@ -1571,8 +1581,8 @@ data. The rules:
   origin's source id is never written into a default id. `SourceStreamBuilder.build` needs
   the kind part (`kind_part`) and takes the name (`source_name`) or makes the hash default.
 - `ArrowTableStream` requires at least one data column; raises `ValueError` otherwise.
-- A job node shows its current run; `node.as_source()` shows everything stored for it
-  (developer, November 13, 2026, ITL-1095). After a run, a `FunctionJobNode` returns exactly
+- A job node shows its current run. `node.as_source()` reads the most recent readable
+  stored row for each lineage (ITL-1564). After a run, a `FunctionJobNode` returns exactly
   the rows of that run's inputs, sync or async (ITL-1093). Before a run in this process (a
   fresh or loaded job), after a run that raised, after `clear_cache()`, and while stale, every
   function and operator job node reads empty (zero typed rows; `head()` is `not_computed` and

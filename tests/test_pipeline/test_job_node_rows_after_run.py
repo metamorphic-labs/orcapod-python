@@ -321,7 +321,7 @@ class TestRaisedRun:
         assert reads["head"] == reads["as_table"] == []
         assert node.is_stale
         # Nothing stored was dropped: the stored view holds the earlier run's rows.
-        stored = {(r["k"], r["y"]) for r in node.as_source().as_table().to_pylist()}
+        stored = {(r["k"], r["y"]) for r in node.get_all_records().to_pylist()}
         assert {(3, 31), (4, 41), (5, 51)} <= stored
 
 
@@ -539,5 +539,6 @@ class TestAsyncOutputCloseFails:
         # No run is held: the node reads empty (ITL-1095); the database keeps the rows.
         assert node.head(10).status is ViewStatus.NOT_COMPUTED
         assert _values(node, lambda r: (r["k"], r["y"])) == []
-        stored = node.as_source(source_id="stored").as_table().to_pylist()
-        assert sorted((r["k"], r["y"]) for r in stored) == [(0, 6), (1, 7)]
+        stored = node.get_all_records()
+        assert stored is not None
+        assert sorted((r["k"], r["y"]) for r in stored.to_pylist()) == [(0, 6), (1, 7)]

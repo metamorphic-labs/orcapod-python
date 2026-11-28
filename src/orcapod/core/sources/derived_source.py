@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pyarrow as pa
 
@@ -22,6 +22,7 @@ from orcapod.core.sources.stream_builder import (
     require_supported_nullable_types,
     SourceStreamBuilder,
     normalize_record_id_columns,
+    row_identifiers,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.view import (
@@ -34,7 +35,7 @@ from orcapod.core.streams.base import (
     typed_arrow_schemas,
     typed_zero_row_table,
 )
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, RowIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils, schema_utils
@@ -43,6 +44,40 @@ from orcapod.utils.provisional import provisional_class_name
 if TYPE_CHECKING:
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.operator_node import OperatorJobNode
+
+
+DERIVED_ROW_FOLD_LABEL = "derived_row_v1"
+"""The fold of a derived row's upstream source and record pairs by column name."""
+
+
+def _most_recent_rows(
+    lineages: Sequence[tuple[str, ...]],
+    recorded_at: Sequence[datetime],
+    result_ids: Sequence[bytes] | None,
+) -> list[int]:
+    """Select the latest stored row per lineage, keeping unresolved ties for validation.
+
+    Function rows use their result UUID bytes as the second sort key. Operator
+    rows have a recording time but no result UUID.
+    """
+    winners: dict[tuple[str, ...], int] = {}
+    ties: dict[tuple[str, ...], int] = {}
+
+    def rank(index: int) -> tuple[datetime, bytes]:
+        return recorded_at[index], b"" if result_ids is None else result_ids[index]
+
+    for index, lineage in enumerate(lineages):
+        prior = winners.get(lineage)
+        if prior is None:
+            winners[lineage] = index
+            continue
+        current_rank, prior_rank = rank(index), rank(prior)
+        if current_rank > prior_rank:
+            winners[lineage] = index
+            ties.pop(lineage, None)
+        elif current_rank == prior_rank:
+            ties[lineage] = index
+    return [*winners.values(), *ties.values()]
 
 
 def validate_tags_as_data(
@@ -108,11 +143,11 @@ class DerivedSource(RootSource):
 
     **Plain** (``tags_as_data`` not given), created by ``FunctionNode.as_source()``
     or ``OperatorNode.as_source()``: a static stream backed by the computed records
-    of a DB-backed stream node. It presents the node's stored results with the
-    node's own tag and data columns. The stored tables keep their provenance.
-    Plain reads expose no system tags and return null source-info tokens.
-    The origin must implement
-    ``get_all_records()``, ``output_schema()``, ``keys()`` and ``content_hash()``.
+    of a DB-backed stream node. It presents the node's own tag and data columns.
+    For each input lineage it reads the most recent readable stored record.
+    Function ties in recording time use the greater result UUIDv7. If operator
+    rows still tie, the source refuses the duplicate lineage. Other selection
+    rules are planned.
 
     **With ``tags_as_data``**: a new root source over any source or job node that
     exposes chosen tag columns of the origin *also* as data columns, under the
@@ -126,12 +161,10 @@ class DerivedSource(RootSource):
     the tag column's exact Arrow type, nullability and field metadata. The copy
     equals the tag when the source is read; downstream it is plain data.
 
-    Being a source, this form starts provenance afresh by the rule every source
-    follows: its own system-tag columns, record IDs from each row's position (or
-    its ``record_id_columns`` values), which never hold the source id (ITL-1425),
-    and a source-info token (``<source id>::<record id>::<column>``) for every data
-    column, the copies included. It stores nothing itself; like
-    any source it can be wrapped with ``cached(database)``.
+    Both forms stamp one new system-tag pair and a fresh source-info token
+    (``<source id>::<record id>::<column>``) for every data column, including copies.
+    By default the record id folds the upstream source/record pairs in column-name
+    order. The origin's stored tables keep their own provenance.
 
     Identity (``tags_as_data`` form):
         - ``source_id`` is required: there is no default (developer, November 21,
@@ -152,8 +185,7 @@ class DerivedSource(RootSource):
           identical schemas share the same pipeline DB table.
 
     If the origin is a job node that has not run yet, the source presents zero
-    rows with the correct columns. In the ``tags_as_data`` form the rows appear
-    once the node has run.
+    rows with the correct columns. Once records are available, the source reads them.
 
     Data-tags (ITL-1019): the source carries the bindings of what it reads,
     in both forms. Over a job node they are the ones the node's stored table states
@@ -172,9 +204,8 @@ class DerivedSource(RootSource):
             job name and content hash.
         tags_as_data: Maps a tag column of the origin to the name of the data
             column that receives a copy of it.
-        record_id_columns: Key columns whose values identify a row in record IDs and
-            provenance tokens, instead of the row position. Only with
-            ``tags_as_data``.
+        record_id_columns: With ``tags_as_data``, name key columns or pass ``()``
+            to use the row's position. The default uses the upstream lineage fold.
         **kwargs: ``label``, ``data_context`` (defaults to the origin's) and
             ``config``, passed to ``RootSource``.
 
@@ -296,9 +327,8 @@ class DerivedSource(RootSource):
         self._origin = origin
         self._record_id_columns = key_columns
         self._key_columns = key_columns or ()
-        self._cached_table: pa.Table | None = None
         self._cached_stream: ArrowTableStream | None = None
-        # The ``tags_as_data`` form over no rows: its columns, without reading the origin.
+        # The source's columns without reading the origin.
         self._zero_row_stream: ArrowTableStream | None = None
         # The origin job node's modified time when its rows were cached: a check reads
         # its stored rows again only after it ran again (ITL-1102).
@@ -314,7 +344,8 @@ class DerivedSource(RootSource):
         Both forms start with the root source rule: the full source id, Arrow
         schema identity and key columns. The ``tags_as_data`` form appends the
         sorted mapping items so two mappings with the same schema and source id
-        can still name different copies (ITL-1000).
+        can still name different copies (ITL-1000). Explicit positional ids add
+        a marker to distinguish them from the default fold.
 
         Returns:
             The identity structure.
@@ -322,10 +353,13 @@ class DerivedSource(RootSource):
         identity = super().identity_structure()
         if self._tags_as_data is None:
             return identity
-        return (
+        identity = (
             *identity,
             ("tags_as_data", tuple(sorted(self._tags_as_data.items()))),
         )
+        if self._record_id_columns == ():
+            return (*identity, ("record_id_policy", "position"))
+        return identity
 
     # -------------------------------------------------------------------------
     # Serialization
@@ -424,11 +458,7 @@ class DerivedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[Schema, Schema]:
-        if self._tags_as_data is None:
-            return self._origin.output_schema(columns=columns, all_info=all_info)
-        return self._columns_stream(self._tags_as_data).output_schema(
-            columns=columns, all_info=all_info
-        )
+        return self._columns_stream().output_schema(columns=columns, all_info=all_info)
 
     def keys(
         self,
@@ -436,29 +466,14 @@ class DerivedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        if self._tags_as_data is None:
-            return self._origin.keys(columns=columns, all_info=all_info)
-        return self._columns_stream(self._tags_as_data).keys(
-            columns=columns, all_info=all_info
-        )
+        return self._columns_stream().keys(columns=columns, all_info=all_info)
 
-    def _columns_stream(self, tags_as_data: Mapping[str, str]) -> ArrowTableStream:
-        """A stream with this ``tags_as_data`` source's columns, read without its rows.
-
-        The rows held, or else the derivation over the origin's zero-row table: the
-        schema is never computed from rows (ITL-912), so asking for it never reads the
-        origin's database (ITL-1197: a diagram or a downstream schema prediction must
-        not read).
-
-        Args:
-            tags_as_data: The source's ``tags_as_data`` mapping.
-        """
+    def _columns_stream(self) -> ArrowTableStream:
+        """Return the held stream or predict its columns without reading rows."""
         if self._cached_stream is not None:
             return self._cached_stream
         if self._zero_row_stream is None:
-            self._zero_row_stream = self._derive_from(
-                self._empty_origin_table(), tags_as_data
-            )
+            self._zero_row_stream = self._derive_from(self._empty_origin_table())
         return self._zero_row_stream
 
     def _data_tags(self) -> tuple[str, ...]:
@@ -481,20 +496,20 @@ class DerivedSource(RootSource):
         Raises:
             InputValidationError: If a job node's stored rows mark other data-tags than the node's keys declare, or carry an invalid marker.
         """
-        if isinstance(self._origin, RootSource):
-            return self._origin.as_table()
-        records = self._origin.get_all_records(all_info=True)
+        from orcapod.core.nodes.operator_node import OperatorJobNode
+
+        origin = self._origin
+        if isinstance(origin, RootSource):
+            return origin.as_table(
+                columns={"system_tags": self._record_id_columns is None}
+            )
+        if isinstance(origin, OperatorJobNode):
+            records = origin._stored_rows_for_source()  # pyright: ignore[reportPrivateUsage]  # internal stored read for derivation
+        else:
+            records = origin.get_all_records(all_info=True)
         if records is None:
             return None
         require_supported_nullable_types(records.schema)
-        records = arrow_utils.drop_columns_with_prefix(
-            records,
-            (
-                constants.META_PREFIX,
-                constants.SOURCE_PREFIX,
-                constants.SYSTEM_TAG_PREFIX,
-            ),
-        )
         try:
             stored = stored_data_tags(records.schema)
         except ValueError as exc:
@@ -563,100 +578,155 @@ class DerivedSource(RootSource):
         return schema.empty_table()
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
-        """This source's Arrow schemas: its origin's columns (ITL-640).
+        """Return the declared Arrow schemas, including any tag copies as data."""
+        schema = self._empty_origin_table().schema
+        tags, data = self._origin.keys()
+        copies = [
+            schema.field(tag).with_name(name)
+            for tag, name in (self._tags_as_data or {}).items()
+        ]
+        return (
+            pa.schema([schema.field(name) for name in tags]),
+            pa.schema([*(schema.field(name) for name in data), *copies]),
+        )
 
-        Taken from the origin's typed zero-row table (``_empty_origin_table``) with the
-        ``tags_as_data`` copies, never from rows, so its identity does not change when
-        the origin stores rows. Rows read later must have these types
-        (``_origin_records``).
-        """
-        table = self._empty_origin_table()
+    def _read_lineage(self, table: pa.Table) -> list[tuple[str, ...]]:
+        """Read the complete source and record pairs of each origin row."""
+        if table.num_rows == 0:
+            return []
+        source_prefix = (
+            constants.SYSTEM_TAG_SOURCE_ID_PREFIX + constants.BLOCK_SEPARATOR
+        )
+        record_prefix = (
+            constants.SYSTEM_TAG_RECORD_ID_PREFIX + constants.BLOCK_SEPARATOR
+        )
+        source_names = {
+            name.removeprefix(source_prefix)
+            for name in table.column_names
+            if name.startswith(source_prefix)
+        }
+        record_names = {
+            name.removeprefix(record_prefix)
+            for name in table.column_names
+            if name.startswith(record_prefix)
+        }
+        if not source_names or source_names != record_names:
+            raise RowIdentifierError(
+                f"DerivedSource over {self._origin.label!r}: no complete system-tag "
+                "pair or unmatched source-id and record-id columns"
+            )
+        columns = [
+            (
+                record_prefix + name,
+                table[source_prefix + name].to_pylist(),
+                table[record_prefix + name].to_pylist(),
+            )
+            for name in sorted(record_names)
+        ]
+        result: list[tuple[str, ...]] = []
+        for i in range(table.num_rows):
+            lineage: list[str] = []
+            for column, source_ids, record_ids in columns:
+                source_id, record_id = source_ids[i], record_ids[i]
+                if not isinstance(source_id, str) or not isinstance(record_id, str):
+                    raise RowIdentifierError(
+                        f"DerivedSource over {self._origin.label!r}: null or non-text "
+                        f"system-tag pair for {column!r} in origin row {i}"
+                    )
+                lineage.extend((column, source_id, record_id))
+            result.append(tuple(lineage))
+        return result
+
+    def _select_origin_rows(
+        self, table: pa.Table
+    ) -> tuple[pa.Table, list[tuple[str, ...]]]:
+        """Apply the most-recent policy to stored rows, then validate uniqueness."""
+        from orcapod.core.nodes.function_node import PIPELINE_RECORDED_AT_COL
+
+        node_origin = not isinstance(self._origin, RootSource)
+        if not node_origin and self._record_id_columns is not None:
+            return table, []
+        lineages = self._read_lineage(table)
+        operator_ties = False
+        if node_origin and len(set(lineages)) < len(lineages):
+            recorded_at = cast(
+                "list[datetime]", table[PIPELINE_RECORDED_AT_COL].to_pylist()
+            )
+            result_ids = (
+                cast("list[bytes]", table[constants.DATA_RECORD_ID].to_pylist())
+                if constants.DATA_RECORD_ID in table.column_names
+                else None
+            )
+            operator_ties = result_ids is None
+            indices = _most_recent_rows(lineages, recorded_at, result_ids)
+            table = table.take(indices)
+            lineages = [lineages[i] for i in indices]
+        seen: set[tuple[str, ...]] = set()
+        for lineage in lineages:
+            if lineage in seen:
+                detail = (
+                    " An operator cache can hold tied rows when one batch "
+                    "already repeated the same system tags."
+                    if operator_ties
+                    else ""
+                )
+                raise RowIdentifierError(
+                    f"DerivedSource over {self._origin.label!r}: the origin's rows "
+                    "are not uniquely identified by their system tags. "
+                    f"Repeated pair {lineage[:3]!r} in lineage {lineage!r}.{detail}"
+                )
+            seen.add(lineage)
+        return table, lineages
+
+    def _build_derived_stream(self) -> ArrowTableStream:
+        """Read the origin and enrich its selected rows without computing it."""
+        table = self._origin_records()
+        return self._derive_from(self._empty_origin_table() if table is None else table)
+
+    def _derive_from(self, table: pa.Table) -> ArrowTableStream:
+        """Give the selected rows this source's system tags and data tokens."""
+        table, lineages = self._select_origin_rows(table)
+        tags, data = self._origin.keys()
+        table = table.select(list(dict.fromkeys((*tags, *data))))
         for tag, name in (self._tags_as_data or {}).items():
             table = table.append_column(
                 table.schema.field(tag).with_name(name), table.column(tag)
             )
-        tag_schema, data_schema = self.output_schema()
-        schema = table.schema
-        return (
-            pa.schema([schema.field(name) for name in tag_schema]),
-            pa.schema([schema.field(name) for name in data_schema]),
+        if self._record_id_columns is None:
+            identifiers = [
+                arrow_utils.fold_system_tag_values(
+                    lineage, label=DERIVED_ROW_FOLD_LABEL
+                )
+                for lineage in lineages
+            ]
+        else:
+            identifiers = row_identifiers(table, self._record_id_columns)
+        schema_hash = schema_utils.compute_source_schema_hash(
+            *self.arrow_schemas, self.data_context, self.orcapod_config
         )
-
-    def _build_derived_stream(
-        self, tags_as_data: Mapping[str, str]
-    ) -> tuple[ArrowTableStream, bool]:
-        """Read the origin's rows, append the tag copies and enrich as a source.
-
-        Args:
-            tags_as_data: Maps a tag column of the origin to the name of its copy.
-
-        Returns:
-            The enriched stream, and whether the origin had rows to give. A job
-            node that has not run yet has none; the stream is then empty.
-        """
-        table = self._origin_records()
-        has_rows = table is not None
-        if table is None:
-            table = self._empty_origin_table()
-        return self._derive_from(table, tags_as_data), has_rows
-
-    def _derive_from(
-        self, table: "pa.Table", tags_as_data: Mapping[str, str]
-    ) -> ArrowTableStream:
-        """Append the tag copies to the origin rows ``table`` and enrich it as a source.
-
-        Args:
-            table: Rows of the origin.
-            tags_as_data: Maps a tag column of the origin to the name of its copy.
-        """
-        for tag, name in tags_as_data.items():
-            # The copy is the tag's own Arrow column under a renamed field, so its
-            # type, nullability and field metadata are the tag's exactly.
-            table = table.append_column(
-                table.schema.field(tag).with_name(name), table.column(tag)
-            )
-        builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
-        result = builder.build(
+        return SourceStreamBuilder(
+            self.data_context, self.orcapod_config
+        ).attach_provenance(
             table,
-            tag_columns=self._origin.keys()[0],
+            tag_columns=tags,
+            system_tag_columns=(),
+            schema_hash=schema_hash,
+            source_id=self.source_id,
+            row_identifiers=identifiers,
             data_tags=self._data_tags(),
-            source_name=self.source_name,
-            kind_part=self.kind_part(),
-            record_id_columns=self._record_id_columns or (),
         )
-        return result.stream
 
     def _get_stream(self) -> ArrowTableStream:
-        # Every read of rows notes the provisional use, also of rows kept from an
-        # earlier read (ITL-1331), as a provisional operator's stream does.
+        """Return the enriched rows, retaining a snapshot from a nonempty read."""
         self._note_provisional_identity_use()
-        if self._tags_as_data is not None:
-            if self._cached_stream is not None:
-                return self._cached_stream
-            self._origin_seen = self._origin.last_modified
-            stream, has_rows = self._build_derived_stream(self._tags_as_data)
-            if has_rows:
-                # An origin node that has not run yet is not cached, so the rows
-                # appear on this object once it has.
-                self._cached_stream = stream
-            return stream
-
-        if self._cached_table is None:
-            self._origin_seen = self._origin.last_modified
-            records = self._origin_records()
-            if records is None:
-                self._cached_table = self._empty_origin_table()
-            else:
-                self._cached_table = records
-        return self._stream_over(self._cached_table)
-
-    def _held_rows(self) -> "pa.Table | None":
-        """The rows this source holds from its origin, or ``None`` before a read."""
-        if self._tags_as_data is not None:
-            return (
-                None if self._cached_stream is None else self._cached_stream.as_table()
-            )
-        return self._cached_table
+        if self._cached_stream is not None:
+            return self._cached_stream
+        seen = self._origin.last_modified
+        stream = self._build_derived_stream()
+        if stream.as_table().num_rows:
+            self._cached_stream = stream
+        self._origin_seen = seen
+        return stream
 
     @override
     def check_for_new_data(self) -> bool:
@@ -667,7 +737,7 @@ class DerivedSource(RootSource):
         its modified time moved since this source last read them: a source origin that
         took in new data, by this check or by a check made through another source over
         it, or a job node that ran again. The rows read are compared with the rows
-        held (in any order only when a ``record_id_columns`` gives the record ids); when
+        held (order matters only when the source uses positional record ids). When
         they differ the source holds the new ones and moves its
         modified time. A read or comparison that raises leaves everything as it was, so
         the next check reads again. A source that holds nothing (it has not read its
@@ -684,30 +754,21 @@ class DerivedSource(RootSource):
         seen = self._origin.last_modified
         if seen == self._origin_seen:
             return False
-        held = self._held_rows()
-        if held is None:
+        if self._cached_stream is None:
             self._origin_seen = seen
             self._update_modified_time()
             return True
-        if self._tags_as_data is not None:
-            stream, has_rows = self._build_derived_stream(self._tags_as_data)
-            unchanged = same_rows(
-                held, stream.as_table(), ordered=not self._record_id_columns
-            )
-            self._origin_seen = seen
-            if unchanged:
-                return False
-            self._cached_stream = stream if has_rows else None
-        else:
-            records = self._origin_records()
-            read = self._empty_origin_table() if records is None else records
-            # The stored rows' ids may not be theirs to keep in another order: order
-            # counts unless a record_id_columns were given (never assume).
-            unchanged = same_rows(held, read, ordered=not self._record_id_columns)
-            self._origin_seen = seen
-            if unchanged:
-                return False
-            self._cached_table = read
+        stream = self._build_derived_stream()
+        columns = {"system_tags": True, "source": True}
+        unchanged = same_rows(
+            self._cached_stream.as_table(columns=columns),
+            stream.as_table(columns=columns),
+            ordered=self._record_id_columns == (),
+        )
+        self._origin_seen = seen
+        if unchanged:
+            return False
+        self._cached_stream = stream if stream.as_table().num_rows else None
         self._update_modified_time()
         return True
 
@@ -737,15 +798,13 @@ class DerivedSource(RootSource):
         self._note_provisional_identity_use()
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         origin_kind = "held" if isinstance(self._origin, RootSource) else "stored"
-        if self._tags_as_data is not None and self._cached_stream is not None:
+        if self._cached_stream is not None:
             return self._cached_stream.head(n, columns=config).for_stream(
                 self, origin=origin_kind
             )
-        if self._tags_as_data is None and self._cached_table is not None:
-            stream = self._stream_over(self._cached_table)
-            return stream.head(n, columns=config).for_stream(self, origin=origin_kind)
         if isinstance(self._origin, RootSource):
-            origin_head = self._origin.head(n)
+            origin_columns = {"system_tags": self._record_id_columns is None}
+            origin_head = self._origin.head(n, columns=origin_columns)
             if (
                 config.sort_by_tags
                 and origin_head.status is ViewStatus.ROWS
@@ -757,14 +816,16 @@ class DerivedSource(RootSource):
                 # all, and the system tags this source adds follow the origin's row
                 # order, so the origin is not sorted first. A bounded origin (an
                 # estimated total) is sorted among the rows it read.
-                origin_head = self._origin.head(origin_head.total_rows)
+                origin_head = self._origin.head(
+                    origin_head.total_rows, columns=origin_columns
+                )
             if origin_head.status is not ViewStatus.ROWS:
                 if origin_head.table.num_columns == 0:
                     # The origin's columns are not known without polling it.
                     return origin_head.for_stream(self)
                 # No rows: this source's own columns (tag copies included), with the
                 # origin's status and explanation.
-                empty = self._stream_over(origin_head.table.slice(0, 0))
+                empty = self._derive_from(origin_head.table.slice(0, 0))
                 return dataclasses.replace(
                     StreamView.without_rows(
                         self,
@@ -777,7 +838,7 @@ class DerivedSource(RootSource):
                     total_is_estimate=origin_head.total_is_estimate,
                     description=origin_head.description,
                 )
-            stream = self._stream_over(origin_head.table)
+            stream = self._derive_from(origin_head.table)
             return dataclasses.replace(
                 stream.head(n, columns=config).for_stream(self),
                 total_rows=origin_head.total_rows,
@@ -785,9 +846,8 @@ class DerivedSource(RootSource):
                 origin=origin_head.origin,
                 note=origin_head.note,
             )
-        records = self._origin_records()
-        if records is None or records.num_rows == 0:
-            stream = self._stream_over(self._empty_origin_table())
+        stream = self._build_derived_stream()
+        if not stream.as_table().num_rows:
             return StreamView.without_rows(
                 self,
                 ViewStatus.NOTHING_STORED,
@@ -795,25 +855,7 @@ class DerivedSource(RootSource):
                 tag_columns=stream.keys(columns=config)[0],
                 note="nothing stored: its origin has not run",
             )
-        # Without sorting only the shown rows are enriched. With sorting every stored
-        # row is (they are all read already), so the head is as_table cut to n rows.
-        # The total is the whole stored count.
-        rows = records if config.sort_by_tags else records.slice(0, n)
-        head = self._stream_over(rows).head(n, columns=config)
-        return dataclasses.replace(
-            head.for_stream(self, origin="stored"), total_rows=records.num_rows
-        )
-
-    def _stream_over(self, table: "pa.Table") -> ArrowTableStream:
-        """Return this source's stream over the origin rows ``table``."""
-        if self._tags_as_data is not None:
-            return self._derive_from(table, self._tags_as_data)
-        require_supported_nullable_types(table.schema)
-        return ArrowTableStream(
-            table,
-            tag_columns=self._origin.keys()[0],
-            data_tags=self._data_tags(),
-        )
+        return stream.head(n, columns=config).for_stream(self, origin="stored")
 
     def iter_data(self):
         return self._get_stream().iter_data()

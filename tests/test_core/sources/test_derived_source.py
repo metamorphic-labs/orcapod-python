@@ -28,7 +28,7 @@ import pytest
 
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
-from orcapod.core.sources import DerivedSource, RootSource
+from orcapod.core.sources import ArrowTableSource, DerivedSource, RootSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -49,7 +49,12 @@ def _make_node(n: int = 3, db: InMemoryArrowDatabase | None = None) -> FunctionJ
     pf = PythonDataFunction(double, output_keys="result")
     return FunctionJobNode(
         function_pod=FunctionPod(data_function=pf),
-        input_stream=make_int_stream(n=n),
+        input_stream=ArrowTableSource(
+            make_int_stream(n=n).as_table(),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id="inputs",
+        ),
         pipeline_database=db,
     )
 

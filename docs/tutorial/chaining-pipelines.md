@@ -116,7 +116,7 @@ stages that can be owned by different people.
 
 - `node.as_source()` makes a source from the stored results of a node.
 - A stage built on it reads the stored results and does not run the first stage.
-- `as_source()` reads everything stored for the node; `as_table()` returns this run's output.
+- `as_source()` reads the latest stored result per lineage. `as_table()` returns this run's output.
 - A new job cannot yet use the stored results of a node downstream of a join of two sources.
 
 ## Exercises

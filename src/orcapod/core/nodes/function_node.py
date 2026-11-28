@@ -4262,8 +4262,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         the rows are exactly those of that run's inputs, on either orchestrator, even
         though results of other inputs stay cached and stored (ITL-1093). A node that
         has not run in this process, whose run raised, or that is stale (its input
-        changed since its run) yields nothing (ITL-1095); ``as_source()`` reads every
-        row stored for it.
+        changed since its run) yields nothing (ITL-1095). ``as_source()`` reads the most
+        recent readable record for each lineage.
 
         Raises:
             RuntimeError: If ``load_status`` is UNAVAILABLE.

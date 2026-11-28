@@ -178,6 +178,13 @@ is kept as the name, after the reader's kind part (`csv_v1:delta_table_v1:units`
 issues `SourceNameWarning`. A kind's version moves when a row read before a change could
 read differently after it; a new version is a new source id, so a new source.
 
+A derived source stamps fresh provenance. Its default record id is the labelled
+`derived_row_v1` fold of the upstream pairs. It sorts by record-id column name and feeds
+the name, upstream source-id value and upstream record-id value of each pair to
+`fold_system_tag_values`, which hashes the resulting JSON array. A tagged derived source
+can take explicit record-id key columns. An explicit empty key tuple requests positional
+IDs and adds a positional-policy marker to its content identity.
+
 | Source | Kind part | Default source id |
 |---|---|---|
 | `ArrowTableSource` | `arrow_table_v1` | `arrow_table_v1:arrow_v1:<hex>` of the table |
@@ -328,6 +335,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | value handlers with an ignore list | wrap the value digests above | the type's label | top level, nested, Arrow cell | `logical_types/ignore_list.py:IgnoreListHandler.handle`, `logical_types/ignore_list.py:IgnoreListHandler.hash_ignoring` |
 | parse a stored hash | `"<label>:<hex>"` or `b"<label>:" + digest` | the stored label | saved jobs and pipelines, proxies, a node's saved run hash, a cached output hash | `types/__init__.py:ContentHash.from_string`, `types/__init__.py:ContentHash.from_prefixed_digest` |
 | folds of `Batch` / `GroupBy` | the canonical JSON list of a group's member values, for each system tag | SHA-256 hex after the operation's label: `batch_v1` (`batch.py`), `group_v1` (`group_by.py`); one helper | folded source id and record id | `utils/arrow_utils.py:fold_system_tag_values` |
+| fold of a derived row's lineage | the canonical JSON array of triples in record-id column-name order, flattened as record-id column name, source-id value, and record-id value | SHA-256 hex after the operation's label, `derived_row_v1` | derived source record id and the corresponding source-info tokens | `core/sources/derived_source.py:DerivedSource._derive_from`, `utils/arrow_utils.py:fold_system_tag_values` |
 | run snapshot | sorted labelled sink hashes | SHA-256 hex, 16 digits | the run URI `<job>@<snapshot>` (a name) | `pipeline/job.py:PipelineJob._prepare_run`, `pipeline/job.py:PipelineJob._prepare_run.<locals>.<genexpr>` |
 | user-class identity | a class's identity record | SHA-256 hex prefix | extension name `name@<fingerprint>` (a name) | `logical_types/user_class_identity.py:identity_string` |
 | database registry key | a database config, canonical JSON | SHA-256 hex, 8 digits | `db_<hex>` key in a saved job (a name) | `pipeline/serialization.py:DatabaseRegistry._make_key` |

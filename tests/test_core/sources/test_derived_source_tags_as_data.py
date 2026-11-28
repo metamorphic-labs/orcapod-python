@@ -21,11 +21,11 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
-from orcapod.core.sources import DerivedSource, RootSource
+from orcapod.core.sources import CachedSource, DerivedSource, RootSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.utils.schema_utils import arrow_schema_identity
-from orcapod.errors import InputValidationError
-from orcapod.operators import Join
+from orcapod.errors import InputValidationError, SourceSlotNameCollisionError
+from orcapod.operators import Join, SelectDataColumns
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.types import ColumnConfig
 from orcapod.sources import ArrowTableSource, DictSource, SQLiteTableSource
@@ -315,9 +315,10 @@ class TestProvenance:
         assert derived.source_id == full
         table = derived.as_table(all_info=True)
         (sid_col,) = _prefixed(table, "_tag_source_id")
+        (rid_col,) = _prefixed(table, "_tag_record_id")
         assert set(table[sid_col].to_pylist()) == {full}
         token = table["_source_session_start"][0].as_py()
-        assert token.split("::") == [full, "row_0", "session_start"]
+        assert token.split("::") == [full, table[rid_col][0].as_py(), "session_start"]
 
     def test_several_source_ids_give_several_sources(self):
         sources = [
@@ -376,13 +377,14 @@ class TestProvenance:
             "_source_task_id",
             "_source_session_start",
         }
+        (rid_col,) = _prefixed(table, "_tag_record_id")
         assert (
             table["_source_session_start"][0].as_py()
-            == f"{derived.source_id}::row_0::session_start"
+            == f"{derived.source_id}::{table[rid_col][0].as_py()}::session_start"
         )
         assert (
             table["_source_task_id"][4].as_py()
-            == f"{derived.source_id}::row_4::task_id"
+            == f"{derived.source_id}::{table[rid_col][4].as_py()}::task_id"
         )
 
     def test_record_id_column_gives_value_based_tokens(self):
@@ -408,7 +410,9 @@ class TestProvenance:
         recipe = ArrowTableSource(
             raw, tag_columns=EXPERIMENT_KEYS, tag_only_columns=True, source_id="exp"
         )
-        derived = DerivedSource(_experiment(), tags_as_data=COPY, source_id="exp")
+        derived = DerivedSource(
+            _experiment(), tags_as_data=COPY, source_id="exp", record_id_columns=()
+        )
         r_table = recipe.as_table(columns={"source": True, "system_tags": True})
         d_table = derived.as_table(columns={"source": True, "system_tags": True})
         assert d_table.column_names == r_table.column_names
@@ -427,6 +431,24 @@ class TestProvenance:
 
 
 class TestIdentity:
+    def test_explicit_position_has_a_distinct_content_identity(self):
+        origin = _experiment()
+        folded = DerivedSource(origin, tags_as_data=COPY, source_id="exp")
+        positional = DerivedSource(
+            origin, tags_as_data=COPY, source_id="exp", record_id_columns=()
+        )
+        assert folded.source_id == positional.source_id
+        assert folded.pipeline_hash() == positional.pipeline_hash()
+        assert folded.content_hash() != positional.content_hash()
+        database = InMemoryArrowDatabase()
+        assert CachedSource(folded, cache_database=database).cache_path != (
+            CachedSource(positional, cache_database=database).cache_path
+        )
+        with pytest.raises(SourceSlotNameCollisionError):
+            with PipelineJob(name="twice", database=database):
+                SelectDataColumns(["session_start"])(folded, label="folded")
+                SelectDataColumns(["session_start"])(positional, label="positional")
+
     def test_pipeline_hash_is_schema_only(self):
         a = DerivedSource(
             _experiment("a"), tags_as_data=COPY, source_id="with_tags_as_data"
@@ -882,7 +904,7 @@ class TestNodeOrigin:
         plain = node.as_source()
         assert plain.keys() == node.keys()
         assert plain.source_id == f"derived_v1:stage1:{node.content_hash().to_string()}"
-        assert _prefixed(plain.as_table(all_info=True), "_tag_") == []
+        assert len(_prefixed(plain.as_table(all_info=True), "_tag_")) == 2
 
 
 class TestZeroRowOrigin:

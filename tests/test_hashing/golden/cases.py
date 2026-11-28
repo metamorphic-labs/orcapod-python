@@ -1255,8 +1255,8 @@ def schema_derived_source_tags_as_data() -> dict[str, Any]:
 
     Provisional: ``DerivedSource`` is (ITL-1331).
 
-    Two variants, each with its own source id, as this form requires (ITL-1313): by
-    position, and with a ``record_id_column``.
+    Two variants, each with its own source id, as this form requires (ITL-1313):
+    folded upstream lineage, and an explicit key column.
 
     Returns:
         Each variant's source id and stream summary.
