@@ -35,6 +35,7 @@ from orcapod.pipeline import (
     SyncPipelineOrchestrator,
 )
 from orcapod.pipeline.observer import NoOpObserver
+from orcapod.pipeline.observer_losses import RunLosses
 from tests.test_core.operators.several_items import (
     DATA_FIRST_REVERSED,
     MAIN,
@@ -835,12 +836,39 @@ class _UnprintableWriteError(OSError):
         raise RuntimeError("could not format the failed write")
 
 
+class _UnformattableMessage(str):
+    @override
+    def __format__(self, format_spec: str, /) -> str:
+        raise RuntimeError("could not format the write error's message")
+
+
+class _WriteErrorWithStringSubclass(OSError):
+    @override
+    def __str__(self) -> str:
+        return _UnformattableMessage("failed to write")
+
+
 @pytest.mark.parametrize("kind", ["status", "logging"])
+@pytest.mark.parametrize(
+    ("error", "first_error"),
+    [
+        (_UnprintableWriteError, "_UnprintableWriteError"),
+        (
+            _WriteErrorWithStringSubclass,
+            "_WriteErrorWithStringSubclass: failed to write",
+        ),
+    ],
+    ids=["broken-str", "string-subclass"],
+)
 def test_unprintable_write_error_preserves_rows(
-    kind: str, orchestrator: Any, arrangement: Arrangement
+    kind: str,
+    orchestrator: Any,
+    arrangement: Arrangement,
+    error: type[OSError],
+    first_error: str,
 ) -> None:
     """Summarizing either observer's error cannot damage the run."""
-    database = _database(error=_UnprintableWriteError)
+    database = _database(error=error)
     observer = (
         StatusObserver(database) if kind == "status" else LoggingObserver(database)
     )
@@ -849,12 +877,39 @@ def test_unprintable_write_error_preserves_rows(
     summary, messages = _run_losing(job, orchestrator=orchestrator, observer=observer)
 
     assert summary.lost_observer_events == {
-        kind: LostObserverEvents(
-            kind, count, "_UnprintableWriteError: <message unavailable>"
-        )
+        kind: LostObserverEvents(kind, count, first_error)
     }
     assert len(messages) == 1
     assert summary.ok and _rows(job) == EXPECTED_ROWS
+
+
+def test_concurrent_losses_keep_the_first_reported_error() -> None:
+    """A later report cannot claim first place while the first formats its error."""
+    formatting = threading.Event()
+    release = threading.Event()
+    losses = RunLosses()
+
+    class FirstWriteError(OSError):
+        @override
+        def __str__(self) -> str:
+            formatting.set()
+            if not release.wait(timeout=10):
+                raise RuntimeError("timed out waiting for the second report")
+            return "failed first"
+
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(losses.record, "status", FirstWriteError())
+        try:
+            assert formatting.wait(timeout=10)
+            second = pool.submit(losses.record, "status", OSError("failed second"))
+            second.result(timeout=10)
+        finally:
+            release.set()
+        first.result(timeout=10)
+
+    assert losses.by_kind() == {
+        "status": LostObserverEvents("status", 2, "FirstWriteError: failed first")
+    }
 
 
 def test_a_failing_log_handler_cannot_interrupt_loss_reporting(

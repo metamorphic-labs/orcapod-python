@@ -29,7 +29,8 @@ class LostObserverEvents:
         kind: The observer kind: ``"status"`` (a ``StatusObserver``'s state
             transitions) or ``"logging"`` (a ``LoggingObserver``'s log rows).
         count: How many events of that kind were not recorded.
-        first_error: The first failed write's error, as ``Type: message``.
+        first_error: The first reported error as ``Type: message``, or its type
+            name if its message could not be rendered.
     """
 
     kind: str
@@ -57,24 +58,39 @@ class RunLosses:
             kind: The observer kind.
             error: What the failed write raised.
         """
-        try:
-            message = str(error)
-        except Exception:
-            message = "<message unavailable>"
-        text = f"{type(error).__name__}: {message}"
         with self._lock:
-            self._counts[kind] = self._counts.get(kind, 0) + 1
-            _ = self._first_errors.setdefault(kind, text)
+            count = self._counts.get(kind, 0) + 1
+            self._counts[kind] = count
+        if count != 1:
+            return
+
+        # The first report has claimed this kind. Formatting can invoke user code,
+        # so let other reports proceed while it runs.
+        try:
+            name = str.__str__(type(error).__name__)
+        except BaseException:
+            name = "Exception"
+        try:
+            # An exception's __str__ can return a subclass with a custom __format__.
+            message = str.__str__(str(error))
+            text = f"{name}: {message}"
+        except BaseException:
+            text = name
+        with self._lock:
+            self._first_errors[kind] = text
 
     def by_kind(self) -> dict[str, LostObserverEvents]:
         """The lost events so far, by observer kind, in kind order.
 
         Returns:
-            One entry per kind that lost an event; empty when none was lost.
+            One entry per kind that lost an event; empty when none was lost. A
+            report still formatting its first error shows ``Exception`` until ready.
         """
         with self._lock:
             return {
-                kind: LostObserverEvents(kind, count, self._first_errors[kind])
+                kind: LostObserverEvents(
+                    kind, count, self._first_errors.get(kind, "Exception")
+                )
                 for kind, count in sorted(self._counts.items())
             }
 
