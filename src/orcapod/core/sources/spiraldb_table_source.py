@@ -538,7 +538,7 @@ class SpiralDBTableSource(RootSource):
         hash, source id, schema and system-tag columns, and every row it reads is the
         row this source reads, record id included; it adds no step to a pipeline. A
         pipeline that must select rows as part of what it computes uses an operator
-        (``SemiJoin``, ``PolarsFilter``) instead. SpiralDB applies the conditions in
+        (``SemiJoin``, ``Filter``) instead. SpiralDB applies the conditions in
         the scan, as for the ``where=`` argument: the two are one mechanism, and the
         conditions are added to any the source already has. Everything else is carried
         over (the pinned table version, ``limit``, ``max_rows``, tags, data-tags,
