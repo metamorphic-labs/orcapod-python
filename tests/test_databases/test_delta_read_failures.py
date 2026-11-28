@@ -277,6 +277,67 @@ def test_partition_paths_do_not_count_as_separate_tables(base: Path, name: str) 
     assert db.list_table_paths((*path, "tag1=a")) == []
 
 
+@pytest.mark.parametrize("operation", ["exists", "read", "schema", "create"])
+def test_partition_path_accepts_independent_child(
+    base: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A parent's active data files do not make its partition a damaged child."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    parent = ("group", "table")
+    partition = (*parent, "tag1=a", "tag2=b")
+    data = pa.table(
+        {
+            DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"],
+            "tag1": ["a"],
+            "tag2": ["b"],
+            "x": [1],
+        }
+    )
+    deltalake.write_deltalake(
+        base.joinpath(*parent), data, partition_by=["tag1", "tag2"]
+    )
+    db = DeltaTableDatabase(base).at(*partition[:-1])
+    child = partition[-1:]
+    if operation == "exists":
+        assert not db.table_exists(child)
+    elif operation == "read":
+        assert db.get_all_records(child) is None
+    elif operation == "schema":
+        assert db.get_table_schema(child) is None
+    else:
+        db.add_record(child, b"b", pa.table({"x": [2]}), flush=True)
+        child_rows = DeltaTableDatabase(base).get_all_records(partition)
+        assert child_rows is not None and child_rows.column("x").to_pylist() == [2]
+        parent_rows = DeltaTableDatabase(base).get_all_records(parent)
+        assert parent_rows is not None and parent_rows.column("x").to_pylist() == [1]
+
+
+def test_missing_child_log_is_refused_inside_occupied_partition(
+    base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parent's files and a damaged child's files can share a partition."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    parent = ("parent",)
+    child = (*parent, "tag1=a", "tag2=b")
+    record_id = DeltaTableDatabase.RECORD_ID_COLUMN
+    data = pa.table({record_id: [b"a"], "tag1": ["a"], "tag2": ["b"], "x": [1]})
+    deltalake.write_deltalake(
+        base.joinpath(*parent), data, partition_by=["tag1", "tag2"]
+    )
+    directory = base.joinpath(*child)
+    deltalake.write_deltalake(directory, pa.table({record_id: [b"b"], "x": [2]}))
+    shutil.rmtree(directory / "_delta_log")
+    before = snapshot(directory)
+
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log"):
+        DeltaTableDatabase(base).get_all_records(child)
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log"):
+        DeltaTableDatabase(base).add_record(
+            child, b"c", pa.table({"x": [3]}), flush=True
+        )
+    assert snapshot(directory) == before
+
+
 def move_delta_data_file(directory: Path) -> Path:
     """Move a Delta file into an arbitrary directory while retaining its AddFile."""
     log = next((directory / "_delta_log").glob("*.json"))

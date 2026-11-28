@@ -173,6 +173,41 @@ def test_s3_non_hive_orphan_is_refused_on_first_read_and_flush(
     assert {name: fs.cat_file(name) for name in fs.find(uri)} == before
 
 
+def test_s3_partition_path_accepts_independent_child(
+    s3_base_uri: str,
+    s3_storage_options: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Objects registered in a parent's log are not orphaned at its partition."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    path = ("parent",)
+    partition = (*path, "tag1=a", "tag2=b")
+    data = pa.table(
+        {
+            DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"],
+            "tag1": ["a"],
+            "tag2": ["b"],
+            "x": [1],
+        }
+    )
+    deltalake.write_deltalake(
+        f"{s3_base_uri}/parent",
+        data,
+        partition_by=["tag1", "tag2"],
+        storage_options=s3_storage_options,
+    )
+    db = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    assert not db.table_exists(partition)
+    assert db.get_all_records(partition) is None
+    assert db.get_table_schema(partition) is None
+    db.add_record(partition, b"b", pa.table({"x": [2]}), flush=True)
+    fresh = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    child_rows = fresh.get_all_records(partition)
+    assert child_rows is not None and child_rows.column("x").to_pylist() == [2]
+    parent_rows = fresh.get_all_records(path)
+    assert parent_rows is not None and parent_rows.column("x").to_pylist() == [1]
+
+
 def test_s3_skip_duplicates(s3_base_uri, s3_storage_options):
     db = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
     record = pa.table({"v": [1]})

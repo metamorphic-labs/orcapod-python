@@ -7,12 +7,13 @@ import re
 import sys
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import sleep
 from typing import TYPE_CHECKING, Any, Literal, cast
+from urllib.parse import unquote
 
 import polars as pl
 import pyarrow as pa
@@ -1965,7 +1966,7 @@ class DeltaTableDatabase:
         try:
             return deltalake.DeltaTable(table_uri, storage_options=options)
         except TableNotFoundError as missing_log:
-            if not self._has_delta_data_files(table_uri):
+            if not self._has_orphaned_delta_data_files(table_uri):
                 return None
             for delay in _MISSING_LOG_RETRY_DELAYS:
                 sleep(delay)
@@ -1977,8 +1978,55 @@ class DeltaTableDatabase:
                 f"Found Parquet data files without a readable {_DELTA_LOG_DIRECTORY}"
             ) from missing_log
 
-    def _has_delta_data_files(self, table_uri: str) -> bool:
-        """Find Parquet files at any depth outside logs and published child tables."""
+    def _has_orphaned_delta_data_files(self, table_uri: str) -> bool:
+        """Check whether the missing table path holds data unclaimed by ancestors."""
+        ancestor_files: set[str] | None = None
+        for path in self._delta_data_paths(table_uri):
+            if ancestor_files is None:
+                ancestor_files = self._ancestor_delta_data_paths(table_uri)
+            if path not in ancestor_files:
+                return True
+        return False
+
+    def _ancestor_delta_data_paths(self, table_uri: str) -> set[str]:
+        """Get files under the candidate path registered in readable ancestor logs."""
+        from deltalake.exceptions import DeltaError
+
+        if self._is_cloud:
+            scheme, separator, location = table_uri.partition("://")
+            uri_prefix = scheme + separator
+            table_path = PurePosixPath(location)
+        else:
+            uri_prefix = ""
+            table_path = Path(table_uri).absolute()
+
+        owned: set[str] = set()
+        for ancestor in table_path.parents:
+            if not ancestor.parts:
+                continue  # A cloud URI must include its bucket or container.
+            if (
+                isinstance(ancestor, Path)
+                and not (ancestor / _DELTA_LOG_DIRECTORY).is_dir()
+            ):
+                continue
+            ancestor_uri = uri_prefix + str(ancestor)
+            prefix = table_path.relative_to(ancestor).as_posix() + "/"
+            try:
+                table = deltalake.DeltaTable(
+                    ancestor_uri, storage_options=self._storage_options or None
+                )
+                actions = table.get_add_actions()
+            except DeltaError:
+                continue  # Only a readable ancestor log can establish ownership.
+            for path in actions.column("path").to_pylist():
+                # Delta encodes AddFile paths, including '%' in Hive partition names.
+                relative_path = unquote(path)
+                if relative_path.startswith(prefix):
+                    owned.add(relative_path[len(prefix) :])
+        return owned
+
+    def _delta_data_paths(self, table_uri: str) -> Iterator[str]:
+        """Yield relative Parquet paths outside logs and published child tables."""
         if not self._is_cloud:
             pending = [table_uri]
             while pending:
@@ -1996,10 +2044,10 @@ class DeltaTableDatabase:
                             if entry.is_dir(follow_symlinks=False):
                                 pending.append(entry.path)
                             elif entry.name.endswith(".parquet") and entry.is_file():
-                                return True
+                                yield Path(entry.path).relative_to(table_uri).as_posix()
                 except FileNotFoundError:
                     continue
-            return False
+            return
 
         from deltalake.fs import DeltaStorageHandler
         from pyarrow.fs import FileSelector, FileType
@@ -2024,8 +2072,7 @@ class DeltaTableDatabase:
             if _DELTA_LOG_DIRECTORY not in parts[:-1] and not any(
                 tuple(parts[:depth]) in child_tables for depth in range(1, len(parts))
             ):
-                return True
-        return False
+                yield "/".join(parts)
 
     def _read_failed(self, record_path: tuple[str, ...]) -> OrcapodDatabaseReadError:
         """Build the error for a table at ``record_path`` that exists but cannot be read.
