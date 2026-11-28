@@ -695,7 +695,7 @@ class DataProtocol(DatagramProtocol, Protocol):
 
     def with_source_info(
         self,
-        **source_info: SourceInfoValue,
+        **source_info: "SourceInfoValue | pa.Scalar[Any]",
     ) -> Self:
         """
         Create a new data with updated source information.
@@ -704,7 +704,9 @@ class DataProtocol(DatagramProtocol, Protocol):
         tracking data provenance and lineage through the computational graph.
 
         Args:
-            **source_info: Source metadata as keyword arguments.
+            **source_info: The token of each named data column: a Python value,
+                typed from that value, or an Arrow scalar that carries the token
+                column's type, which is kept.
 
         Returns:
             A new data instance with updated source information.

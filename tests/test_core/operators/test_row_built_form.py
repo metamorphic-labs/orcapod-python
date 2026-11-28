@@ -28,7 +28,6 @@ import pytest
 from orcapod import PipelineJob
 from orcapod.core.operators import Batch, DropNulls, SelectDataColumns
 from orcapod.core.operators.static_output_pod import (
-    SourceInfoTypesDisagree,
     StaticOutputOperatorPod,
 )
 from orcapod.databases import InMemoryArrowDatabase
@@ -36,7 +35,9 @@ from orcapod.pipeline.observer import NoOpObserver
 from orcapod.types import CacheMode
 from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
+from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
+from tests.token_shapes import data_type_for, nested_value, with_token_column
 from tests.test_core.operators.test_async_sync_equivalence import (
     AFTER_OPERATOR_CASES,
     CASES,
@@ -154,7 +155,8 @@ def _raw_stream() -> ArrowTableStream:
             "k": pa.array([1, 2], pa.int64()),
             "j": pa.array(["a", "b"], pa.large_string()),
             system_tag: pa.array(["s1", "s2"], pa.large_string()),
-            "x": pa.array([1.0, float("nan")]),
+            # A list token needs list data (the token-shape rule, ITL-1491).
+            "x": pa.array([[1.0, float("nan")], [2.0]], pa.large_list(pa.float64())),
             "z": pa.array([3, None], pa.int8()),
             "__note": pa.array(["a", "b"]),
             "_source_x": pa.array([["a", "b"], ["c"]], pa.large_list(member)),
@@ -200,33 +202,50 @@ def test_row_built_form_of_a_raw_stream(make: Any) -> None:
     assert_same_values(formed, built)
 
 
-def _source_table() -> pa.Table:
-    """A source's table with its system tags and source info (one tag, one data)."""
-    from orcapod.sources import DictSource
+def _source(kind: pa.DataType | None = None) -> Any:
+    """A source with one tag and one data column, ``x``.
 
-    source = DictSource(
-        [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
+    Args:
+        kind: A token type whose list layers ``x`` is given (the token-shape rule,
+            ITL-1491: a list token needs list data); ``None`` for a plain integer.
+    """
+    from orcapod.sources import ArrowTableSource
+
+    data_type = data_type_for(kind or pa.large_string())
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("x", data_type, nullable=False),
+        ]
+    )
+    return ArrowTableSource(
+        pa.Table.from_arrays(
+            [
+                pa.array([1, 2], pa.int64()),
+                pa.array([nested_value(v, data_type) for v in (1, 2)], data_type),
+            ],
+            schema=schema,
+        ),
         tag_columns=["k"],
         tag_only_columns=True,
         source_id="s",
     )
-    return source.as_table(columns={"source": True, "system_tags": True})
+
+
+def _source_table() -> pa.Table:
+    """A source's table with its system tags and source info (one tag, one data)."""
+    return _source().as_table(columns={"source": True, "system_tags": True})
 
 
 def _with_source_x(values: list[Any], kind: pa.DataType) -> ArrowTableStream:
     """A source's rows as a raw stream, ``_source_x`` replaced by ``values`` of ``kind``.
 
-    It keeps the source's system-tag pair, so a job slot accepts it (Codex on PR #485).
+    ``x`` gets the list layers of ``kind``, each row's value at every token position
+    (the token-shape rule, ITL-1491). The stream keeps the source's system-tag pair,
+    so a job slot accepts it (Codex on PR #485).
     """
-    table = _source_table()
-    position = table.schema.get_field_index("_source_x")
     return ArrowTableStream(
-        table.set_column(
-            position,
-            pa.field("_source_x", kind, nullable=True),
-            pa.array(values, kind),
-        ),
-        tag_columns=["k"],
+        with_token_column(_source_table(), "x", values, kind), tag_columns=["k"]
     )
 
 
@@ -238,9 +257,9 @@ _NESTED = pa.large_list(_STRINGS)
     "make",
     [
         pytest.param(lambda: _with_source_x([[], []], _NESTED), id="empty-lists"),
-        pytest.param(lambda: _with_source_x([None, None], _STRINGS), id="null-lists"),
+        pytest.param(lambda: _with_source_x([[], []], _STRINGS), id="empty-strings"),
         pytest.param(
-            lambda: _with_source_x([[None], [None]], _NESTED), id="lists-of-null"
+            lambda: _with_source_x([[[None]], [[None]]], _NESTED), id="lists-of-null"
         ),
         pytest.param(
             lambda: Batch(batch_size=1)(
@@ -249,42 +268,79 @@ _NESTED = pa.large_list(_STRINGS)
             id="batch-1-of-null-tokens",
         ),
         pytest.param(
-            lambda: Batch(batch_size=2)(_with_source_x([None, None], _STRINGS)),
-            id="batch-2-of-null-lists",
+            lambda: Batch(batch_size=2)(
+                _with_source_x([None, None], pa.large_string())
+            ),
+            id="batch-2-of-null-tokens",
         ),
         pytest.param(lambda: _with_source_x([None, None], pa.null()), id="null-type"),
     ],
 )
-def test_source_info_types_follow_the_tokens(make: Any) -> None:
-    """F types each source-info column from its tokens, as the rows do.
+def test_source_info_types_are_the_streams(make: Any) -> None:
+    """F keeps each source-info column's type, as the rows do (ITL-1491).
 
-    A list of ``None`` or of empty lists shows fewer levels than its column declares;
-    the rows type it from the tokens (``arrow_utils.source_info_arrow_type``), and so
-    does F, over the whole table.
+    A list of ``None`` or of empty lists shows fewer levels than its column declares.
+    The pipeline determines the column's type; neither the rows nor F take it from
+    the tokens: both give the stream's type (a ``null`` column as ``large_string``,
+    as every datagram stores it).
     """
     stream = make()
     built, _, _ = StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))  # pyright: ignore[reportPrivateUsage]  # R, the oracle
+    table = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     formed = StaticOutputOperatorPod._row_built_form(  # pyright: ignore[reportPrivateUsage]  # F, under test
-        stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
+        table, stream.keys()
     )
     assert formed.column_names == built.column_names
     assert formed.schema.equals(built.schema, check_metadata=True)
     assert_same_values(formed, built)
+    declared = table.schema.field("_source_x").type
+    assert formed.schema.field("_source_x").type == (
+        pa.large_string() if pa.types.is_null(declared) else declared
+    )
 
 
-def test_tokens_of_two_types_raise_as_the_rows_do() -> None:
-    """A list token on one row and ``None`` on another: no table holds both rows.
+@pytest.mark.parametrize(
+    ("values", "kind"),
+    [
+        pytest.param([["s"], []], _STRINGS, id="list-beside-empty"),
+        pytest.param([[[None]], [["s"]]], _NESTED, id="null-inside-beside-nested"),
+        pytest.param([[], [["s"]]], _NESTED, id="empty-beside-nested"),
+        pytest.param(
+            [[[], [[]]], [[["t"]]]], pa.large_list(_NESTED), id="three-levels"
+        ),
+        pytest.param(
+            [["a", "b"], ["c", "d"]], pa.list_(pa.large_string(), 2), id="fixed-size"
+        ),
+        pytest.param(
+            [["a"], ["b"]],
+            pa.large_list(pa.field("member", pa.large_string(), nullable=False)),
+            id="named-non-null-item",
+        ),
+    ],
+)
+def test_tokens_no_value_could_type_alike_make_one_table(
+    values: list[Any], kind: pa.DataType
+) -> None:
+    """Rows whose tokens show two shapes, or a type no value gives, make one table.
 
-    The rows' tables cannot be concatenated (``ArrowInvalid``); F says so
-    (``SourceInfoTypesDisagree``), and a node then builds the rows, which raise.
+    Before ITL-1491 each row typed its token from its value, so a token that shows
+    fewer levels than its column (an empty list, a null inside a list) could not be
+    concatenated with a full one (``ArrowInvalid``), and F said so
+    (``SourceInfoTypesDisagree``). The rows and F now keep the stream's type: a
+    fixed-size list stays one, and a list's item field keeps its name and
+    nullability. (A null list token is not a valid token: the test below.)
     """
-    stream = _with_source_x([["s"], None], _STRINGS)
-    with pytest.raises(pa.ArrowInvalid, match="Schema at index 1 was different"):
-        StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))  # pyright: ignore[reportPrivateUsage]  # R, the oracle
-    with pytest.raises(SourceInfoTypesDisagree, match="_source_x"):
-        StaticOutputOperatorPod._row_built_form(  # pyright: ignore[reportPrivateUsage]  # F, under test
-            stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
-        )
+    stream = _with_source_x(values, kind)
+    built, _, _ = StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))  # pyright: ignore[reportPrivateUsage]  # R, the oracle
+    formed = StaticOutputOperatorPod._row_built_form(  # pyright: ignore[reportPrivateUsage]  # F, under test
+        stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
+    )
+    for table in (built, formed):
+        field = table.schema.field("_source_x")
+        assert field.type.equals(kind, check_metadata=True)
+        assert field.nullable == (None in values)
+        assert table.column("_source_x").to_pylist() == values
+    assert formed.schema.equals(built.schema, check_metadata=True)
 
 
 class _NodeEvents(NoOpObserver):
@@ -305,16 +361,14 @@ class _NodeEvents(NoOpObserver):
         self.events.append(("end", node_label))
 
 
-def _batched_job(database: InMemoryArrowDatabase) -> PipelineJob:
-    """``source -> select x -> Batch(2)``, the batch node in ``LOG`` mode."""
-    from orcapod.sources import DictSource
+def _batched_job(
+    database: InMemoryArrowDatabase, kind: pa.DataType | None = None
+) -> PipelineJob:
+    """``source -> select x -> Batch(2)``, the batch node in ``LOG`` mode.
 
-    source = DictSource(
-        [{"k": 1, "x": 1}, {"k": 2, "x": 2}],
-        tag_columns=["k"],
-        tag_only_columns=True,
-        source_id="s",
-    )
+    ``x`` has the list layers of the token type ``kind`` its slot is to be bound with.
+    """
+    source = _source(kind)
     job = PipelineJob(name="source_info_types", database=database)
     with job:
         Batch(batch_size=2)(source.select_data_columns(["x"]), label="batched")
@@ -324,36 +378,91 @@ def _batched_job(database: InMemoryArrowDatabase) -> PipelineJob:
     return job
 
 
-def test_a_job_keeps_and_stores_the_token_type_the_rows_give() -> None:
-    """A bound raw source with null list tokens, through ``Batch(2)`` in ``LOG`` mode.
+@pytest.mark.parametrize(
+    ("values", "kind"),
+    [
+        pytest.param([None, None], _STRINGS, id="null-lists"),
+        pytest.param([["s"], None], _STRINGS, id="list-beside-null"),
+        pytest.param([None, [["s"]]], _NESTED, id="null-beside-nested"),
+        pytest.param(
+            [None, ["a", "b"]], pa.list_(pa.large_string(), 2), id="null-fixed"
+        ),
+    ],
+)
+def test_a_null_list_token_is_refused_when_the_stream_is_built(
+    values: list[Any], kind: pa.DataType
+) -> None:
+    """A token that has a list layer is never null (the token-shape rule, ITL-1491).
 
-    The rows type ``[None, None]`` as ``large_list<large_string>``: kept and stored so,
-    as on ``main``, not as the list of the input's declared list type.
+    Replaces the cases that built streams with null list tokens ("null-lists",
+    "batch-2-of-null-lists", "list-beside-null", and the job over null list tokens
+    through ``Batch(2)``): such a stream is refused where it is built, naming the
+    token column, its data column and both types, so neither F, the rows nor a job
+    ever sees one. It still protects what those cases did: no table is built whose
+    rows disagree on a token column's type.
+    """
+    with pytest.raises(InputValidationError) as refused:
+        _ = _with_source_x(values, kind)
+    message = str(refused.value)
+    assert "'_source_x'" in message and "'x'" in message
+    assert str(kind) in message and str(data_type_for(kind)) in message
+    assert "null" in message
+
+
+def test_a_job_keeps_and_stores_the_token_type_of_a_batch_of_null_tokens() -> None:
+    """A bound raw source with null string tokens, through ``Batch(2)`` in ``LOG`` mode.
+
+    A plain string token may be null. ``Batch`` puts the two null tokens into one
+    list, an element of which may be null: kept and stored as
+    ``large_list<large_string>``, the type ``Batch`` declares over string tokens.
     """
     database = InMemoryArrowDatabase()
     job = _batched_job(database)
-    job.bind(sources={"s": _with_source_x([None, None], _STRINGS)})
+    job.bind(sources={"s": _with_source_x([None, None], pa.large_string())})
     job.run()
     node = job.nodes["batched"]
     kept = node.as_table(columns={"source": True})
     assert kept.schema.field("_source_x").type == _STRINGS
+    assert kept.column("_source_x").to_pylist() == [[None, None]]
     stored = node.get_all_records(columns={"source": True})
     assert stored is not None
     assert stored.schema.field("_source_x").type == _STRINGS
 
 
-def test_a_job_over_tokens_of_two_types_fails_as_main_does() -> None:
-    """The run raises the rows' ``ArrowInvalid`` after the source node has ended.
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("values", "kind"),
+    [
+        pytest.param([["s"], []], _STRINGS, id="list-beside-empty"),
+        pytest.param([[[], [[]]], [[], [[]]]], pa.large_list(_NESTED), id="deep"),
+    ],
+)
+def test_a_job_over_tokens_no_value_could_type_alike_completes(
+    values: list[Any], kind: pa.DataType, asynchronous: bool
+) -> None:
+    """Rows that used to raise where they are built into one table now pass.
 
-    On ``main`` the source node hands its rows on, and the run fails where they are
-    concatenated for its successor: the same error, after the same events.
+    A list token beside an empty list and a token whose value shows fewer levels
+    than its column (``ArrowTypeError``) raised at the successor's edge, as on
+    ``main``. The rows keep the stream's token type
+    (ITL-1491), so the run completes on both orchestrators, with the same events
+    and the same batch: one more list level of the declared type.
     """
-    job = _batched_job(InMemoryArrowDatabase())
-    job.bind(sources={"s": _with_source_x([["s"], None], _STRINGS)})
+    from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+    job = _batched_job(InMemoryArrowDatabase(), kind)
+    job.bind(sources={"s": _with_source_x(values, kind)})
     observer = _NodeEvents()
-    with pytest.raises(pa.ArrowInvalid, match="Schema at index 1 was different"):
-        job.run(observer=observer)
-    assert observer.events == [("start", "s"), ("end", "s")]
+    orchestrator = (
+        AsyncPipelineOrchestrator() if asynchronous else SyncPipelineOrchestrator()
+    )
+    job.run(observer=observer, orchestrator=orchestrator)
+    assert sorted(observer.events) == sorted(
+        (event, label) for label in job.nodes for event in ("start", "end")
+    )
+    kept = job.nodes["batched"].as_table(columns={"source": True})
+    assert kept.schema.field("_source_x").type == pa.large_list(kind)
+    assert kept.column("_source_x").to_pylist() == [values]
 
 
 def test_a_source_with_a_nullable_system_tag_is_not_bound() -> None:
@@ -391,19 +500,3 @@ def test_a_source_with_a_nullable_system_tag_is_not_bound() -> None:
     slot = next(label for label in job.nodes if label != "selected")
     with pytest.raises(SourceSpecMismatchError, match="record_id"):
         job.bind(sources={slot: ArrowTableStream(with_null, tag_columns=["k"])})
-
-
-def test_a_token_the_rows_cannot_convert_fails_as_main_does() -> None:
-    """A conversion failure of F's whole-table build falls back to the rows, as on main.
-
-    Each row's token ``[None, [[]]]`` gives one list level (``source_info_arrow_type``),
-    whose conversion fails (``ArrowTypeError``). The node builds its rows, which raise
-    the same error, after the source node has ended (Codex on PR #485, round 2).
-    """
-    nested = pa.large_list(_NESTED)
-    job = _batched_job(InMemoryArrowDatabase())
-    job.bind(sources={"s": _with_source_x([[None, [[]]], [None, [[]]]], nested)})
-    observer = _NodeEvents()
-    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
-        job.run(observer=observer)
-    assert observer.events == [("start", "s"), ("end", "s")]

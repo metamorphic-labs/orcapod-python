@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import pandas as pd
 import polars as pl
 import pyarrow as pa
 
@@ -14,12 +15,17 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
     require_custom_system_tags,
     require_supported_nullable_types,
+    require_system_tag_without_field_metadata,
 )
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
-    from polars._typing import FrameInitTypes
+    from polars._typing import (
+        ArrowArrayExportable,
+        ArrowStreamExportable,
+        FrameInitTypes,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +71,27 @@ class DataFrameSource(RootSource):
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
 
-        df = pl.DataFrame(data)
+        # Keep pandas and Polars on their native paths even if they export Arrow.
+        # For Arrow inputs, materialize once before Polars drops field metadata.
+        if not isinstance(data, (pd.DataFrame, pl.DataFrame, pl.Series)) and (
+            hasattr(data, "__arrow_c_stream__") or hasattr(data, "__arrow_c_array__")
+        ):
+            # Like Polars, prefer the array export when both are available.
+            if hasattr(data, "__arrow_c_array__"):
+                batch = pa.record_batch(cast("ArrowArrayExportable", data))
+                arrow_input = pa.Table.from_batches([batch])
+            else:
+                arrow_input = pa.table(cast("ArrowStreamExportable", data))
+            for field in arrow_input.schema:
+                if field.name in system_tag_columns:
+                    require_system_tag_without_field_metadata(field)
+            # Polars rechunks native tables but preserves chunks on exporter inputs.
+            df = cast(
+                pl.DataFrame,
+                pl.from_arrow(arrow_input, rechunk=isinstance(data, pa.Table)),
+            )
+        else:
+            df = pl.DataFrame(data)
 
         # Convert any Object-dtype columns to Arrow-compatible types.
         object_columns = [c for c in df.columns if df[c].dtype == pl.Object]

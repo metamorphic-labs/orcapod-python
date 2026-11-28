@@ -93,8 +93,10 @@ from orcapod.core.operators.join import (
     _COMMON_JOIN_KEY,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     _MERGED_SOURCE_PREFIX,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     Join,
+    NullTokenListError,
     _matched_pairs,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     _with_common_key,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+    null_token_list_error,
 )
 from orcapod.core.operators.base import require_shared_arrow_type
 from orcapod.core.operators.key_nullability import key_nullable
@@ -112,10 +114,8 @@ from orcapod.core.operators.semijoin import (
     _has_whole_key,  # pyright: ignore[reportPrivateUsage]  # SemiJoin's one rule
 )
 from orcapod.core.operators.static_output_pod import (
-    RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
     settle_token_types,
-    tokens_as,
 )
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -625,21 +625,17 @@ class StreamingJoinKernel(ABC):
         table = pa.Table.from_batches([batch]).select(layout.names)
         columns = list(table.columns)
         for index, (field, actual) in enumerate(zip(layout, table.schema)):
-            if field.type == actual.type:
+            # The pipeline declares token types including nested item fields.
+            if field.type.equals(
+                actual.type,
+                check_metadata=field.name.startswith(constants.SOURCE_PREFIX),
+            ):
                 continue
             if not table.num_rows and pa.types.is_null(actual.type):
                 continue
-            if table.num_rows and field.name.startswith(constants.SOURCE_PREFIX):
-                # A batch's token type follows its own tokens and can be shallower
-                # than the layout's (a null or an empty list fixes fewer list
-                # levels): the tokens are converted, every value kept.
-                try:
-                    columns[index] = pa.chunked_array(
-                        [tokens_as(table.column(index).combine_chunks(), field.type)]
-                    )
-                    continue
-                except RowBuiltFormUnavailable:
-                    pass
+            # A source-info column is held to its stream's type like any other
+            # column: the pipeline determines it, and a batch never brings its own
+            # (ITL-1491).
             raise ValueError(
                 f"{type(self).__name__}: column {field.name!r} of input "
                 + f"{input_index} is {actual.type} in a batch, but "
@@ -771,7 +767,12 @@ class StreamingJoin(StreamingJoinKernel):
                 table, left_schema, right_schema, keys
             )
             for left_name, right_name in rename.items():
-                table = Join._merge_source_columns(table, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+                try:
+                    table = Join._merge_source_columns(table, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+                except NullTokenListError as error:
+                    raise null_token_list_error(
+                        "Join", left_name, table.schema.field(left_name).type
+                    ) from error
             if not final:
                 return table
             for name in sorted(self._merged_source):
@@ -982,7 +983,12 @@ class StreamingMergeJoin(StreamingJoinKernel):
         left_names = set(left_schema.names)
         suffixed = (set(right_schema.names) & left_names) - self._shared_tags
         for left_name, right_name in self._rename.items():
-            joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            try:
+                joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            except NullTokenListError as error:
+                raise null_token_list_error(
+                    "MergeJoin", left_name, joined.schema.field(left_name).type
+                ) from error
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
         for name in sorted(self._colliding):
             source_name = f"{constants.SOURCE_PREFIX}{name}"
