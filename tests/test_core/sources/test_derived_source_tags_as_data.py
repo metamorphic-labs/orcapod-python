@@ -460,8 +460,9 @@ async def test_source_lineage_is_required_for_every_key_policy(
         expected_error = "no complete system-tag pair"
     else:
         database = InMemoryArrowDatabase()
-        for cohort, value in [("a", 5), ("b", 7)]:
-            origin = CachedSource(
+
+        def cached(cohort: str, value: int) -> CachedSource:
+            return CachedSource(
                 DictSource(
                     [{"id": 1, "cohort": cohort, "x": value}],
                     record_id_columns=["id"],
@@ -471,7 +472,10 @@ async def test_source_lineage_is_required_for_every_key_policy(
                 ),
                 cache_database=database,
             )
-            history = origin.as_table(columns={"system_tags": True})
+
+        cached("a", 5).as_table()
+        origin = cached("b", 7)
+        history = origin.as_table(columns={"system_tags": True})
         (record_column,) = _prefixed(history, "_tag_record_id")
         assert history[record_column].to_pylist() == ['{"id":1}'] * 2
         expected_error = "not uniquely identified by their system tags"
