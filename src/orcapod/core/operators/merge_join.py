@@ -9,6 +9,7 @@ from orcapod.core.operators.base import (
     BinaryOperator,
     require_matchable_key,
     require_shared_arrow_type,
+    explain_nested_join_conflict,
     require_tag_data_roles_agree,
 )
 from orcapod.core.operators.join import (
@@ -188,6 +189,9 @@ class MergeJoin(BinaryOperator):
             left_type = left_data_schema[key]
             right_type = right_data_schema[key]
             if left_type != right_type:
+                explain_nested_join_conflict(
+                    "MergeJoin", left_stream, right_stream, include_data=True
+                )
                 raise InputValidationError(
                     f"Colliding data column '{key}' has incompatible types: "
                     f"{left_type} (left) vs {right_type} (right). "
@@ -199,6 +203,8 @@ class MergeJoin(BinaryOperator):
         except InputValidationError:
             raise
         except Exception as e:
+            if isinstance(e, TypeError):
+                explain_nested_join_conflict("MergeJoin", left_stream, right_stream)
             raise InputValidationError(
                 f"Input streams are not compatible for merge join: {e}"
             ) from e

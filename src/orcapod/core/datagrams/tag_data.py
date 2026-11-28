@@ -280,9 +280,10 @@ class Tag(Datagram):
     ) -> Datagram:
         data = self.as_dict(columns=columns, all_info=all_info)
         python_schema = self.schema(columns=columns, all_info=all_info)
-        return Datagram(
-            data, python_schema=python_schema, data_context=self._data_context
-        )
+        with skip_float_checks(self._stored_float_columns()):
+            return Datagram(
+                data, python_schema=python_schema, data_context=self._data_context
+            )
 
     def copy(self, include_cache: bool = True, preserve_id: bool = False) -> Self:
         new_tag = super().copy(include_cache=include_cache, preserve_id=preserve_id)
@@ -848,12 +849,7 @@ class Data(Datagram):
     ) -> Datagram:
         data = self.as_dict(columns=columns, all_info=all_info)
         python_schema = self.schema(columns=columns, all_info=all_info)
-        checked = (
-            frozenset(self._data_table.column_names)
-            if self._data_table is not None
-            else self._checked_float_columns
-        )
-        with skip_float_checks(checked):
+        with skip_float_checks(self._stored_float_columns()):
             return Datagram(
                 data=data, python_schema=python_schema, data_context=self._data_context
             )

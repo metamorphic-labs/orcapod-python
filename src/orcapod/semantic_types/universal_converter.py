@@ -23,6 +23,7 @@ from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, TypedDict, get_args, get_origin
 
 import pyarrow as pa
+from numpy import float32
 
 from orcapod.contexts import DataContext, resolve_context
 from orcapod.errors import (
@@ -33,14 +34,15 @@ from orcapod.errors import (
     SubMicrosecondDatetimeError,
     UnsupportedValueError,
 )
-from orcapod.semantic_types.canonical_order import sort_dict_entries, sort_set_elements
+from orcapod.semantic_types.canonical_order import (
+    sort_dict_entries,
+    sort_set_elements,
+)
 from orcapod.semantic_types.float_narrowing import (
     checked_float_columns,
     checking_input_floats,
-    float32_key_check,
-    narrower_float_width,
-    noting_narrowed_floats,
     skip_float_checks,
+    warn_on_python_float,
 )
 from orcapod.semantic_types.nested_none import (
     NestedNoneNotRestorableError,
@@ -1410,10 +1412,14 @@ class UniversalTypeConverter:
                 "Arrow schema should not be None if reaching here"
             )
             python_schema = self.arrow_schema_to_python_schema(arrow_schema)
-
-        struct_dicts = self.python_dicts_to_struct_dicts(
-            python_dicts, python_schema=python_schema
-        )
+            with skip_float_checks():
+                struct_dicts = self.python_dicts_to_struct_dicts(
+                    python_dicts, python_schema=python_schema
+                )
+        else:
+            struct_dicts = self.python_dicts_to_struct_dicts(
+                python_dicts, python_schema=python_schema
+            )
 
         # TODO: add more helpful message here
         return pa.Table.from_pylist(struct_dicts, schema=arrow_schema)
@@ -1916,11 +1922,8 @@ class UniversalTypeConverter:
             # Preserve the Python object in memory; encode its declared base here.
             return lambda value: int(value) if isinstance(value, bool) else value
 
-        narrow_width = narrower_float_width(python_type)
-        if narrow_width is not None:
-            # A Python float given for a narrower float type is stored as Arrow
-            # narrows it; the converter only reports it, once per process (ITL-924).
-            return noting_narrowed_floats(typing.cast(type, python_type), narrow_width)
+        if python_type is float32:
+            return warn_on_python_float
 
         if python_type in {int, float, str, bool, bytes} or origin is None:
             # Basic types - no conversion needed
@@ -1928,23 +1931,22 @@ class UniversalTypeConverter:
 
         elif origin is list:
             element_converter = self.get_python_to_arrow_converter(args[0])
-            key_check = float32_key_check(args[0])
 
             def convert_list(value: Any) -> list[Any]:
                 """Convert list storage, preserving set order independence on updates."""
                 if value is None:
                     raise _none_not_admitted(python_type)
+                elements = [element_converter(item) for item in value]
                 # An Arrow schema remembers a plain set only as a list. Python set
                 # inputs still need canonical storage order; actual lists keep theirs.
-                if isinstance(value, set):
-                    return sort_set_elements(value, element_converter, key_check)
-                return [element_converter(item) for item in value]
+                return (
+                    sort_set_elements(elements) if isinstance(value, set) else elements
+                )
 
             return convert_list
 
         elif origin is dict:
             key_converter = self.get_python_to_arrow_converter(args[0])
-            key_check = float32_key_check(args[0])
             value_converter = self.get_python_to_arrow_converter(args[1])
 
             # A dict is order independent: entries are stored in canonical key order
@@ -1953,7 +1955,10 @@ class UniversalTypeConverter:
                 if value is None:
                     raise _none_not_admitted(python_type)
                 return sort_dict_entries(
-                    value, key_converter, value_converter, key_check
+                    [
+                        {"key": key_converter(k), "value": value_converter(v)}
+                        for k, v in value.items()
+                    ]
                 )
 
             return convert_dict
@@ -1962,12 +1967,11 @@ class UniversalTypeConverter:
             # A set has no order: elements are stored sorted, never in iteration
             # order, which depends on PYTHONHASHSEED for str and bytes (ITL-905).
             element_converter = self.get_python_to_arrow_converter(args[0])
-            key_check = float32_key_check(args[0])
 
             def convert_set(value: Any) -> list[Any]:
                 if value is None:
                     raise _none_not_admitted(python_type)
-                return sort_set_elements(value, element_converter, key_check)
+                return sort_set_elements([element_converter(item) for item in value])
 
             return convert_set
 

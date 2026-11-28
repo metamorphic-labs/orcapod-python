@@ -382,7 +382,7 @@ class ValueConversionWarning(UserWarning):
     The message explains the conversion and how to avoid it. Tensor conversion
     names the source column or function pod output and warns once for that producer,
     field and conversion. Float narrowing names the declared type and warns once
-    per process and declared type. Conversion leaves the caller's value intact.
+    per process. Conversion leaves the caller's value intact.
     To make the warning an error, call
     ``warnings.simplefilter("error", ValueConversionWarning)``: every conversion then
     raises, on every row, and in a pipeline that row fails. Python's ``-W`` option

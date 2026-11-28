@@ -400,6 +400,12 @@ class Datagram(ContentIdentifiableBase):
     # Internal helpers (lazy loading)
     # ------------------------------------------------------------------
 
+    def _stored_float_columns(self) -> frozenset[str]:
+        """Find columns already stored or validated for float input warnings."""
+        if self._data_table is not None:
+            return frozenset(self._data_table.column_names)
+        return self._checked_float_columns
+
     def _ensure_data_dict(self) -> dict[str, DataValue]:
         """
         Ensure that dictionary representation is materialized and then returned

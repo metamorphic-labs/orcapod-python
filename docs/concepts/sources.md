@@ -132,27 +132,25 @@ your own, refuses a column whose type is or holds one, naming it (a stream's ide
 Arrow schema hash, which cannot hold them). Cast a list view to the large list of the same
 items, and expand a run-end-encoded column with `pyarrow.compute.run_end_decode`.
 
-A Python `float` given for a column declared `numpy.float32` (in a `data_schema` of Python
-types, or the `python_schema` of a datagram built from values) is converted as Arrow converts
-it, with no check of the value: one that `float32` cannot hold exactly is stored changed
-(`0.1` as `0.10000000149011612`, `1e-50` as `0.0`, `1e300` as `inf`). Orcapod issues one
-`ValueConversionWarning` per process and declared type. The warning depends on the value's
-type and the declaration. Pass `numpy.float32` values, or declare the column `float`, to
-avoid it. `numpy.float32` values and
-an Arrow column that is already `float32` never warn. The same holds at every depth: a list
-element, a dict key or value, a set element, or a field of a class. A dict-backed
-datagram can warn while putting dict keys in canonical order or when building its
-Arrow table for `as_table()` or hashing. Adding a column declared with a Python
-type can also warn. Once a datagram has an Arrow table, updates use its Arrow
-schema through the data context's table converter. For plain floats, that path
-has no Python float32 declaration for the diagnostic.
+Top-level `T` and `T | None` describe different column fields. Python declarations
+leave nested Arrow fields nullable in data context v1, so `list[int]` and
+`list[int | None]` use one Arrow type. A source can carry null items in either case
+for supported types. If you supply an Arrow schema, Orcapod keeps its nested flags.
+For example, `pa.large_list(pa.field("item", pa.int64(), nullable=False))` declares
+required items. That field has a different Arrow schema identity from the default
+nullable item. Use matching nested flags when joining sources or binding a slot.
 
-With a Python declaration, distinct Python float keys or set elements that become
-one `float32` value (`1e-50` and `2e-50` both become `0.0`) raise
-`CanonicalOrderError`, naming the column and both inputs. This check leaves
-custom NumPy scalar conversion to Arrow. Function outputs follow the existing
-conformance rule. A Python `float` returned for a declared `numpy.float32` is
-rejected ([Function pods](function-pods.md)).
+A Python `float` supplied for a column declared `numpy.float32` in a Python schema
+is converted as Arrow converts it. A value that `float32` cannot hold exactly is
+stored changed. For example, `0.1` becomes `0.10000000149011612` and `1e-50`
+becomes `0.0`. Orcapod issues one `ValueConversionWarning` per process, based
+on the input type and the declaration. Pass `numpy.float32` values to control
+the conversion, or declare the column `float` to keep Python float precision.
+The warning also applies to nested fields and values. A datagram built from a
+dict can warn while ordering dict keys or when building its Arrow table for
+`as_table()` or hashing. Values supplied as `numpy.float32` and values already
+stored as float32 in Arrow are quiet. Plain-value conversions driven by an Arrow
+schema, including updates to materialized datagrams, can still narrow silently.
 
 Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
 column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,

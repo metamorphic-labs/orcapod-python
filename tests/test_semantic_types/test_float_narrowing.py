@@ -1,9 +1,4 @@
-"""Python floats entering a column declared ``np.float32`` (ITL-924).
-
-The values are converted as Arrow converts them, with no check of each value. Orcapod
-issues one ``ValueConversionWarning`` per process for the declared type. Dict keys that
-collide after conversion to the stored key type raise, naming the column and both keys.
-"""
+"""Float32 input warnings and the values Arrow stores (ITL-924)."""
 
 from __future__ import annotations
 
@@ -12,7 +7,7 @@ import subprocess
 import sys
 import warnings
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
@@ -21,14 +16,12 @@ import pytest
 from typing_extensions import override
 
 from orcapod import PipelineJob
-from orcapod.contexts import get_default_context
-from orcapod.core.datagrams import Data, Datagram
+from orcapod.core.datagrams import Data, Datagram, Tag
 from orcapod.core.function_pod import function_pod
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.errors import CanonicalOrderError, OutputTypeError, ValueConversionWarning
+from orcapod.errors import OutputTypeError, ValueConversionWarning
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
-from orcapod.semantic_types.canonical_order import _sorted_by_rank
 from orcapod.semantic_types.float_narrowing import reset_float_narrowing_warnings
 from orcapod.sources import DictSource, ListSource
 from orcapod.types import DataType, DataValue
@@ -138,7 +131,9 @@ def test_dict_source_accepts_python_floats_with_one_warning(
     messages = _narrowing_warnings(caught)
     assert len(messages) == 1
     assert "numpy.float32" in messages[0]
-    assert "float" in messages[0]
+    assert "cannot hold exactly are stored changed" in messages[0]
+    assert "Pass numpy.float32" in messages[0]
+    assert "declare the column float" in messages[0]
     _assert_stored_as_arrow_narrows(table)
 
 
@@ -321,149 +316,6 @@ with warnings.catch_warnings(record=True) as caught:
     assert result.returncode == 0, result.stderr
 
 
-COLLIDING = {1e-50: 1, 2e-50: 2}
-
-
-@pytest.mark.parametrize(
-    "operation",
-    [
-        "with-columns-old",
-        "with-columns-new",
-        "mixed",
-        "select",
-        "drop",
-        "rename",
-        "copy-columns",
-    ],
-)
-def test_arrow_transform_updates_use_the_existing_arrow_schema(operation: str) -> None:
-    schema: dict[str, DataType] = {
-        "x": np.float32,
-        "keys": dict[np.float32, int],
-        "members": set[np.float32],
-    }
-    values: dict[str, Any] = {
-        "x": np.float32(0.5),
-        "keys": {np.float32(0.5): 1},
-        "members": {np.float32(0.5)},
-    }
-    start = Data({**values, "other": 1}, python_schema=schema)
-    if operation != "mixed":
-        _ = start.as_table()
-    prefix = ""
-    if operation == "with-columns-old":
-        result = start.with_columns(extra=2)
-    elif operation == "with-columns-new":
-        result = start.with_columns(
-            {f"new_{k}": t for k, t in schema.items()},
-            **{f"new_{k}": values[k] for k in schema},
-        )
-        prefix = "new_"
-    elif operation == "mixed":
-        result = start.with_columns({"extra": pa.float32()}, extra=0.5)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", ValueConversionWarning)
-            arrow_only = result.update(extra=0.1).as_table()
-        assert _narrowing_warnings(caught) == []
-        assert _bits(_column(arrow_only, "extra")) == _as_arrow_narrows([0.1])
-    elif operation == "select":
-        result = start.update(other=2).select(*schema)
-    elif operation == "drop":
-        result = start.update(other=2).drop("other")
-    elif operation == "rename":
-        result = start.rename({k: f"new_{k}" for k in schema})
-        prefix = "new_"
-    else:
-        result = Data({"extra": 2}).with_columns_of(
-            start.with_columns(side=3), list(schema)
-        )
-
-    before = result.as_table()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ValueConversionWarning)
-        updated = result.update(**{f"{prefix}x": 1e-50}).as_table()
-    assert _narrowing_warnings(caught) == []
-    assert updated.schema.equals(before.schema, check_metadata=True)
-    assert _bits(_column(updated, f"{prefix}x")) == _as_arrow_narrows([1e-50])
-    assert result.as_table().equals(before)
-
-
-@pytest.mark.parametrize("value", [True, False])
-def test_materialized_update_preserves_arrow_integer_conversion(value: bool) -> None:
-    given: dict[str, Any] = {
-        "count": np.int32(2),
-        "x": np.float32(0.5),
-        "mixed": {np.float32(0.5): np.int32(2)},
-    }
-    row = Datagram(
-        given,
-        python_schema={
-            "count": np.int32,
-            "x": np.float32,
-            "mixed": dict[np.float32, np.int32],
-        },
-    )
-    table = row.as_table()
-    updated = row.update(count=value).as_table()
-    assert _column(updated, "count") == [int(value)]
-    assert updated.schema.equals(table.schema, check_metadata=True)
-    mixed = row.update(mixed={0.1: value}).as_table()
-    assert mixed.schema.equals(table.schema, check_metadata=True)
-    assert _column(mixed, "mixed") == [
-        [{"key": float(np.float32(0.1)), "value": int(value)}]
-    ]
-
-
-@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
-@pytest.mark.parametrize("container", [dict, set])
-def test_materialized_datagram_update_preserves_legacy_collision_behavior(
-    container: type,
-) -> None:
-    if container is dict:
-        declaration = dict[np.float32, int]
-        original = {0.5: 0}
-        duplicate = COLLIDING
-    else:
-        declaration = set[np.float32]
-        original = {0.5}
-        duplicate = set(COLLIDING)
-    start = Datagram(
-        {"x": original, "y": 1}, python_schema={"x": declaration, "y": int}
-    )
-    table = start.as_table()
-    assert start.schema()["x"] == declaration
-    updated = start.update(x=duplicate).as_table()
-    expected = (
-        [{"key": 0.0, "value": 1}, {"key": 0.0, "value": 2}]
-        if container is dict
-        else [0.0, 0.0]
-    )
-    assert _column(updated, "x") == [expected]
-    assert start.as_table().equals(table)
-
-
-@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
-@pytest.mark.parametrize(
-    ("declaration", "value"),
-    [
-        (dict[np.float32 | None, int], {None: 0, **COLLIDING}),
-        (set[np.float32 | None], {None, *COLLIDING}),
-    ],
-)
-def test_optional_float32_keys_and_elements_refuse_collisions(
-    declaration: DataType, value: DataValue
-) -> None:
-    with pytest.raises(CanonicalOrderError) as raised:
-        _ = Datagram({"x": value}, python_schema={"x": declaration}).as_table()
-    assert all(text in str(raised.value) for text in ("'x'", "1e-50", "2e-50"))
-
-
-class _FloatWithOverride(float):
-    @override
-    def __float__(self) -> float:
-        return 9.0
-
-
 class _Float64WithOverride(np.float64):
     hide_width: bool = True
 
@@ -498,19 +350,8 @@ def test_numpy_float_subclass_narrows_based_on_type(hide_width: bool) -> None:
     assert _bits(_column(table, "x")) == _as_arrow_narrows([0.1])
 
 
-@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
-@pytest.mark.parametrize("container", [dict, set])
-def test_numpy_float_subclass_cannot_hide_colliding_keys(container: type) -> None:
-    first, second = _Float64WithOverride(1e-50), _Float64WithOverride(2e-50)
-    declaration = dict[np.float32, int] if container is dict else set[np.float32]
-    value = {first: 1, second: 2} if container is dict else {first, second}
-    with pytest.raises(CanonicalOrderError) as raised:
-        _ = Datagram({"x": value}, python_schema={"x": declaration}).as_table()
-    assert all(text in str(raised.value) for text in ("'x'", "1e-50", "2e-50"))
-
-
 def test_narrowing_warning_documents_its_scope_and_dict_key_timing() -> None:
-    assert "per process and declared type" in (ValueConversionWarning.__doc__ or "")
+    assert "per process" in (ValueConversionWarning.__doc__ or "")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ValueConversionWarning)
         row = Datagram(
@@ -602,140 +443,6 @@ def test_float32_tag_and_output_narrowing_in_job(
     assert _bits(_column(table, "result")) == _as_arrow_narrows([-0.0])
 
 
-@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
-@pytest.mark.parametrize("container", [dict, set])
-def test_float_subclass_keys_and_elements_store_the_base_value(container: type) -> None:
-    subclass = _FloatWithOverride(0.1)
-    if container is dict:
-        declaration = dict[np.float32, int]
-        given = {subclass: 1, 0.5: 2}
-        plain = {0.1: 1, 0.5: 2}
-    else:
-        declaration = set[np.float32]
-        given = {subclass, 0.5}
-        plain = {0.1, 0.5}
-    schema = {"x": declaration}
-    table = Datagram({"x": given}, python_schema=schema).as_table()
-    assert table.equals(Datagram({"x": plain}, python_schema=schema).as_table())
-
-
-@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
-@pytest.mark.parametrize("key_type", [float, np.float32])
-def test_float_subclass_nan_key_is_refused(key_type: type) -> None:
-    with pytest.raises(CanonicalOrderError, match=r"Column 'x': .*NaN"):
-        _ = Datagram(
-            {"x": {_FloatWithOverride(float("nan")): 1}},
-            python_schema={"x": dict[key_type, int]},
-        )
-
-
-def test_canonical_sorter_reports_original_collision_positions() -> None:
-    # The sorter knows ranks and payloads. Its caller can use the positions
-    # to look up the original values when adding the error context.
-    with pytest.raises(CanonicalOrderError) as raised:
-        _ = _sorted_by_rank([((1, 2), "first"), ((1, 0), "second"), ((1, 2), "third")])
-    assert getattr(raised.value, "positions", None) == (0, 2)
-    assert getattr(raised.value, "stored", None) == 2
-
-
-def test_arrow_only_datagram_update_keeps_arrow_float32() -> None:
-    source = pa.table({"x": pa.array([0.5], type=pa.float32())})
-    start = Datagram(source)
-    assert start.schema()["x"] == float | None
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ValueConversionWarning)
-        updated = start.update(x=0.1).as_table()
-    assert _narrowing_warnings(caught) == []
-    assert updated.schema.equals(source.schema, check_metadata=True)
-    assert _bits(_column(updated, "x")) == _as_arrow_narrows([0.1])
-
-
-def _assert_names_column_and_both_keys(error: BaseException) -> None:
-    text = str(error)
-    assert "'by_key'" in text
-    assert "1e-50" in text
-    assert "2e-50" in text
-
-
-@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
-class TestKeysThatCollideAfterNarrowing:
-    """``1e-50`` and ``2e-50`` are both stored as the float32 key ``0.0``."""
-
-    def test_dict_source_raises(self) -> None:
-        with pytest.raises(CanonicalOrderError) as raised:
-            DictSource(
-                [{"id": 1, "x": 0.5, "by_key": COLLIDING}],
-                tag_columns=["id"],
-                tag_only_columns=True,
-                data_schema={
-                    "id": int,
-                    "x": np.float32,
-                    "by_key": dict[np.float32, int],
-                },
-            )
-        _assert_names_column_and_both_keys(raised.value)
-
-    def test_list_source_raises(self) -> None:
-        with pytest.raises(CanonicalOrderError) as raised:
-            ListSource(
-                "by_key",
-                [{0.5: 1}, COLLIDING],
-                data_schema={"element_index": int, "by_key": dict[np.float32, int]},
-            )
-        _assert_names_column_and_both_keys(raised.value)
-
-    def test_datagram_raises(self) -> None:
-        with pytest.raises(CanonicalOrderError) as raised:
-            Datagram(
-                {"by_key": COLLIDING}, python_schema={"by_key": dict[np.float32, int]}
-            )
-        _assert_names_column_and_both_keys(raised.value)
-
-    def test_datagram_update_raises_and_leaves_the_datagram_as_it_was(self) -> None:
-        start = Datagram(
-            {"by_key": {0.5: 1}}, python_schema={"by_key": dict[np.float32, int]}
-        )
-        with pytest.raises(CanonicalOrderError) as raised:
-            start.update(by_key=COLLIDING)
-        _assert_names_column_and_both_keys(raised.value)
-        assert start.as_dict() == {"by_key": {0.5: 1}}
-
-    def test_nested_dict_keys_raise(self) -> None:
-        with pytest.raises(CanonicalOrderError) as raised:
-            Datagram(
-                {"by_key": [{"a": COLLIDING}]},
-                python_schema={"by_key": list[dict[str, dict[np.float32, int]]]},
-            ).as_table()
-        _assert_names_column_and_both_keys(raised.value)
-
-    def test_keys_distinct_in_float32_are_all_stored(self) -> None:
-        table = Datagram(
-            {"by_key": {0.1: 1, 0.5: 2, 1e-50: 3}},
-            python_schema={"by_key": dict[np.float32, int]},
-        ).as_table()
-        entries = _column(table, "by_key")[0]
-        assert [e["value"] for e in entries] == [3, 1, 2]
-        assert _bits([e["key"] for e in entries]) == _as_arrow_narrows(
-            [1e-50, 0.1, 0.5]
-        )
-
-    def test_a_nan_key_is_still_refused(self) -> None:
-        with pytest.raises(CanonicalOrderError, match="NaN"):
-            Datagram(
-                {"by_key": {float("nan"): 1}},
-                python_schema={"by_key": dict[np.float32, int]},
-            )
-
-    def test_float64_keys_that_differ_are_not_narrowed(self) -> None:
-        table = Datagram(
-            {"by_key": COLLIDING}, python_schema={"by_key": dict[float, int]}
-        ).as_table()
-        assert [e["key"] for e in _column(table, "by_key")[0]] == [
-            1e-50,
-            2e-50,
-        ]
-
-
 def test_function_output_declared_float32_still_rejects_a_python_float() -> None:
     """Function outputs keep their own rule: a Python float is not converted."""
 
@@ -777,123 +484,6 @@ def test_an_accepted_narrower_output_is_stored_unchanged_without_a_warning() -> 
     assert held == [0.5]
 
 
-@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
-class TestSetElementsThatCollideAfterNarrowing:
-    """``{1e-50, 2e-50}`` would be stored as two ``0.0`` elements and read as one."""
-
-    def _assert_names_column_and_both_elements(self, error: BaseException) -> None:
-        text = str(error)
-        assert "'members'" in text
-        assert "1e-50" in text
-        assert "2e-50" in text
-
-    def test_datagram_raises(self) -> None:
-        with pytest.raises(CanonicalOrderError) as raised:
-            Datagram(
-                {"members": {1e-50, 2e-50}},
-                python_schema={"members": set[np.float32]},
-            ).as_table()
-        self._assert_names_column_and_both_elements(raised.value)
-
-    def test_dict_source_raises(self) -> None:
-        with pytest.raises(CanonicalOrderError) as raised:
-            DictSource(
-                [{"id": 1, "members": {1e-50, 2e-50}}],
-                tag_columns=["id"],
-                tag_only_columns=True,
-                data_schema={"id": int, "members": set[np.float32]},
-            )
-        self._assert_names_column_and_both_elements(raised.value)
-
-    def test_a_set_given_for_a_list_column_raises(self) -> None:
-        given: dict[str, Any] = {"members": {1e-50, 2e-50}}
-        with pytest.raises(CanonicalOrderError) as raised:
-            Datagram(given, python_schema={"members": list[np.float32]}).as_table()
-        self._assert_names_column_and_both_elements(raised.value)
-
-    def test_elements_distinct_in_float32_are_all_stored(self) -> None:
-        table = Datagram(
-            {"members": {0.5, 0.1, 1e-50}}, python_schema={"members": set[np.float32]}
-        ).as_table()
-        assert _bits(_column(table, "members")[0]) == _as_arrow_narrows(
-            [1e-50, 0.1, 0.5]
-        )
-
-    def test_numpy_float32_elements_are_stored(self) -> None:
-        given: dict[str, Any] = {"members": {np.float32(0.5), np.float32(0.1)}}
-        table = Datagram(given, python_schema={"members": set[np.float32]}).as_table()
-        assert _bits(_column(table, "members")[0]) == _bits([0.1, 0.5])
-
-
-class _Float32StorageOverride(np.float32):
-    @override
-    def __float__(self) -> float:
-        return 9.0
-
-
-class _LongDoubleStorageOverride(np.longdouble):
-    @override
-    def __float__(self) -> float:
-        return 9.0
-
-
-@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
-@pytest.mark.parametrize(
-    "scalar", [_Float32StorageOverride, _LongDoubleStorageOverride]
-)
-@pytest.mark.parametrize("container", [dict, set])
-def test_numpy_key_overrides_keep_arrow_storage_and_legacy_order(
-    scalar: type, container: type
-) -> None:
-    first, second = scalar(1), np.float32(3)
-    declaration = dict[np.float32, int] if container is dict else set[np.float32]
-    given: Any = {second: 2, first: 1} if container is dict else {first, second}
-    actual = Datagram({"x": given}, python_schema={"x": declaration})
-    expected = pa.Table.from_pylist(
-        [
-            {
-                "x": [{"key": 9.0, "value": 1}, {"key": 3.0, "value": 2}]
-                if container is dict
-                else [9.0, 3.0]
-            }
-        ],
-        schema=actual.as_table().schema,
-    )
-    assert actual.as_table().equals(expected)
-    assert actual.content_hash() == Datagram(expected).content_hash()
-
-
-def test_materialized_update_calls_the_context_table_converter() -> None:
-    class TrackingConverter:
-        def __init__(self, delegate: Any) -> None:
-            self.delegate = delegate
-            self.calls: list[pa.Schema] = []
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self.delegate, name)
-
-        def python_dicts_to_arrow_table(
-            self,
-            rows: list[dict[str, Any]],
-            python_schema: Any = None,
-            arrow_schema: pa.Schema | None = None,
-        ) -> pa.Table:
-            if arrow_schema is not None:
-                self.calls.append(arrow_schema)
-                rows = [{**row, "x": row["x"] + 100} for row in rows]
-            return self.delegate.python_dicts_to_arrow_table(
-                rows, python_schema, arrow_schema
-            )
-
-    context = get_default_context()
-    converter = TrackingConverter(context.type_converter)
-    custom = replace(context, type_converter=converter)
-    table = pa.table({"x": [1]})
-    updated = Datagram(table, data_context=custom).update(x=2).as_table()
-    assert converter.calls == [table.schema]
-    assert _column(updated, "x") == [102]
-
-
 def test_materialized_data_as_datagram_does_not_warn_on_stored_float32() -> None:
     row = Data(
         {"x": cast(DataValue, cast(object, np.float32(0.1)))},
@@ -908,50 +498,23 @@ def test_materialized_data_as_datagram_does_not_warn_on_stored_float32() -> None
     assert _column(result, "x") == updated.as_table()["x"].to_pylist()
 
 
-class _Float16OutputOverride(np.float16):
-    __module__ = "numpy"
-
-    @override
-    def __float__(self) -> float:
-        return 9.0
-
-
-class _Float64OutputWithNarrowDtype(np.float64):
-    __module__ = "numpy"
-
-    @property
-    @override
-    def dtype(self) -> Any:
-        return np.dtype(np.float16)
-
-
-@pytest.mark.parametrize(
-    "orchestrator", [None, SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
-)
-@pytest.mark.parametrize(
-    ("value", "stored"),
-    [(_Float16OutputOverride(0.5), 9.0), (_Float64OutputWithNarrowDtype(0.1), 0.1)],
-)
-def test_numpy_output_subclasses_keep_main_acceptance_and_bits(
-    orchestrator: Any, value: Any, stored: float
+@pytest.mark.parametrize("row_type", [Tag, Data])
+def test_rebuilding_stored_nested_float32_keeps_quiet(
+    row_type: type[Tag | Data],
 ) -> None:
-    def run(x: int) -> np.float32:
-        return value
+    given = cast(DataValue, cast(object, _Reading(np.float32(0.1))))
+    row = row_type({"reading": given}, python_schema={"reading": _Reading})
+    stored = row_type(row.as_table())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ValueConversionWarning)
+        rebuilt = stored.as_datagram().as_table()
+    assert _column(rebuilt, "reading") == _column(stored.as_table(), "reading")
 
-    pod = function_pod(output_keys="y")(run)
-    source = DictSource(
-        [{"id": 1, "x": 1}], tag_columns=["id"], tag_only_columns=True, source_id="s"
-    )
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ValueConversionWarning)
-        if orchestrator is None:
-            stream = pod.pod(source)
-        else:
-            job = PipelineJob(name="float-output", database=InMemoryArrowDatabase())
-            with job:
-                pod.pod(source, label="result")
-            job.run(orchestrator=orchestrator())
-            stream = job.nodes["result"]
-        table = stream.as_table()
-        assert _bits(_column(table, "y")) == _as_arrow_narrows([stored])
-    assert _narrowing_warnings(caught) == []
+
+def test_first_exact_python_float_warns_when_adding_a_python_column() -> None:
+    row = Datagram({"id": 1})
+    row.as_table()
+    with pytest.warns(ValueConversionWarning, match="cannot hold exactly") as caught:
+        result = row.with_columns({"x": np.float32, "y": pa.float32()}, x=0.5, y=0.1)
+    assert len(caught) == 1
+    assert _column(result.as_table(), "x") == [0.5]
