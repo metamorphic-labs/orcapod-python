@@ -17,7 +17,8 @@ from collections.abc import (
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Self, cast
+from weakref import ReferenceType, ref
 
 import pandas as pd
 import polars as pl
@@ -45,6 +46,7 @@ from orcapod.types import ColumnConfig, Condition, Schema
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
+    from orcapod.protocols.core_protocols import TrackerManagerProtocol, TrackerProtocol
     from orcapod.types.explanation import Explanation
 
 # TODO: consider using this instead of making copy of dicts
@@ -751,6 +753,19 @@ def _rename_map(
 
 
 class StreamBase(TraceableBase):
+    _recording_trackers: tuple[ReferenceType[TrackerProtocol], ...] = ()
+
+    def _mark_recorded(self, manager: TrackerManagerProtocol) -> Self:
+        """Remember which trackers accepted the invocation that made this stream."""
+        self._recording_trackers = tuple(
+            ref(tracker) for tracker in manager.get_active_trackers()
+        )
+        return self
+
+    def _was_recorded_by(self, tracker: TrackerProtocol) -> bool:
+        """Check recording provenance without comparing stream hashes."""
+        return any(recording() is tracker for recording in self._recording_trackers)
+
     @property
     @abstractmethod
     def producer(self) -> PodProtocol | None: ...

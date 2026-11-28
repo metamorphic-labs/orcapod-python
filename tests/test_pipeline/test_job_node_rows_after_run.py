@@ -86,10 +86,11 @@ def _source(data: list[dict[str, int]]) -> DictSource:
 def _build(data: list[dict[str, int]], db: Any) -> PipelineJob:
     """Return a job over ``db``: ``rowwise``, ``downstream`` of it, and ``grouped``."""
     job = PipelineJob(name="itl1093", database=db)
+    source = _source(data)
     with job:
-        rowwise = inc.pod(_source(data), label="rowwise")
+        rowwise = inc.pod(source, label="rowwise")
         dbl.pod(rowwise, label="downstream")
-        total.pod(_source(data).group_by("g"), label="grouped")
+        total.pod(source.group_by("g"), label="grouped")
     return job
 
 

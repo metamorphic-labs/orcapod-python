@@ -23,6 +23,8 @@ import pytest
 
 import orcapod
 from orcapod import PipelineJob, function_pod
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
 from orcapod.core.operators import Join, MapData
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -583,24 +585,22 @@ def _xw_job() -> PipelineJob:
 def test_meta_columns_of_a_narrower_stream_are_kept() -> None:
     """The ``__`` columns a job node's rows carry reach the rows of a narrower bind."""
 
-    @function_pod(output_keys="x")
     def same(v: int) -> int:
         """Return ``v``."""
         return v
 
-    origin = PipelineJob(name="origin", database=InMemoryArrowDatabase())
-    with origin:
-        _ = same.pod(
-            DictSource(
-                [{"id": 0, "v": 1}],
-                tag_columns=["id"],
-                tag_only_columns=True,
-                source_id="o",
-            ),
-            label="same",
-        )
-    _ = origin.run()
-    stream = origin.nodes["same"]
+    stream = FunctionJobNode(
+        FunctionPod.from_fn(same, output_keys="x"),
+        DictSource(
+            [{"id": 0, "v": 1}],
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id="o",
+        ),
+        pipeline_database=InMemoryArrowDatabase(),
+        label="same",
+    )
+    _ = stream.run()
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
         _ = MapData({"x": "y"})(_slot(int | None), label="renamed")

@@ -13,6 +13,7 @@ import dataclasses
 import functools
 import json
 import logging
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping, Sequence
 from datetime import datetime
@@ -65,6 +66,7 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
+    from orcapod.pipeline.job import PipelineJob
     from orcapod.types.explanation import Explanation
     from orcapod.channels import WritableChannel
     from orcapod.protocols.core_protocols import StreamProtocol
@@ -754,7 +756,7 @@ class SourceNodeBase(TraceableBase, ABC):
         The saved value stands while no source is bound (ITL-1138); a bound source gives
         its own identity, as for any slot.
         """
-        if self._saved_content_hash is not None and self._bound_stream() is None:
+        if self._bound_stream() is None and self._saved_content_hash is not None:
             return self._saved_content_hash
         return super().content_hash(hasher)
 
@@ -1610,6 +1612,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         data_context: Optional data context override.
 
     Raises:
+        SourceSpecMismatchError: If *bound_source* does not fit the slot or depends
+            on a bindable source slot (ITL-1559).
         ValueError: If both *tag_schema* and *data_schema* are omitted and
             *bound_source* is ``None``.
     """
@@ -1623,6 +1627,13 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         data_context: str | contexts.DataContext | None = None,
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
+        from orcapod.pipeline.source_consistency import (
+            binding_dependency_error,
+            independent_source_dependency,
+        )
+
+        if (dependency := independent_source_dependency(bound_source)) is not None:
+            raise binding_dependency_error(dependency, name)
         if tag_schema is None or data_schema is None:
             if bound_source is None:
                 raise ValueError(
@@ -1658,6 +1669,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         )
         self._bound_source: StreamProtocol | None = None
         self._declared_form: _DeclaredForm | None = None
+        self._binding_owner: weakref.ReferenceType[PipelineJob] | None = None
         if bound_source is not None:
             # Checks the source and, for a narrower one, records how its rows become
             # rows of the declared schema (ITL-1112), as the setter does, but does not
@@ -1683,12 +1695,21 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             load_only: Accepted for every job node; a source reads its rows either way.
 
         Raises:
+            InconsistentSourceError: If the bound stream reads conflicting sources.
+            SourceSpecMismatchError: If the bound stream now depends on a source slot
+                or its live inputs contain a cycle (ITL-1559).
             UnboundSourceError: When no concrete source is bound.
             ValueError: If ``load_only`` and the bound stream computes or delivers
                 when read (``node_run.refuse_unloadable_inputs``).
         """
         from orcapod.pipeline.node_run import check_sources, refuse_unloadable_inputs
+        from orcapod.pipeline.source_consistency import (
+            require_consistent_sources,
+            require_live_source_bindings,
+        )
 
+        require_live_source_bindings([self])
+        require_consistent_sources([(f"node {self.label!r}", self)])
         _ = check_sources([self])
         if load_only:
             refuse_unloadable_inputs(self)
@@ -1703,33 +1724,69 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
     def bound_source(self, value: StreamProtocol | None) -> None:
         """Bind *value* as the concrete source and invalidate both hash caches.
 
-        A source is checked against the slot's declared schema first (``validate``), so
-        one that does not fit is refused before anything changes. A narrower source
-        (``x: int`` for a slot declaring ``x: int | None``) is accepted, and the node
-        gives its rows as rows of the declared schema (ITL-1112). ``None`` unbinds.
+        A source must fit the slot's declared schema before the binding changes.
+        A narrower source (``x: int`` for a slot declaring ``x: int | None``) is
+        accepted, and the node gives its rows as rows of the declared schema
+        (ITL-1112). ``None`` unbinds.
+        In a job, assignment uses the binding checks of ``PipelineJob.bind()``.
         Binding stamps the slot as modified, so every job node fed by it is stale and
         reads empty until it runs again (ITL-1095).
 
         Raises:
-            SourceSpecMismatchError: If *value* does not fit the declared schema.
+            InconsistentSourceError: If the replacement introduces conflicting sources.
+            SourceSpecMismatchError: If *value* does not fit the declared schema or
+                depends on a bindable source slot or on this job's own node (ITL-1559).
         """
-        self._bind(value)
-        self._update_modified_time()
+        from orcapod.pipeline.source_consistency import (
+            require_live_source_bindings,
+        )
+
+        owner = self._get_binding_owner()
+        if owner is None:
+            require_live_source_bindings((self,), rebinding=((self, value),))
+            self._bind(value)
+            self._update_modified_time()
+        else:
+            owner._replace_source_binding(self, value)  # pyright: ignore[reportPrivateUsage]  # the setter uses the job's binding transaction
+
+    def _set_binding_owner(self, owner: PipelineJob | None) -> None:
+        """Route changes to a job while this is one of its active slots."""
+        self._binding_owner = weakref.ref(owner) if owner is not None else None
+
+    def _get_binding_owner(self) -> PipelineJob | None:
+        """Return the job that owns this active slot, if any."""
+        return self._binding_owner() if self._binding_owner is not None else None
 
     def _bound_stream(self) -> StreamProtocol | None:
-        """The concrete stream bound to this slot, or ``None``."""
+        """Resolve the live binding before reading it, even if its rows are cached."""
+        from orcapod.pipeline.source_consistency import require_live_source_bindings
+
+        if self._bound_source is not None:
+            require_live_source_bindings((self,))
         return self._bound_source
 
     def _bind(self, value: StreamProtocol | None) -> None:
-        """Check *value* and bind it, invalidating both hash caches.
+        """Check and install a binding once its independence from slots is checked.
 
         The binding the setter and ``__init__`` share. Only the setter stamps the slot
         as modified (ITL-1095): a node built with its source is not a rebinding.
 
         Raises:
+            InconsistentSourceError: If the bound stream reads conflicting sources.
             SourceSpecMismatchError: If *value* does not fit the declared schema.
         """
-        form = None if value is None else self._declared_form_for(value)
+        from orcapod.pipeline.source_consistency import require_consistent_sources
+
+        form = None
+        if value is not None:
+            require_consistent_sources([(f"slot {self.name!r}", value)])
+            form = self._declared_form_for(value)
+        self._apply_binding(value, form)
+
+    def _apply_binding(
+        self, value: StreamProtocol | None, form: _DeclaredForm | None
+    ) -> None:
+        """Install a validated binding and invalidate its cached hashes."""
         self._bound_source = value
         self._declared_form = form
         self._invalidate_content_hash_cache()
@@ -1749,9 +1806,10 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         source object and bind it, or clear the dependent nodes.
         """
         own = self._modified_time
-        if self._bound_source is None:
+        source = self._bound_stream()
+        if source is None:
             return own
-        bound = self._bound_source.last_modified
+        bound = source.last_modified
         if bound is None or own is None:
             return bound
         return max(own, bound)
@@ -1866,8 +1924,9 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             Bound source's identity structure when bound; schema-based
             identity (inherited from SourceNodeBase) when unbound.
         """
-        if self._bound_source is not None:
-            return self._bound_source.identity_structure()
+        source = self._bound_stream()
+        if source is not None:
+            return source.identity_structure()
         return super().identity_structure()
 
     def _row_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1878,12 +1937,13 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         and an unbound slot answer with the slot's own keys: their description reports
         its types undeclared (``arrow_types_declared``).
         """
-        if self._bound_source is None or self._declared_form is not None:
+        source = self._bound_stream()
+        if source is None or self._declared_form is not None:
             return self.keys()
-        table = typed_zero_row_input(self._bound_source)
+        table = typed_zero_row_input(source)
         if table is None:
             return self.keys()
-        return keys_of_rows(table, self._bound_source.keys())
+        return keys_of_rows(table, source.keys())
 
     def arrow_schema(self) -> pa.Schema:
         """The Arrow schema of the columns this stream passes between job nodes.
@@ -1923,7 +1983,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             # without a bound source): its rows, as main iterated them (ITL-1347, the
             # one rule).
             return None
-        if self._bound_source is None:
+        source = self._bound_stream()
+        if source is None:
             raise UnboundSourceError(
                 f"SourceJobNode '{self._name}' has no concrete source bound. "
                 "Call job.bind(sources={'<name>': source}) before running."
@@ -1931,20 +1992,20 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         if self._declared_form is not None:
             return None
         if (
-            not table_is_rows(self._bound_source)
-            or self._bound_source.data_context_key != self.data_context_key
+            not table_is_rows(source)
+            or source.data_context_key != self.data_context_key
         ):
             # Not a library source kind whose table is its rows (a side-effect or
             # function pod stream, an operator's result, a raw stream, a poller), or
             # one whose rows report another data context than the node's: its rows,
             # as main iterated them (the edge table is built in the node's context).
             return None
-        table = self._bound_source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        table = source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
         if not system_tags_as_rows_give(table):
             # System tags the rows would type otherwise (a narrow integer, a
             # nullable field): the rows decide, as on main.
             return None
-        return table, keys_of_rows(table, self._bound_source.keys())
+        return table, keys_of_rows(table, source.keys())
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Delegate to concrete source, or raise if unbound.
@@ -1952,14 +2013,15 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         Raises:
             UnboundSourceError: When no concrete source is attached.
         """
-        if self._bound_source is None:
+        source = self._bound_stream()
+        if source is None:
             raise UnboundSourceError(
                 f"SourceJobNode '{self._name}' has no concrete source bound. "
                 "Call job.bind(sources={'<name>': source}) before running."
             )
         if self._declared_form is None:
-            return self._bound_source.iter_data()
-        return self._declared_rows(self._bound_source.iter_data(), self._declared_form)
+            return source.iter_data()
+        return self._declared_rows(source.iter_data(), self._declared_form)
 
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """The bound source's zero-row table in the declared form; ``None`` if unknown.
@@ -1969,9 +2031,10 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         table (ITL-1112, ITL-912). ``None`` when unbound or when the source cannot type
         its rows without rows. See ``typed_zero_row_table``.
         """
-        if self._bound_source is None:
+        source = self._bound_stream()
+        if source is None:
             return self._declared_zero_row_table()
-        table = typed_zero_row_table(self._bound_source)
+        table = typed_zero_row_table(source)
         if table is None or self._declared_form is None:
             return table
         return self._declared_form.apply(table)
@@ -1988,9 +2051,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the bound source."""
-        return self._bound_source is not None and schema_requires_io(
-            self._bound_source, config
-        )
+        source = self._bound_stream()
+        return source is not None and schema_requires_io(source, config)
 
     def head(
         self,
@@ -2003,7 +2065,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
 
         A narrower bound source's rows are shown as rows of the declared schema.
         """
-        if self._bound_source is None:
+        source = self._bound_stream()
+        if source is None:
             check_head_size(n)
             return self._head_without_rows(
                 ColumnConfig.handle_config(columns, all_info=all_info),
@@ -2011,15 +2074,13 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                 note="no source bound",
             )
         if self._declared_form is None:
-            return head_of(
-                self._bound_source.head(n, columns=columns, all_info=all_info), self
-            )
+            return head_of(source.head(n, columns=columns, all_info=all_info), self)
         # The source's own head, read with every column group the declared stream
         # needs; the declared stream then selects the asked-for groups and computes
         # the content hashes of the declared rows. Nothing is computed.
         config = ColumnConfig.handle_config(columns, all_info=all_info)
         view = head_of(
-            self._bound_source.head(
+            source.head(
                 n,
                 columns=ColumnConfig(
                     meta=True,
@@ -2031,9 +2092,9 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             ),
             self,
         )
-        table = self._declared_stream(
-            self._bound_source, self._declared_form, view.table
-        ).as_table(columns=config)
+        table = self._declared_stream(source, self._declared_form, view.table).as_table(
+            columns=config
+        )
         renames = self._declared_form.renames
         tag_columns = {renames.get(c, c) for c in view.tag_columns}
         return dataclasses.replace(
@@ -2056,13 +2117,14 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         Raises:
             UnboundSourceError: When no concrete source is attached.
         """
-        if self._bound_source is None:
+        source = self._bound_stream()
+        if source is None:
             raise UnboundSourceError(
                 f"SourceJobNode '{self._name}' has no concrete source bound. "
                 "Call job.bind(sources={'<name>': source}) before running."
             )
         form = self._declared_form
-        async for tag, data in self._bound_source.async_iter_data():
+        async for tag, data in source.async_iter_data():
             yield (tag, data) if form is None else self._declared_row(tag, data, form)
 
     def output_schema(
@@ -2089,10 +2151,11 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         Returns:
             Tuple of ``(tag_schema, data_schema)``.
         """
-        if self._bound_source is None or self._declared_form is not None:
+        source = self._bound_stream()
+        if source is None or self._declared_form is not None:
             # Unbound, or bound to a narrower source given as the declared schema.
             return super().output_schema(columns=columns, all_info=all_info)
-        return self._bound_source.output_schema(columns=columns, all_info=all_info)
+        return source.output_schema(columns=columns, all_info=all_info)
 
     def as_table(
         self,
@@ -2112,14 +2175,15 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         Raises:
             UnboundSourceError: When no concrete source is attached.
         """
-        if self._bound_source is None:
+        source = self._bound_stream()
+        if source is None:
             raise UnboundSourceError(
                 f"SourceJobNode '{self._name}' has no concrete source bound. "
                 "Call job.bind(sources={'<name>': source}) before calling as_table()."
             )
         if self._declared_form is None:
-            return self._bound_source.as_table(columns=columns, all_info=all_info)
-        table = self._bound_source.as_table(
+            return source.as_table(columns=columns, all_info=all_info)
+        table = source.as_table(
             columns={
                 "meta": True,
                 "source": True,
@@ -2128,9 +2192,9 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                 "sort_by_tags": False,
             }
         )
-        return self._declared_stream(
-            self._bound_source, self._declared_form, table
-        ).as_table(columns=columns, all_info=all_info)
+        return self._declared_stream(source, self._declared_form, table).as_table(
+            columns=columns, all_info=all_info
+        )
 
     @classmethod
     def from_stream(
@@ -2169,6 +2233,9 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
 
         Returns:
             A ``SourceJobNode`` configured according to the case above.
+
+        Raises:
+            SourceSpecMismatchError: If the stream to be bound depends on a source slot.
         """
         match stream:
             case SourceJobNode():
@@ -2197,6 +2264,14 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                 return node
             case _:
                 # Case 3: concrete stream — bound SJN.
+                from orcapod.pipeline.source_consistency import (
+                    binding_dependency_error,
+                    independent_source_dependency,
+                )
+
+                # Schema and source-name inference can consult the live inputs.
+                if (dependency := independent_source_dependency(stream)) is not None:
+                    raise binding_dependency_error(dependency, name)
                 # Slot name priority:
                 #   1. explicit *name* parameter
                 #   2. stream.source_name for RootSource (its id without the kind part)

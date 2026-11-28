@@ -201,11 +201,12 @@ def _saved_job(tmp_path: Path, *, rebuildable: bool) -> Path:
         [pl.col("depth") >= 10] if rebuildable else [[True, False, True]]
     )
     job = PipelineJob(name="filtered", database=DeltaTableDatabase(tmp_path / "store"))
+    source = _source()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", PolarsFilterWarning)
         with job:
-            _ = _source().polars_filter(*first, session="s1", label="first")
-            _ = _source().polars_filter(*second, unit=3, label="second")
+            _ = source.polars_filter(*first, session="s1", label="first")
+            _ = source.polars_filter(*second, unit=3, label="second")
     path = tmp_path / "job.json"
     job.save(path)
     return path

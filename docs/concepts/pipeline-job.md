@@ -111,6 +111,17 @@ Three more things a job node offers:
   the node has run in this process, to use as the input of another pipeline.
 - **`upstreams`** and **`label`** let you walk the pipeline backwards.
 
+As a stopgap pending ITL-1559, a job cannot absorb steps from another job by
+capturing compiled nodes or other streams that depend on the other job's
+bindable source slots (`SourceJobNode`). The same restriction applies to
+standalone `SourceJobNode` objects, even when unbound. Pass the source itself to
+record a new chain, or use `node.as_source()` to read the stored results of an
+earlier job. A job can pass its own slots directly into new steps while their
+original bindings are in place. The ITL-1559 stopgap refuses streams built
+outside the job over one of its own slots. Build the step from the slot inside
+the job, or pass the source itself. A schema-only `SourceNode` declares an
+independent slot for each job.
+
 ## The database
 
 Any Orcapod database can hold a job's results. Two are used most:
@@ -371,6 +382,29 @@ tag_schema=Schema({...}), data_schema=Schema({...}))`) means one Arrow type per 
 (`int` is `int64`, `datetime` is `timestamp[us, tz=UTC]`); to accept other widths, units or
 zones, declare the slot with Arrow schemas (`tag_schema=pa.schema([...])`). Binding a source
 never changes a node's schema or where its results are stored.
+
+A binding must be independent of every bindable source slot and every node
+of its own job, including dependencies reached through operators,
+`node.as_source()`, or other source wrappers. As a stopgap pending ITL-1559,
+Orcapod checks this when binding, when reading the slot directly, and before
+each job or node run, including a load-only run. This also protects the schema
+and hash lookups needed to construct an `as_source()` result. Pass the
+underlying source, or use another job's `node.as_source()` to read stored results.
+The stored-result source still uses its origin's schema and keys, so Orcapod
+checks the origin's inputs across jobs. If those inputs lead back to the receiving
+slot, the binding is refused and the error names the slots in the cycle.
+
+```python
+from orcapod.errors import SourceSpecMismatchError
+from orcapod.operators import SelectDataColumns
+
+projection = SelectDataColumns(["weight", "height"])(job_b.nodes["mice"])
+try:
+    job_a.bind(sources={"mice": projection})
+except SourceSpecMismatchError as error:
+    print(error)
+# Binding source slot 'mice' to a source that depends on source slot 'mice' is not supported yet (ITL-1559). Pass the underlying source, or use a non-slot node's as_source() to read stored results.
+```
 
 A job made without sources has **unbound** slots. It can still be run: nodes that depend on
 an unbound source are skipped, and `job.unbound_sources` lists what is missing. Bind later

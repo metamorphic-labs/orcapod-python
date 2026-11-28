@@ -1,0 +1,310 @@
+{
+  "orcapod_pipeline_job_version": "0.4.0",
+  "orcapod_version": "0.4.0rc8.dev23+ga40296cb5.d20261127",
+  "run": {
+    "run_id": null,
+    "status": "pending",
+    "unbound_sources": [],
+    "node_job_content_hashes": {
+      "result_b": "semantic_v1:4883ca3500eca6bfde3021cbb145483ddb180085bd756be99cadf05d1c5fbb62",
+      "result_a": "semantic_v1:0e509b410605f3c4b76310e3269afe91275f3d25fd7670447644077c2e51f90a"
+    }
+  },
+  "pipeline": {
+    "orcapod_pipeline_version": "0.4.0",
+    "orcapod_version": "0.4.0rc8.dev23+ga40296cb5.d20261127",
+    "pipeline": {
+      "name": [
+        "legacy_shared_source"
+      ]
+    },
+    "nodes": {
+      "semantic_v1:cd7048c441163cf717c33b17636f39387d979ca491e0669317d2ee4d877c4cb2": {
+        "node_type": "source",
+        "label": "a",
+        "content_hash": "semantic_v1:cd7048c441163cf717c33b17636f39387d979ca491e0669317d2ee4d877c4cb2",
+        "pipeline_hash": "semantic_v1:21bd6a19a207bf8c14f0f39eb30c670608059cb59de15f5a1bfcc275b23caa44",
+        "output_schema": {
+          "tag": {
+            "t1": "large_string",
+            "t2": "large_string"
+          },
+          "data": {
+            "x": "int64",
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "source_node",
+          "a"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "source_config": {
+          "source_type": "node",
+          "name": "a",
+          "tag_schema": {
+            "t1": "large_string",
+            "t2": "large_string"
+          },
+          "data_schema": {
+            "x": "int64",
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "reconstructable": true
+      },
+      "semantic_v1:e7b8e6eead280bf3de166e930850b9844b6d29416c75c8a08b0567edc2fd5072": {
+        "node_type": "source",
+        "label": "b",
+        "content_hash": "semantic_v1:e7b8e6eead280bf3de166e930850b9844b6d29416c75c8a08b0567edc2fd5072",
+        "pipeline_hash": "semantic_v1:21bd6a19a207bf8c14f0f39eb30c670608059cb59de15f5a1bfcc275b23caa44",
+        "output_schema": {
+          "tag": {
+            "t1": "large_string",
+            "t2": "large_string"
+          },
+          "data": {
+            "x": "int64",
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "source_node",
+          "b"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "source_config": {
+          "source_type": "node",
+          "name": "b",
+          "tag_schema": {
+            "t1": "large_string",
+            "t2": "large_string"
+          },
+          "data_schema": {
+            "x": "int64",
+            "y": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "reconstructable": true
+      },
+      "semantic_v1:35ebef3ad6fab56bcb5a830e63f05c96cd8614c3617f54db65daa4334acd81c7": {
+        "node_type": "function",
+        "label": "result_b",
+        "content_hash": "semantic_v1:35ebef3ad6fab56bcb5a830e63f05c96cd8614c3617f54db65daa4334acd81c7",
+        "pipeline_hash": "semantic_v1:6ba45e187c1d9f4c70471a461d00119370d652c9a19f084c996fef929b1cb272",
+        "output_schema": {
+          "tag": {
+            "t1": "large_string",
+            "t2": "large_string"
+          },
+          "data": {
+            "out": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "subtract",
+          "8ec7327fae9a46cdb6c57a16d8634c52ca3a594e50df2da4e5833143ad63618b",
+          "v0",
+          "python.function.v1"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "function_config": {
+          "uri": [
+            "subtract",
+            "8ec7327fae9a46cdb6c57a16d8634c52ca3a594e50df2da4e5833143ad63618b",
+            "v0",
+            "python.function.v1"
+          ],
+          "data_function": {
+            "data_function_type_id": "python.function.v1",
+            "uri": [
+              "subtract",
+              "8ec7327fae9a46cdb6c57a16d8634c52ca3a594e50df2da4e5833143ad63618b",
+              "v0",
+              "python.function.v1"
+            ],
+            "config": {
+              "module_path": "__main__",
+              "callable_name": "subtract",
+              "version": "v0.0",
+              "input_data_schema": {
+                "x": "<class 'int'>",
+                "y": "<class 'int'>"
+              },
+              "output_data_schema": {
+                "out": "<class 'int'>"
+              },
+              "output_keys": [
+                "out"
+              ]
+            }
+          },
+          "pod_config": null,
+          "ctx_arg_name": null
+        },
+        "table_scope": "pipeline_hash",
+        "fall_through_tags": []
+      },
+      "semantic_v1:ed95f485c964d7d06671c14d6a0741ef9108338e5276873a830a83bc2fde0fee": {
+        "node_type": "function",
+        "label": "result_a",
+        "content_hash": "semantic_v1:ed95f485c964d7d06671c14d6a0741ef9108338e5276873a830a83bc2fde0fee",
+        "pipeline_hash": "semantic_v1:b1d774df931735c498e6ae6c33f270acf67a3f5c547127cf726114e58c0a295f",
+        "output_schema": {
+          "tag": {
+            "t1": "large_string",
+            "t2": "large_string"
+          },
+          "data": {
+            "out": "int64"
+          },
+          "nullable": {
+            "tag": [],
+            "data": []
+          }
+        },
+        "node_uri": [
+          "add",
+          "8ec7327fae9a46cdb6c57a16d8634c52ca3a594e50df2da4e5833143ad63618b",
+          "v0",
+          "python.function.v1"
+        ],
+        "data_context_key": "std:v1:default",
+        "config": null,
+        "function_config": {
+          "uri": [
+            "add",
+            "8ec7327fae9a46cdb6c57a16d8634c52ca3a594e50df2da4e5833143ad63618b",
+            "v0",
+            "python.function.v1"
+          ],
+          "data_function": {
+            "data_function_type_id": "python.function.v1",
+            "uri": [
+              "add",
+              "8ec7327fae9a46cdb6c57a16d8634c52ca3a594e50df2da4e5833143ad63618b",
+              "v0",
+              "python.function.v1"
+            ],
+            "config": {
+              "module_path": "__main__",
+              "callable_name": "add",
+              "version": "v0.0",
+              "input_data_schema": {
+                "x": "<class 'int'>",
+                "y": "<class 'int'>"
+              },
+              "output_data_schema": {
+                "out": "<class 'int'>"
+              },
+              "output_keys": [
+                "out"
+              ]
+            }
+          },
+          "pod_config": null,
+          "ctx_arg_name": null
+        },
+        "table_scope": "pipeline_hash",
+        "fall_through_tags": []
+      }
+    },
+    "edges": [
+      [
+        "semantic_v1:cd7048c441163cf717c33b17636f39387d979ca491e0669317d2ee4d877c4cb2",
+        "semantic_v1:ed95f485c964d7d06671c14d6a0741ef9108338e5276873a830a83bc2fde0fee"
+      ],
+      [
+        "semantic_v1:e7b8e6eead280bf3de166e930850b9844b6d29416c75c8a08b0567edc2fd5072",
+        "semantic_v1:35ebef3ad6fab56bcb5a830e63f05c96cd8614c3617f54db65daa4334acd81c7"
+      ]
+    ]
+  },
+  "bindings": {
+    "sources": {
+      "a": {
+        "source_type": "csv",
+        "file_path": "shared.csv",
+        "tag_columns": [
+          "t1",
+          "t2"
+        ],
+        "tag_only_columns": true,
+        "system_tag_columns": [],
+        "record_id_columns": null,
+        "source_name": "shared",
+        "source_name_given": true,
+        "source_version": 1,
+        "full_source_id": "csv_v1:shared",
+        "content_hash": "semantic_v1:7db9f47918267ecf78b37089217b1e009ddb5093b9a52463c174c1e032a033f4",
+        "pipeline_hash": "semantic_v1:21bd6a19a207bf8c14f0f39eb30c670608059cb59de15f5a1bfcc275b23caa44",
+        "tag_schema": {
+          "t1": "large_string",
+          "t2": "large_string"
+        },
+        "data_schema": {
+          "x": "int64",
+          "y": "int64"
+        },
+        "nullable": {
+          "tag": [],
+          "data": []
+        }
+      },
+      "b": {
+        "source_type": "csv",
+        "file_path": "shared.csv",
+        "tag_columns": [
+          "t1",
+          "t2"
+        ],
+        "tag_only_columns": true,
+        "system_tag_columns": [],
+        "record_id_columns": null,
+        "source_name": "shared",
+        "source_name_given": true,
+        "source_version": 1,
+        "full_source_id": "csv_v1:shared",
+        "content_hash": "semantic_v1:7db9f47918267ecf78b37089217b1e009ddb5093b9a52463c174c1e032a033f4",
+        "pipeline_hash": "semantic_v1:21bd6a19a207bf8c14f0f39eb30c670608059cb59de15f5a1bfcc275b23caa44",
+        "tag_schema": {
+          "t1": "large_string",
+          "t2": "large_string"
+        },
+        "data_schema": {
+          "x": "int64",
+          "y": "int64"
+        },
+        "nullable": {
+          "tag": [],
+          "data": []
+        }
+      }
+    },
+    "database": null,
+    "result_database": null
+  }
+}

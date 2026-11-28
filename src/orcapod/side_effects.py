@@ -716,7 +716,7 @@ class SideEffectPod(TraceableBase):
             side_effect_pod=self,
             input_stream=input_stream,
             label=label,
-        )
+        )._mark_recorded(self.tracker_manager)
 
     def __call__(
         self, *streams: StreamProtocol, label: str | None = None
@@ -1422,6 +1422,10 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         Raises:
             SideEffectLogDataContextError: As for ``execute``.
             OrcapodDatabaseWriteError: If committing the invocation log fails.
+            InconsistentSourceError: If distinct source objects share a content
+                hash, or sources with one ID differ in schema or key columns.
+            SourceSpecMismatchError: If a bound source now depends on a bindable slot
+                or the live inputs contain a cycle (ITL-1559).
         """
         import sys
 

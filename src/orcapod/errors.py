@@ -612,28 +612,41 @@ class UnboundSourceError(RuntimeError):
 
 
 class SourceSpecMismatchError(InputValidationError, ValueError):
-    """Raised when a concrete source's schema differs from a source slot's declared schema.
+    """Raised for an incompatible source binding or a cycle in live inputs.
 
     A source fits a slot when its tag and data columns have the slot's names, roles and
     Python types (ITL-1112): those are what every downstream pipeline hash, and so every
     stored path, is built from. The message names the slot and the column, and for a type
-    difference both types. Raised by ``PipelineJob.bind(sources=...)`` and by assigning a
-    source node's ``bound_source``, before anything is bound.
+    difference both types. For a slot-dependent source, the message names the
+    dependency and any known receiving slot (ITL-1559). The error is raised before
+    installing, reading or running with an invalid binding.
     """
 
 
+def live_input_cycle_error(
+    label: str | None = None, *, slots: tuple[str, ...] = ()
+) -> SourceSpecMismatchError:
+    """Report a cycle found while following live and stored-result inputs."""
+    if slots:
+        location = " through source slots " + ", ".join(map(repr, slots))
+    else:
+        location = "" if label is None else f" at {label!r}"
+    return SourceSpecMismatchError(
+        f"A cycle in the live input graph{location} is not supported (ITL-1559). "
+        "Remove the circular input or replace it with an independent source."
+    )
+
+
 class InconsistentSourceError(ValueError):
-    """Raised when two source nodes in the same pipeline share a name but differ in schema.
+    """Raised when sources conflict in a pipeline or job.
 
-    Source node names are identity-forming: the same name in a given pipeline
-    must always refer to the same input slot (same schema).  If ``compile()``
-    finds two source nodes with identical names but different schemas — which
-    can happen when two ``RootSource`` objects share the same ``source_id`` but
-    produce different column sets — it raises this error rather than silently
-    renaming one of them.
+    Each content hash can be registered by one source object. Sources
+    sharing a ``source_id`` must have the same schema and key columns
+    (ITL-1506). Two different schemas competing for one input slot also
+    raise this error.
 
-    Resolution: assign distinct ``source_id`` values to the conflicting sources
-    so each slot has a unique, stable identity.
+    Build a source once and reuse that object, or give each source its
+    own ``source_id``.
     """
 
 

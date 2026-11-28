@@ -1662,6 +1662,33 @@ data. The rules:
   match its previous one (bind does not compare the two), but `bind` refuses, before replacing
   any binding, a bind after which two slots would read one source identity under different
   restrictions (below). A job run over a restricted source feeding `GroupBy`, `Batch` or `MergeJoin` issues one `RestrictedAggregationWarning`.
+  Each source content hash belongs to one source object per pipeline or job
+  (ITL-1469). Capture, compile, binding through either API, loading and running
+  check the sources the graph reads. A slot binding replaces its former source.
+  A job accepts new steps only while every slot holds the exact source object
+  it held when that slot was first compiled. A slot originally compiled unbound
+  must be unbound. Rebinding or unbinding a slot blocks recording until all
+  original bindings are restored. InconsistentSourceError names the changed
+  slots. Restore the original bindings or build a new job. A job can compile
+  and run with its replacement bindings. ITL-1559 tracks capture after rebinding.
+  As a stopgap pending ITL-1559, a job refuses another job's or a standalone
+  SourceJobNode, including through prebuilt streams. Its bound_source can change
+  even if currently unbound. Pass the source itself, or use node.as_source()
+  for another job's stored results. The job's own slots are allowed with their
+  original bindings. A schema-only SourceNode declares a new unbound slot.
+  The ITL-1559 stopgap also refuses prebuilt streams over the job's own slots.
+  Build the step inside the job from the slot, or pass the source itself.
+  A slot binding must be independent of every bindable slot and every node
+  of its own job, including through stored-result sources and other wrappers
+  (ITL-1559). Binding, direct reads, and both job and node runs (including
+  load-only) report a dependency as SourceSpecMismatchError. Pass the
+  underlying source or use another job's node.as_source() for stored results.
+  A stored-result source still uses its origin's schema and keys. Binding checks
+  follow the origin's inputs through other jobs and refuse cycles, naming the
+  slots involved. A one-way stored-result binding stays supported.
+  Call where() once and reuse the resulting object. A source object conflict
+  raises InconsistentSourceError before the separate restriction check, which
+  can see restrictions beneath wrappers.
   A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
   identity unchanged), so one table restricted two ways (or with and without a restriction) in
   one pipeline is refused (`restrictions.require_one_restriction`, over the sources the streams
@@ -1669,9 +1696,11 @@ data. The rules:
   what they read) at capture, at compile, by `bind` before it binds and at the start of every
   run (`refuse_restriction_conflicts`), whatever streams lead there: projections, operator
   chains, streams built before the capture. A bind's walk matches the job's own slots by object
-  (`Rebinding`), never by name. `RunSummary` keeps one condition and one limit per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
-  a `SourceProxy`'s delegate and a `CachedSource`'s source (`_streams_beneath`); a
-  `DerivedSource` is a root. A `CachedSource`
+  (`Rebinding`), never by name. `RunSummary` keeps one condition and one limit per slot (ITL-1293).
+  Capture and restriction checks follow job bindings and the live_source_inputs
+  declared by wrappers. A wrapper over stored results ends this walk. Source
+  registration uses the wrapper itself and its content hash.
+  A `CachedSource`
   over a restricted source is refused at construction (a cache is kept under the table's
   identity; developer, November 18, 2026), and so is an operator job node that caches (`LOG` or
   `REPLAY`) over a restricted source (developer, November 19, 2026: its cache is kept under the

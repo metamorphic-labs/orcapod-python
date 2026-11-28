@@ -416,6 +416,17 @@ class RootSource(StreamBase):
         """
         return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
+    @property
+    def _resolved_key_columns(self) -> tuple[str, ...] | None:
+        """The resolved key columns that name this source's rows, in key order.
+
+        ``()`` means a row is named by its position. Key columns belong to how the
+        rows are read, not to the dataset the source id names. A source over another
+        (``CachedSource``, ``SourceProxy``) answers with what it wraps, or ``None``
+        when that is unknown (an unbound proxy).
+        """
+        return self._key_columns
+
     def identity_structure(self) -> Any:
         """Identity from the ``source_id``, the Arrow schema and the key columns.
 
@@ -501,6 +512,16 @@ class RootSource(StreamBase):
     def upstreams(self) -> tuple[StreamProtocol, ...]:
         """Sources have no upstream dependencies."""
         return ()
+
+    @property
+    def live_source_inputs(self) -> tuple[StreamProtocol, ...] | None:
+        """Identify the inputs read live through this source.
+
+        Wrappers that can read another stream live override this property. They
+        return an empty tuple when disconnected. A source that supplies its
+        own rows or reads stored results returns ``None``, ending the walk.
+        """
+        return None
 
     # -------------------------------------------------------------------------
     # Stream delegation defaults

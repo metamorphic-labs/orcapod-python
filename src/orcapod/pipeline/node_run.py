@@ -18,7 +18,11 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from orcapod.errors import OrcapodDatabaseError, OrcapodDatabaseWriteError
+from orcapod.errors import (
+    OrcapodDatabaseError,
+    OrcapodDatabaseWriteError,
+    live_input_cycle_error,
+)
 from orcapod.pipeline.run_summary import (
     RunCountingObserver,
     RunSummary,
@@ -425,23 +429,29 @@ def run_with_dependencies(
     from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
     graph: OrcaDAG[Any] = OrcaDAG()
-    seen: list[Any] = []
+    active: set[int] = set()
+    seen: set[int] = set()
     outside: list[Any] = []
 
     def visit(node: Any) -> None:
         """Add ``node`` and what it depends on, up to the sources of the job."""
-        if any(node is other for other in seen):
+        key = id(node)
+        if key in active:
+            raise live_input_cycle_error()
+        if key in seen:
             return
-        seen.append(node)
+        seen.add(key)
         graph.add_node(node)
         if isinstance(node, SourceJobNode):
             return
         if not _is_job_node(node):
             outside.append(node)
             return
+        active.add(key)
         for upstream in node.upstreams:
             visit(upstream)
             graph.add_edge(upstream, node)
+        active.remove(key)
 
     visit(target)
     plan = plan_run(graph, load_only=load_only, outside=outside)

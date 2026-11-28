@@ -6,8 +6,7 @@ and ``SourceProtocol.row_limit``); only ``SpiralDBTableSource`` can be restricte
 This module holds every rule that reads them:
 
 - the walk from streams down to the sources they read (``restrictions_beneath``,
-  ``sources_read``), through a slot's bound source, a proxy's delegate and a cache's
-  source;
+  ``sources_read``), through a slot's bound source and a wrapper's live inputs;
 - the refusals: one source read under two restrictions in one pipeline
   (``require_one_restriction``), an operator node that caches over a restricted source
   (``refuse_restricted_operator_cache``), a ``CachedSource`` over one
@@ -42,10 +41,11 @@ RestrictedSource: TypeAlias = tuple[str, Condition, int | None]
 (``source_name``), its condition and its limit."""
 
 
-Rebinding: TypeAlias = "Sequence[tuple[SourceJobNode, StreamProtocol]]"
+Rebinding: TypeAlias = "Sequence[tuple[SourceJobNode, StreamProtocol | None]]"
 """The sources a bind is about to bind: ``(slot, source)`` pairs, one per slot of the
 job that the bind changes. A slot is matched by object identity, never by name: a
-source being bound can itself be a slot of another job, of the same name."""
+source being bound can itself be a slot of another job, of the same name.
+``None`` unbinds the slot."""
 
 
 def source_name(source: RootSource) -> str:
@@ -106,21 +106,17 @@ def _inputs(stream: StreamProtocol) -> tuple[StreamProtocol, ...]:
     return tuple(upstream for upstream in upstreams if upstream is not None)
 
 
-def _streams_beneath(
+def streams_beneath(
     current: StreamProtocol, rebinding: Rebinding | None = None
 ) -> tuple[StreamProtocol, ...]:
-    """Return what ``current`` reads: the streams a restriction walk goes on to.
+    """Return the streams ``current`` reads when a graph walk goes upstream.
 
-    A ``SourceJobNode`` reads its bound source (or, when it is one of the slots of
-    ``rebinding``, the source a bind is about to bind there), a bound
-    ``SourceProxy`` its delegate, a ``CachedSource`` the source it caches; any other
-    stream its ``upstreams``. A ``DerivedSource`` is a root: it reads the rows stored
-    for its origin, never its origin's sources, so the walk ends there, as at every
-    other root source.
+    A job slot reads its bound source, with prospective bindings taking precedence.
+    Sources declare their live inputs themselves. Other streams read their
+    graph upstreams.
     """
     from orcapod.core.nodes.source_node import SourceJobNode
-    from orcapod.core.sources.cached_source import CachedSource
-    from orcapod.core.sources.source_proxy import SourceProxy
+    from orcapod.core.sources.base import RootSource
 
     if isinstance(current, SourceJobNode):
         bound = current.bound_source
@@ -128,10 +124,8 @@ def _streams_beneath(
             if slot is current:
                 bound = source
         return () if bound is None else (bound,)
-    if isinstance(current, SourceProxy):
-        return () if current.delegate is None else (current.delegate,)
-    if isinstance(current, CachedSource):
-        return (current.cached_source,)
+    if isinstance(current, RootSource):
+        return current.live_source_inputs or ()
     return _inputs(current)
 
 
@@ -141,8 +135,8 @@ def restrictions_beneath(
 ) -> frozenset[tuple[str, Restriction]]:
     """Return the restrictions of every source the streams read, order-free.
 
-    Walks down to the root sources (``_streams_beneath``: through a slot's bound
-    source, a proxy's delegate and a cache's source); each restricted root gives
+    Walks down to the root sources (through job bindings and live wrappers);
+    each restricted root gives
     ``(source name, restriction)``. Two results are equal when the same sources are
     restricted equally.
 
@@ -165,7 +159,7 @@ def restrictions_beneath(
         restriction = restriction_of(current)
         if restriction is not None and isinstance(current, RootSource):
             found.add((source_name(current), restriction))
-        pending.extend(_streams_beneath(current, rebinding))
+        pending.extend(streams_beneath(current, rebinding))
     return frozenset(found)
 
 
@@ -186,13 +180,11 @@ def sources_read(
     """Return every root source the streams read, with its restriction.
 
     ``(content hash, source name, restriction or None)`` for each root source met by
-    ``_streams_beneath``, once per object. The content hash is the source's identity,
+    ``streams_beneath``, once per object. The content hash is the source's identity,
     which a restriction leaves unchanged, so it is the key of the one-restriction
     rule. ``rebinding``: the job's slots a bind is about to bind, with their sources.
     """
     from orcapod.core.sources.base import RootSource
-    from orcapod.core.sources.cached_source import CachedSource
-    from orcapod.core.sources.source_proxy import SourceProxy
 
     found: list[tuple[str, str, Restriction | None]] = []
     visited: list[StreamProtocol] = []
@@ -202,12 +194,7 @@ def sources_read(
         if any(current is seen for seen in visited):
             continue
         visited.append(current)
-        beneath = _streams_beneath(current, rebinding)
-        if (
-            isinstance(current, RootSource)
-            and not isinstance(current, (CachedSource, SourceProxy))
-            and not beneath
-        ):
+        if isinstance(current, RootSource) and current.live_source_inputs is None:
             found.append(
                 (
                     current.content_hash().to_string(),
@@ -215,7 +202,8 @@ def sources_read(
                     restriction_of(current),
                 )
             )
-        pending.extend(beneath)
+        else:
+            pending.extend(streams_beneath(current, rebinding))
     return found
 
 
@@ -465,10 +453,10 @@ def restrictions_in_force(
             elif (str(stream.label), entry) not in direct:
                 direct.append((str(stream.label), entry))
         if isinstance(stream, SourceJobNode):
-            pending.extend((inner, stream.name) for inner in _streams_beneath(stream))
+            pending.extend((inner, stream.name) for inner in streams_beneath(stream))
         else:
             # A slot bound to a stream over a source keeps its name down to it.
-            pending.extend((inner, slot) for inner in _streams_beneath(stream))
+            pending.extend((inner, slot) for inner in streams_beneath(stream))
     found = dict(slots)
     for label, entry in direct:
         if found.get(label) == entry:

@@ -1951,6 +1951,10 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 ``load_only`` is false.
             ValueError: If this node or one it depends on caches (``LOG`` or
                 ``REPLAY``) over a restricted source (ITL-1218); nothing has run.
+            InconsistentSourceError: If distinct source objects share a content
+                hash, or sources with one ID differ in schema or key columns.
+            SourceSpecMismatchError: If a bound source now depends on a bindable slot
+                or the live inputs contain a cycle (ITL-1559).
         """
         from orcapod.pipeline.node_run import (
             check_sources,
@@ -1960,9 +1964,15 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         )
         from orcapod.pipeline.restrictions import refuse_restriction_conflicts
         from orcapod.pipeline.run_summary import warn_row_failures
+        from orcapod.pipeline.source_consistency import (
+            require_consistent_sources,
+            require_live_source_bindings,
+        )
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
+        require_live_source_bindings([self])
+        require_consistent_sources([(f"node {self.label!r}", self)])
         # A source read under two restrictions, or a caching operator over a restricted
         # source, is refused before any source is checked and before anything is
         # computed or written (ITL-1218).
@@ -2064,6 +2074,9 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         operator changed since). Before a run in this process it holds none, whatever
         its cache mode and database hold (ITL-1095).
         """
+        from orcapod.pipeline.source_consistency import require_live_source_bindings
+
+        require_live_source_bindings((self,))
         if self._cached_output_stream is None or self.is_stale:
             return None
         return self._cached_output_stream
@@ -2147,16 +2160,15 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         """
         check_head_size(n)
         config = ColumnConfig.handle_config(columns, all_info=all_info)
-        if self._cached_output_stream is None:
-            return self._head_without_rows(
-                config, ViewStatus.NOT_COMPUTED, note=JOB_NODE_NOT_RUN_NOTE
+        current = self._current_output()
+        if current is None:
+            note = (
+                JOB_NODE_NOT_RUN_NOTE
+                if self._cached_output_stream is None
+                else STALE_NOTE
             )
-        if self.is_stale:
-            # run() would recompute; the kept rows are not the current result.
-            return self._head_without_rows(
-                config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
-            )
-        head = head_of(self._cached_output_stream.head(n, columns=config), self)
+            return self._head_without_rows(config, ViewStatus.NOT_COMPUTED, note=note)
+        head = head_of(current.head(n, columns=config), self)
         if self._run_load_only:
             # Output of a load-only run: its input may lack rows (ITL-1095).
             return dataclasses.replace(

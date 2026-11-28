@@ -10,6 +10,7 @@ unless a live source has been bound via `bind`.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,7 @@ from orcapod.core.streams.view import (
     StreamView,
     head_of,
 )
+from orcapod.errors import live_input_cycle_error
 from orcapod.types import ColumnConfig
 from orcapod.core.streams.base import (
     check_head_size,
@@ -35,7 +37,16 @@ if TYPE_CHECKING:
 
     import pyarrow as pa
 
-    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.protocols.core_protocols import (
+        DataProtocol,
+        StreamProtocol,
+        TagProtocol,
+    )
+
+
+_modification_path: ContextVar[frozenset[int]] = ContextVar(
+    "source_proxy_modification_path", default=frozenset()
+)
 
 
 class SourceProxy(RootSource):
@@ -94,6 +105,19 @@ class SourceProxy(RootSource):
     def delegate(self) -> SourceProtocol | None:
         """The bound live source, or ``None`` if no source has been bound."""
         return self._delegate
+
+    @property
+    def live_source_inputs(self) -> tuple[StreamProtocol, ...]:
+        """A bound proxy reads its delegate live."""
+        return () if self._delegate is None else (self._delegate,)
+
+    @property
+    @override
+    def _resolved_key_columns(self) -> tuple[str, ...] | None:
+        """The bound source's key columns, or ``None`` while unbound."""
+        if isinstance(self._delegate, RootSource):
+            return self._delegate._resolved_key_columns
+        return None
 
     @property
     def is_bound(self) -> bool:
@@ -174,7 +198,15 @@ class SourceProxy(RootSource):
         own = self._modified_time
         if self._delegate is None:
             return own
-        bound = self._delegate.last_modified
+        path = _modification_path.get()
+        key = id(self)
+        if key in path:
+            raise live_input_cycle_error()
+        token = _modification_path.set(path | {key})
+        try:
+            bound = self._delegate.last_modified
+        finally:
+            _modification_path.reset(token)
         if bound is None or own is None:
             return bound
         return max(own, bound)

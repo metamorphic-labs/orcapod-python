@@ -8,8 +8,12 @@ rebound two nodes up makes every node below it stale, not only its direct consum
 
 from __future__ import annotations
 
+import importlib
+import weakref
 from collections.abc import Iterable
 from typing import Any
+
+from orcapod.errors import live_input_cycle_error
 
 
 class RunHoldingNode:
@@ -22,6 +26,15 @@ class RunHoldingNode:
     # The summary of the node's last ``run()`` (with the nodes it ran first); a class
     # default so nodes rebuilt from a saved descriptor start without one.
     _last_run: Any = None
+    _pipeline_job: weakref.ReferenceType[object] | None = None
+
+    def _set_pipeline_job(self, job: object) -> None:
+        """Keep a node's job provenance through recompilation without owning the job."""
+        self._pipeline_job = weakref.ref(job)
+
+    def _belongs_to_job(self, job: object) -> bool:
+        """Whether this node was compiled or loaded as part of this job."""
+        return self._pipeline_job is not None and self._pipeline_job() is job
 
     @property
     def last_run(self) -> Any:
@@ -43,6 +56,7 @@ class RunHoldingNode:
         stale (ITL-1095). A stale node reads empty until it runs again. Each node of
         the ancestry is checked once, however many paths lead to it.
         """
+        self._require_live_bindings()
         return _stale(self, {})
 
     def _own_staleness(self) -> bool:
@@ -67,7 +81,17 @@ class RunHoldingNode:
         Returns:
             ``True`` if the node holds a current run for such a run.
         """
+        self._require_live_bindings()
         return _current(self, load_only, {}, {})
+
+    def _require_live_bindings(self) -> None:
+        """Validate the stream graph even when there are no held rows to check."""
+        # Source consistency sits above this mixin in the import graph and uses it
+        # to recognize job nodes. Resolve the module when the graph is checked.
+        source_consistency = importlib.import_module(
+            "orcapod.pipeline.source_consistency"
+        )
+        source_consistency.require_live_source_bindings((self,))
 
     def _holds_run(self, *, load_only: bool) -> bool:
         """Whether the node holds the rows of a completed run good for such a run."""
@@ -93,25 +117,30 @@ def _job_upstreams(node: Any) -> list[RunHoldingNode]:
     return [upstream for upstream in upstreams if isinstance(upstream, RunHoldingNode)]
 
 
-def _stale(node: RunHoldingNode, memo: dict[int, bool]) -> bool:
+def _stale(node: RunHoldingNode, memo: dict[int, bool | None]) -> bool:
     """Whether ``node`` is stale; ``memo`` keeps each node's answer for one traversal."""
     key = id(node)
     if key not in memo:
+        memo[key] = None  # on the active path, answer still pending
         memo[key] = node._own_staleness() or any(  # pyright: ignore[reportPrivateUsage]  # the mixin's own helper
             _stale(upstream, memo) for upstream in _job_upstreams(node)
         )
-    return memo[key]
+    result = memo[key]
+    if result is None:
+        raise live_input_cycle_error()
+    return result
 
 
 def _current(
     node: RunHoldingNode,
     load_only: bool,
-    memo: dict[int, bool],
-    stale_memo: dict[int, bool],
+    memo: dict[int, bool | None],
+    stale_memo: dict[int, bool | None],
 ) -> bool:
     """Whether ``node`` holds a current run; memoized for one traversal."""
     key = id(node)
     if key not in memo:
+        memo[key] = None  # on the active path, answer still pending
         memo[key] = (
             node._holds_run(load_only=load_only)  # pyright: ignore[reportPrivateUsage]  # the mixin's own hook
             and not _stale(node, stale_memo)
@@ -120,7 +149,10 @@ def _current(
                 for upstream in _job_upstreams(node)
             )
         )
-    return memo[key]
+    result = memo[key]
+    if result is None:
+        raise live_input_cycle_error()
+    return result
 
 
 def upstream_job_node_stale(upstreams: Iterable[Any]) -> bool:
@@ -135,7 +167,7 @@ def upstream_job_node_stale(upstreams: Iterable[Any]) -> bool:
     Returns:
         ``True`` if any upstream ``RunHoldingNode`` is stale.
     """
-    memo: dict[int, bool] = {}
+    memo: dict[int, bool | None] = {}
     return any(
         isinstance(upstream, RunHoldingNode) and _stale(upstream, memo)
         for upstream in upstreams
