@@ -277,3 +277,20 @@ def test_raw_inputs_keep_their_other_columns() -> None:
         "vx": pa.int8(),
         "vy": pa.int8(),
     }
+
+
+def test_standalone_join_uses_the_shared_token_field_declaration() -> None:
+    """The standalone row merge delegates its token field to the shared constructor."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(Join._merge_data)))  # pyright: ignore[reportPrivateUsage]  # audit the declaration site
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "source_info_field"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "arrow_utils"
+        for node in ast.walk(tree)
+    )

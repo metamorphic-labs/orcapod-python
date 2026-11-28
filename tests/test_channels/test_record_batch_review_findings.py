@@ -378,8 +378,13 @@ def test_nested_field_metadata_must_be_the_descriptions(column: str) -> None:
     asyncio.run(write())
 
 
-def _list_token_stream() -> ArrowTableStream:
-    """A raw stream whose source-info column holds list tokens."""
+def _list_token_stream(token_type: pa.DataType | None = None) -> ArrowTableStream:
+    """A raw stream whose source-info column holds list tokens.
+
+    Args:
+        token_type: The token column's declared type; a plain large list of
+            strings when not given.
+    """
     return ArrowTableStream(
         pa.table(
             {
@@ -387,7 +392,8 @@ def _list_token_stream() -> ArrowTableStream:
                 # A list token needs list data (the token-shape rule, ITL-1491).
                 "x": pa.array([[1.5], [2.5]], pa.large_list(pa.float64())),
                 "_source_x": pa.array(
-                    [["s::r0::x"], ["s::r1::x"]], pa.large_list(pa.large_string())
+                    [["s::r0::x"], ["s::r1::x"]],
+                    token_type or pa.large_list(pa.large_string()),
                 ),
             }
         ),
@@ -419,12 +425,53 @@ def test_a_source_info_field_carries_no_metadata_of_its_own() -> None:
 
 
 def test_a_token_columns_item_metadata_is_part_of_its_declared_type() -> None:
-    """Restated for ITL-1491 (review of PR #601, P2-4): metadata on a token list's
-    item field is part of the column's type, which a row keeps as its stream
-    declares it, so a batch that carries it is taken (it used to be refused as
-    "carrying field metadata", when a row rebuilt its token type from the value).
-    Batches of one stream declare one token type, compared strictly: after it, a
-    batch without the metadata is refused, and another with it is taken."""
+    """Restated for ITL-1557 (fifth review of PR #607, finding 1; first restated
+    for ITL-1491, review of PR #601, P2-4): metadata on a token list's item field
+    is part of the column's declared type. A stream that declares it keeps it, in
+    its table and in its record batches, and the stream an output channel produces
+    declares it too. The stream's declaration binds every batch, the first one
+    included: a batch without the metadata is refused whenever it is sent, and a
+    batch with it is taken."""
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+
+    plain_type = pa.large_list(pa.large_string())
+    tagged_type = _with_metadata_inside(plain_type)
+    stream = _list_token_stream(tagged_type)
+    (tagged,) = batches_of(stream)
+    index = next(
+        i for i, n in enumerate(tagged.schema.names) if n.startswith("_source_")
+    )
+    field = tagged.schema.field(index)
+    # The declared stream and its batches hold the item metadata.
+    declared = stream.as_table(columns={"source": True}).schema.field(field.name)
+    assert declared.type.equals(tagged_type, check_metadata=True)
+    assert field.type.equals(tagged_type, check_metadata=True)
+    plain = tagged.set_column(
+        index, field.with_type(plain_type), tagged.column(index).cast(plain_type)
+    )
+
+    async def write() -> pa.Table:
+        output = OutputChannel(stream)
+        with pytest.raises(SourceInfoTypesDisagree, match=field.name):
+            await output.send(plain.slice(0, 1))
+        await output.send(tagged.slice(0, 1))
+        with pytest.raises(SourceInfoTypesDisagree, match=field.name):
+            await output.send(plain.slice(1, 1))
+        await output.send(tagged.slice(1, 1))
+        await output.close()
+        return output.result().as_table(columns={"source": True})
+
+    result = asyncio.run(write())
+    assert result.schema.field(field.name).type.equals(tagged_type, check_metadata=True)
+    assert result.num_rows == 2
+
+
+def test_a_batch_may_not_add_item_metadata_to_a_declared_token_type() -> None:
+    """Fifth review of PR #607, finding 1: a concrete stream's declared token type
+    binds its first batch too, item metadata included. A first batch whose token
+    item field carries metadata the stream does not declare is refused (it used to
+    be taken, and replaced the stream's declared type), and the stream's own batch
+    is then taken with the declared type."""
     from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
 
     stream = _list_token_stream()
@@ -440,15 +487,14 @@ def test_a_token_columns_item_metadata_is_part_of_its_declared_type() -> None:
 
     async def write() -> pa.Table:
         output = OutputChannel(stream)
-        await output.send(tagged.slice(0, 1))
         with pytest.raises(SourceInfoTypesDisagree, match=field.name):
-            await output.send(batch.slice(1, 1))
-        await output.send(tagged.slice(1, 1))
+            await output.send(tagged)
+        await output.send(batch)
         await output.close()
         return output.result().as_table(columns={"source": True})
 
     result = asyncio.run(write())
-    assert result.schema.field(field.name).type.equals(tagged_type, check_metadata=True)
+    assert result.schema.field(field.name).type.equals(field.type, check_metadata=True)
     assert result.num_rows == 2
 
 
