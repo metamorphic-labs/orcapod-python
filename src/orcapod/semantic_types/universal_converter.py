@@ -1927,10 +1927,7 @@ class UniversalTypeConverter:
                 # An Arrow schema remembers a plain set only as a list. Python set
                 # inputs still need canonical storage order; actual lists keep theirs.
                 if isinstance(value, set):
-                    return sort_set_elements(
-                        [set_element_converter(item) for item in value],
-                        given_elements=value,
-                    )
+                    return sort_set_elements(value, set_element_converter)
                 return [element_converter(item) for item in value]
 
             return convert_list
@@ -1948,13 +1945,7 @@ class UniversalTypeConverter:
             def convert_dict(value: Any) -> list[dict[str, Any]]:
                 if value is None:
                     raise _none_not_admitted(python_type)
-                return sort_dict_entries(
-                    [
-                        {"key": key_converter(k), "value": value_converter(v)}
-                        for k, v in value.items()
-                    ],
-                    given_keys=value,
-                )
+                return sort_dict_entries(value, key_converter, value_converter)
 
             return convert_dict
 
@@ -1970,9 +1961,7 @@ class UniversalTypeConverter:
             def convert_set(value: Any) -> list[Any]:
                 if value is None:
                     raise _none_not_admitted(python_type)
-                return sort_set_elements(
-                    [element_converter(item) for item in value], given_elements=value
-                )
+                return sort_set_elements(value, element_converter)
 
             return convert_set
 

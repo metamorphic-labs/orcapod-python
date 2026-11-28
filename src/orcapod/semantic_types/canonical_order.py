@@ -34,7 +34,7 @@ import math
 import numbers
 import types
 import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from decimal import Decimal
 from itertools import pairwise
 from typing import Any, TypeVar, cast, get_args, get_origin
@@ -43,9 +43,31 @@ from orcapod.errors import CanonicalOrderError
 from orcapod.semantic_types.float_narrowing import stored_key_converter
 
 _T = TypeVar("_T")
+_V = TypeVar("_V")
 
 # A sort key: ``(0,)`` for None, ``(1, value)`` otherwise.
 _Rank = tuple[Any, ...]
+
+
+class _DuplicateRank(CanonicalOrderError):
+    """Two entries have the same rank, at their original positions."""
+
+    def __init__(self, first: int, second: int, stored: object) -> None:
+        super().__init__(f"duplicate key or set element: {stored!r}")
+        self.positions: tuple[int, int] = first, second
+        self.stored: object = stored
+
+
+def _collision_error(
+    collision: _DuplicateRank, given: Iterable[object], kind: str
+) -> CanonicalOrderError:
+    """Describe the conflicting inputs in the caller's container."""
+    first, second = collision.positions
+    values = list(given)
+    return CanonicalOrderError(
+        f"duplicate {kind}: {values[first]!r} and {values[second]!r} are "
+        + f"both stored as {collision.stored!r}, so one would be lost"
+    )
 
 
 def _key_rank(key: object) -> _Rank:
@@ -74,23 +96,15 @@ def _is_nan(value: object) -> bool:
     return False
 
 
-def _sorted_by_rank(
-    items: list[tuple[_Rank, _T]],
-    given: Iterable[object] | None = None,
-    kind: str = "key",
-) -> list[_T]:
+def _sorted_by_rank(items: list[tuple[_Rank, _T]]) -> list[_T]:
     """Sort ``(rank, payload)`` pairs by rank and return the payloads.
 
     Args:
         items: The pairs to sort.
-        given: The dict keys or set elements as they were given, one per item in the
-            order of ``items``. They are read only to describe two of them with one
-            stored value.
-        kind: What ``given`` holds, for that description: ``"key"`` or
-            ``"set element"``.
 
     Raises:
-        CanonicalOrderError: If two ranks cannot be compared or are equal.
+        CanonicalOrderError: If two ranks cannot be compared.
+        _DuplicateRank: If two ranks are equal.
     """
     try:
         order = sorted(range(len(items)), key=lambda index: items[index][0])
@@ -98,51 +112,48 @@ def _sorted_by_rank(
         raise CanonicalOrderError(f"values cannot be ordered: {exc}") from exc
     for first, second in pairwise(order):
         if items[first][0] == items[second][0]:
-            if given is None:
-                raise CanonicalOrderError(
-                    f"duplicate key or set element: {items[second][1]!r}"
-                )
-            values = list(given)
-            stored: object = items[first][0][-1]
-            raise CanonicalOrderError(
-                f"duplicate {kind}: {values[first]!r} and {values[second]!r} are "
-                + f"both stored as {stored!r}, so one would be lost"
-            )
+            stored: object = items[first][0][-1] if len(items[first][0]) > 1 else None
+            raise _DuplicateRank(first, second, stored)
     return [items[index][1] for index in order]
 
 
 def sort_dict_entries(
-    entries: list[dict[str, _T]], given_keys: Iterable[object] | None = None
-) -> list[dict[str, _T]]:
-    """Return converted entries ``{"key": ..., "value": ...}`` in canonical key order.
+    value: dict[_T, _V],
+    convert_key: Callable[[_T], object],
+    convert_value: Callable[[_V], object],
+) -> list[dict[str, object]]:
+    """Convert a dict into entries in canonical order of their stored keys.
 
     Args:
-        entries: The entries of one dict value, as the converter produces them, with
-            each key as it is stored.
-        given_keys: The keys as they were given, one per entry in the order of
-            ``entries``; named when two of them have one stored value.
+        value: The original dict.
+        convert_key: Converts a key to its stored value.
+        convert_value: Converts a value to its stored value.
 
     Returns:
-        A new list holding the same entries, sorted by key.
+        A list of entries ``{"key": ..., "value": ...}``, sorted by key.
 
     Raises:
         CanonicalOrderError: For a NaN key, keys that cannot be ordered against each
             other, or two keys with the same storage value.
     """
-    return _sorted_by_rank(
-        [(_key_rank(entry["key"]), entry) for entry in entries], given_keys
-    )
+    entries = [
+        {"key": convert_key(key), "value": convert_value(item)}
+        for key, item in value.items()
+    ]
+    try:
+        return _sorted_by_rank([(_key_rank(entry["key"]), entry) for entry in entries])
+    except _DuplicateRank as exc:
+        raise _collision_error(exc, value, "key") from exc
 
 
 def sort_set_elements(
-    elements: list[_T], given_elements: Iterable[object] | None = None
+    elements: Collection[_T], convert: Callable[[_T], _T] | None = None
 ) -> list[_T]:
     """Return the storage elements of one set value in canonical order.
 
     Args:
-        elements: The converted elements of a set, each as it is stored.
-        given_elements: The elements as they were given, one per element in the order
-            of ``elements``; named when two of them have one stored value.
+        elements: The elements of a set.
+        convert: Converts an element to its stored value, if it is still a Python value.
 
     Returns:
         A new list holding the same elements, sorted.
@@ -151,11 +162,13 @@ def sort_set_elements(
         CanonicalOrderError: For a NaN element, elements that cannot be ordered against
             each other, or two elements with the same storage value.
     """
-    return _sorted_by_rank(
-        [(_key_rank(element), element) for element in elements],
-        given_elements,
-        "set element",
-    )
+    stored = elements if convert is None else [convert(element) for element in elements]
+    try:
+        return _sorted_by_rank([(_key_rank(element), element) for element in stored])
+    except _DuplicateRank as exc:
+        if convert is None:
+            raise
+        raise _collision_error(exc, elements, "set element") from exc
 
 
 def canonical_python_value(
@@ -202,7 +215,10 @@ def canonical_python_value(
             )
             for k, v in original.items()
         ]
-        ordered = _sorted_by_rank(items, original)
+        try:
+            ordered = _sorted_by_rank(items)
+        except _DuplicateRank as exc:
+            raise _collision_error(exc, original, "key") from exc
         unchanged = all(
             new_k is old_k and new_v is old_v
             for (new_k, new_v), (old_k, old_v) in zip(ordered, original.items())

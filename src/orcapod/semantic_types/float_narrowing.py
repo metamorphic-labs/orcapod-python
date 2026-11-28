@@ -18,15 +18,23 @@ float-narrowing predicate from here.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
+import types
+import typing
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast, get_args, get_origin
 
 import numpy as np
 
 from orcapod.errors import ValueConversionWarning, type_text
-from orcapod.utils.warning_utils import outside_orcapod_stacklevel
+from orcapod.utils.warning_utils import (
+    error_filter_active,
+    outside_orcapod_stacklevel,
+    warn_at_frame,
+)
 
 # Byte width of a Python ``float``.
 _PYTHON_FLOAT_WIDTH = 8
@@ -34,6 +42,21 @@ _PYTHON_FLOAT_WIDTH = 8
 _lock = threading.RLock()
 # The declared types whose narrowing warning was issued in this process.
 _issued: set[type] = set()
+_issuing: set[type] = set()
+# Snapshot of the last filter list known to contain no applicable error action.
+_non_escalating_filters = warnings.filters[:0]
+
+
+def _after_fork() -> None:
+    """Start fresh in the child, including a lock it can acquire."""
+    global _lock
+    _lock = threading.RLock()
+    _issued.clear()
+    _issuing.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
 
 
 def narrows_float(value: object, declared_width: int) -> bool:
@@ -71,27 +94,37 @@ def narrower_float_width(python_type: object) -> int | None:
     return width if width < _PYTHON_FLOAT_WIDTH else None
 
 
-def _warn_narrowing(declared: type) -> None:
+def _warn_narrowing(declared: type, message: str) -> None:
     """Issue the narrowing warning for ``declared``, once per process.
 
-    Recorded as issued only after ``warnings.warn`` returns, so under an error filter
-    every narrowed value raises.
+    An error filter still applies after the warning was issued.
     """
+    global _non_escalating_filters
     with _lock:
-        if declared in _issued:
+        if declared in _issuing:
             return
-        name = type_text(declared)
-        warnings.warn(
-            f"Python floats are being narrowed into {name}: a column declared {name} "
-            f"was given Python float values. They are converted as Arrow converts "
-            f"them, without a check of each value, so a value {name} cannot hold "
-            "exactly is stored changed (0.1 as 0.10000000149011612, 1e-50 as 0.0, "
-            f"1e300 as inf). Pass {name} values, or declare the column float, to "
-            "avoid this. This warning is issued once per process.",
-            ValueConversionWarning,
-            stacklevel=outside_orcapod_stacklevel(),
-        )
-        _issued.add(declared)
+        issued = declared in _issued
+        if issued:
+            filters = warnings.filters[:]
+            if not any(
+                action == "error" and issubclass(ValueConversionWarning, category)
+                for action, _, category, _, _ in filters
+            ):
+                _non_escalating_filters = filters
+                return
+        frame = sys._getframe(outside_orcapod_stacklevel() - 1)  # pyright: ignore[reportPrivateUsage]  # locate the user's warning site
+        if issued:
+            if error_filter_active(message, ValueConversionWarning, frame):
+                raise ValueConversionWarning(message)
+            return
+        _issuing.add(declared)
+        try:
+            # A fresh Python warning registry also keeps the parent's warning
+            # site from suppressing the child's first warning.
+            warn_at_frame(message, ValueConversionWarning, frame, fresh_registry=True)
+            _issued.add(declared)
+        finally:
+            _issuing.discard(declared)
 
 
 def noting_narrowed_floats(declared: type, width: int) -> Callable[[Any], Any]:
@@ -108,13 +141,23 @@ def noting_narrowed_floats(declared: type, width: int) -> Callable[[Any], Any]:
         The converter.
     """
 
+    name = type_text(declared)
+    message = (
+        f"Python floats are being narrowed into {name}: a column declared {name} "
+        "was given Python float values. They are converted as Arrow converts "
+        f"them, without a check of each value, so a value {name} cannot hold "
+        "exactly is stored changed (0.1 as 0.10000000149011612, 1e-50 as 0.0, "
+        f"1e300 as inf). Pass {name} values, or declare the column float, to "
+        "avoid this. This warning is issued once per process."
+    )
+
     def convert(value: Any) -> Any:
         if (
             type(value) is not declared
-            and declared not in _issued
+            and (declared not in _issued or warnings.filters != _non_escalating_filters)
             and narrows_float(value, width)
         ):
-            _warn_narrowing(declared)
+            _warn_narrowing(declared, message)
         return value
 
     return convert
@@ -136,6 +179,11 @@ def stored_key_converter(
     Returns:
         The converter of a key to its stored value.
     """
+    if get_origin(key_type) in (typing.Union, types.UnionType):  # pyright: ignore[reportDeprecated]  # detects Optional[T]
+        members = cast(tuple[object, ...], get_args(key_type))
+        non_none = [member for member in members if member is not type(None)]
+        if len(non_none) == 1 and len(members) == 2:
+            key_type = non_none[0]
     width = narrower_float_width(key_type)
     if width is None:
         return convert
@@ -144,6 +192,10 @@ def stored_key_converter(
     def to_stored_key(key: Any) -> Any:
         key = convert(key)
         if type(key) is not declared and narrows_float(key, width):
+            # Arrow reads a Python float's payload directly, even for a
+            # subclass overriding __float__.
+            if isinstance(key, float):
+                key = float.__float__(key)
             # A value too large becomes an infinity, as in Arrow; NumPy's overflow
             # warning would be a second report of the same narrowing.
             with np.errstate(over="ignore"):

@@ -7,6 +7,9 @@ collide after conversion to the stored key type raise, naming the column and bot
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import warnings
 from collections.abc import Iterator
 from typing import Any, cast
@@ -14,12 +17,15 @@ from typing import Any, cast
 import numpy as np
 import pyarrow as pa
 import pytest
+from typing_extensions import override
 
 from orcapod.core.datagrams import Datagram
 from orcapod.core.function_pod import function_pod
 from orcapod.errors import CanonicalOrderError, ValueConversionWarning
+from orcapod.semantic_types.canonical_order import _sorted_by_rank
 from orcapod.semantic_types.float_narrowing import reset_float_narrowing_warnings
 from orcapod.sources import DictSource, ListSource
+from orcapod.types import DataType, DataValue
 
 # Every kind of value: inexact, underflowing, overflowing, exact, NaN, infinite, -0.0.
 VALUES = [0.1, 1e-50, 1e300, 0.5, float("nan"), float("inf"), -0.0]
@@ -208,7 +214,10 @@ def test_datagram_accepts_python_floats_with_one_warning() -> None:
     _assert_stored_as_arrow_narrows(pa.concat_tables(tables))
 
 
-def test_datagram_update_accepts_python_floats_with_one_warning() -> None:
+@pytest.mark.parametrize("materialized", [False, True])
+def test_datagram_update_accepts_python_floats_with_one_warning(
+    materialized: bool,
+) -> None:
     given: dict[str, Any] = {
         "x": np.float32(0.25),
         "y": np.float32(0.25),
@@ -217,6 +226,9 @@ def test_datagram_update_accepts_python_floats_with_one_warning() -> None:
         "by_name": {"a": np.float32(0.25)},
     }
     start = Datagram(given, python_schema=SCHEMA)
+    if materialized:
+        _ = start.as_table()
+        assert start.schema()["x"] is np.float32
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         tables = [
@@ -227,15 +239,175 @@ def test_datagram_update_accepts_python_floats_with_one_warning() -> None:
     _assert_stored_as_arrow_narrows(pa.concat_tables(tables))
 
 
-def test_the_warning_as_an_error_raises_for_every_narrowed_value() -> None:
+@pytest.mark.parametrize("warn_first", [False, True], ids=["fresh", "after-ignore"])
+def test_the_warning_as_an_error_raises_for_every_narrowed_value(
+    warn_first: bool,
+) -> None:
+    if warn_first:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ValueConversionWarning)
+            _ = _source(_rows(), ["x"])
     with warnings.catch_warnings():
         warnings.simplefilter("error", ValueConversionWarning)
         for _ in range(2):
             with pytest.raises(ValueConversionWarning, match=r"numpy\.float32"):
-                _source(_rows(), ["x"])
+                _ = _source(_rows(), ["x"])
+
+
+def test_reentrant_showwarning_reports_narrowing_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[type[Warning]] = []
+
+    def showwarning(_message: Warning, category: type[Warning], *_args: object) -> None:
+        seen.append(category)
+        if len(seen) == 1:
+            _ = _source(_rows(), ["x"])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always", ValueConversionWarning)
+        monkeypatch.setattr(warnings, "showwarning", showwarning)
+        _ = _source(_rows(), ["x"])
+    assert seen == [ValueConversionWarning]
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+@pytest.mark.parametrize("action", ["default", "once"])
+def test_forked_child_warns_on_its_first_narrowing(action: str) -> None:
+    # Keep the fork out of the pytest runner and exercise the same warning site
+    # in both processes.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import os
+import sys
+import warnings
+
+import numpy as np
+from orcapod.core.datagrams import Datagram
+from orcapod.errors import ValueConversionWarning
+
+def convert():
+    Datagram({"x": 0.1}, python_schema={"x": np.float32}).as_table()
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter(sys.argv[1], ValueConversionWarning)
+    convert()
+    assert len(caught) == 1
+    caught.clear()
+    pid = os.fork()
+    if pid == 0:
+        convert()
+        convert()
+        os._exit(0 if len(caught) == 1 else 1)
+    _, status = os.waitpid(pid, 0)
+    raise SystemExit(os.waitstatus_to_exitcode(status))
+""",
+            action,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 COLLIDING = {1e-50: 1, 2e-50: 2}
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
+@pytest.mark.parametrize("container", [dict, set])
+def test_materialized_datagram_update_refuses_collisions(container: type) -> None:
+    if container is dict:
+        declaration = dict[np.float32, int]
+        original = {0.5: 0}
+        duplicate = COLLIDING
+    else:
+        declaration = set[np.float32]
+        original = {0.5}
+        duplicate = set(COLLIDING)
+    start = Datagram(
+        {"x": original, "y": 1}, python_schema={"x": declaration, "y": int}
+    )
+    table = start.as_table()
+    assert start.schema()["x"] == declaration
+    with pytest.raises(CanonicalOrderError) as raised:
+        _ = start.update(x=duplicate)
+    assert all(text in str(raised.value) for text in ("'x'", "1e-50", "2e-50"))
+    assert start.as_table().equals(table)
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
+@pytest.mark.parametrize(
+    ("declaration", "value"),
+    [
+        (dict[np.float32 | None, int], {None: 0, **COLLIDING}),
+        (set[np.float32 | None], {None, *COLLIDING}),
+    ],
+)
+def test_optional_float32_keys_and_elements_refuse_collisions(
+    declaration: DataType, value: DataValue
+) -> None:
+    with pytest.raises(CanonicalOrderError) as raised:
+        _ = Datagram({"x": value}, python_schema={"x": declaration}).as_table()
+    assert all(text in str(raised.value) for text in ("'x'", "1e-50", "2e-50"))
+
+
+class _FloatWithOverride(float):
+    @override
+    def __float__(self) -> float:
+        return 9.0
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
+@pytest.mark.parametrize("container", [dict, set])
+def test_float_subclass_keys_and_elements_store_the_base_value(container: type) -> None:
+    subclass = _FloatWithOverride(0.1)
+    if container is dict:
+        declaration = dict[np.float32, int]
+        given = {subclass: 1, 0.5: 2}
+        plain = {0.1: 1, 0.5: 2}
+    else:
+        declaration = set[np.float32]
+        given = {subclass, 0.5}
+        plain = {0.1, 0.5}
+    schema = {"x": declaration}
+    table = Datagram({"x": given}, python_schema=schema).as_table()
+    assert table.equals(Datagram({"x": plain}, python_schema=schema).as_table())
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
+@pytest.mark.parametrize("key_type", [float, np.float32])
+def test_float_subclass_nan_key_is_refused(key_type: type) -> None:
+    with pytest.raises(CanonicalOrderError, match=r"Column 'x': .*NaN"):
+        _ = Datagram(
+            {"x": {_FloatWithOverride(float("nan")): 1}},
+            python_schema={"x": dict[key_type, int]},
+        )
+
+
+def test_canonical_sorter_reports_original_collision_positions() -> None:
+    # The sorter knows ranks and payloads. Its caller can use the positions
+    # to look up the original values when adding the error context.
+    with pytest.raises(CanonicalOrderError) as raised:
+        _ = _sorted_by_rank([((1, 2), "first"), ((1, 0), "second"), ((1, 2), "third")])
+    assert getattr(raised.value, "positions", None) == (0, 2)
+    assert getattr(raised.value, "stored", None) == 2
+
+
+def test_arrow_only_datagram_update_keeps_arrow_float32() -> None:
+    source = pa.table({"x": pa.array([0.5], type=pa.float32())})
+    start = Datagram(source)
+    assert start.schema()["x"] == float | None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ValueConversionWarning)
+        updated = start.update(x=0.1).as_table()
+    assert _narrowing_warnings(caught) == []
+    assert updated.schema.equals(source.schema, check_metadata=True)
+    assert _bits(_column(updated, "x")) == _as_arrow_narrows([0.1])
 
 
 def _assert_names_column_and_both_keys(error: BaseException) -> None:

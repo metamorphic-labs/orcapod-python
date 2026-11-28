@@ -24,6 +24,7 @@ from typing import Any
 from orcapod.errors import ValueConversionWarning
 from orcapod.logical_types.user_class_identity import class_kind, stored_field_names
 from orcapod.utils.deferred_types import qualified_name
+from orcapod.utils.warning_utils import error_filter_active
 
 _TENSOR_CLASS = "torch.Tensor"
 
@@ -84,31 +85,6 @@ def describe(conversions: Iterable[str]) -> str:
     return " ".join(conversions)
 
 
-def _error_filter_active(message: str, module: str, lineno: int) -> bool:
-    """Whether the active warning filters turn this warning into an error.
-
-    Reads ``warnings.filters`` as Python does: the first filter whose category,
-    message pattern, module pattern and line number match decides.
-
-    Args:
-        message: The warning text.
-        module: Name of the module the warning is attributed to.
-        lineno: Line number the warning is attributed to.
-
-    Returns:
-        True when that filter's action is ``"error"``.
-    """
-    for action, text, category, module_pattern, line in warnings.filters:
-        if (
-            issubclass(ValueConversionWarning, category)
-            and (text is None or text.match(message))
-            and (module_pattern is None or module_pattern.match(module))
-            and line in (0, lineno)
-        ):
-            return action == "error"
-    return False
-
-
 def warn_once(
     issued: set[tuple[str, str]],
     scope: str,
@@ -133,8 +109,7 @@ def warn_once(
     if all((scope, c) in issued for c in conversions):
         # The frame the warning is attributed to (``stacklevel=3`` below).
         frame = sys._getframe(2)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
-        module = frame.f_globals.get("__name__", "<string>")
-        if not _error_filter_active(message, module, frame.f_lineno):
+        if not error_filter_active(message, ValueConversionWarning, frame):
             return
     warnings.warn(message, ValueConversionWarning, stacklevel=3)
     issued.update((scope, c) for c in conversions)

@@ -1007,15 +1007,23 @@ class Datagram(ContentIdentifiableBase):
             sub_schema = arrow_utils.schema_select(
                 self._data_table.schema, list(updates.keys())
             )
-            update_table = self.converter.python_dicts_to_arrow_table(
-                [updates], arrow_schema=sub_schema
-            )
+            if self._data_python_schema is None:
+                update_table = self.converter.python_dicts_to_arrow_table(
+                    [updates], arrow_schema=sub_schema
+                )
+            else:
+                # Keep the Python declarations for conversion (in particular
+                # float32 widths), and the exact Arrow fields for storage.
+                records = self.converter.python_dicts_to_struct_dicts(
+                    [updates],
+                    {name: self._data_python_schema[name] for name in updates},
+                )
+                update_table = pa.Table.from_pylist(records, schema=sub_schema)
             new_d = self.copy(include_cache=False)
             new_d._data_table = arrow_utils.hstack_tables(
                 self._data_table.drop_columns(list(updates.keys())), update_table
             ).select(self._data_table.column_names)
             new_d._data_dict = None
-            new_d._data_python_schema = None
             new_d._data_arrow_schema = None
             return new_d
         else:

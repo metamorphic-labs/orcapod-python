@@ -141,8 +141,9 @@ source; whether it happens is decided from the types, never from the values. Pas
 `numpy.float32` values, or declare the column `float`, to avoid it. `numpy.float32` values and
 an Arrow column that is already `float32` never warn. The same holds at every depth: a list
 element, a dict key or value, a set element, a field of a class. The warning is issued where
-the values are converted to Arrow: when a source is built, and when a datagram built from
-values gives its table or hash. One case is refused, because data would be lost: dict keys, or
+the values are converted to Arrow: when a source is built, when a datagram built from
+values gives its table or hash, or when that datagram is updated after materialization.
+One case is refused, because data would be lost: dict keys, or
 set elements, that differ as Python floats and are one `float32` value (`1e-50` and `2e-50`
 are both `0.0`) raise `CanonicalOrderError`, naming the column and both. A function's output
 has its own, stricter rule: a Python `float` returned for a declared `numpy.float32` is

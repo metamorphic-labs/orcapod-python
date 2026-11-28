@@ -29,7 +29,29 @@ def outside_orcapod_stacklevel() -> int:
     return 2
 
 
-def warn_at_frame(message: str, category: type[Warning], frame: FrameType) -> None:
+def error_filter_active(
+    message: str, category: type[Warning], frame: FrameType
+) -> bool:
+    """Return whether the first warning filter matching this warning makes it an error."""
+    module = str(frame.f_globals.get("__name__", "<string>"))
+    for action, text, filter_category, module_pattern, line in warnings.filters:
+        if (
+            issubclass(category, filter_category)
+            and (text is None or text.match(message))
+            and (module_pattern is None or module_pattern.match(module))
+            and line in (0, frame.f_lineno)
+        ):
+            return action == "error"
+    return False
+
+
+def warn_at_frame(
+    message: str,
+    category: type[Warning],
+    frame: FrameType,
+    *,
+    fresh_registry: bool = False,
+) -> None:
     """Issue a warning shown at ``frame``'s line, at every call.
 
     The one place Orcapod issues a warning at a frame it names (ITL-1344), for the
@@ -64,6 +86,7 @@ def warn_at_frame(message: str, category: type[Warning], frame: FrameType) -> No
         message: The warning's text.
         category: The warning's class.
         frame: The frame whose file, line and module name the warning is shown at.
+        fresh_registry: Use a local warning registry even for the ``once`` filter.
     """
     filename = frame.f_code.co_filename
     _ = linecache.lazycache(filename, frame.f_globals)
@@ -73,5 +96,5 @@ def warn_at_frame(message: str, category: type[Warning], frame: FrameType) -> No
         filename,
         frame.f_lineno,
         module=frame.f_globals.get("__name__"),
-        registry=None,
+        registry={} if fresh_registry else None,
     )
