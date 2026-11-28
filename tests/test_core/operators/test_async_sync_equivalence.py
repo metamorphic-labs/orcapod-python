@@ -754,6 +754,25 @@ CASES = [
         ),
     ),
     Case(
+        "ref_join_4_three_tied",
+        Join,
+        lambda: (
+            *(
+                _source(
+                    {
+                        "k": pa.array([1, 2, 3], pa.int16()),
+                        "g": pa.array(["x", "y", "x"], pa.large_string()),
+                    },
+                    ("k", "g"),
+                    name,
+                    with_data_tags=True,
+                )
+                for name in ("p", "q", "r")
+            ),
+            source_b(with_data_tags=True),
+        ),
+    ),
+    Case(
         # The group key's merged token, merged again by the join (ITL-1017).
         "ref_join_after_group_by",
         Join,

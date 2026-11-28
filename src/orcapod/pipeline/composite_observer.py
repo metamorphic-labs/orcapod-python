@@ -22,7 +22,7 @@ Example::
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from orcapod.pipeline.observer import NoOpLogger
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -143,9 +143,10 @@ class CompositeObserver:
         Returns:
             A new ``CompositeObserver`` instance.
         """
-        from orcapod.pipeline.serialization import resolve_observer_from_config
+        from orcapod.pipeline.serialization import prepare_composite_observers
 
-        children = [
-            resolve_observer_from_config(c, db_registry) for c in config["observers"]
-        ]
-        return cls(*children)
+        children = prepare_composite_observers(
+            cast("dict[str, object]", config),
+            cast("dict[str, object] | None", db_registry),
+        )
+        return cls(*(build() for build in children))

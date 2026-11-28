@@ -26,12 +26,12 @@ from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import InconsistentSourceError, RestrictedAggregationWarning
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.restrictions import restrictions_in_force
-from orcapod.core.sources.spiraldb_table_source import _checked_conditions
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.sources import SpiralDBTableSource
 from orcapod.core.operators import MapData
 from orcapod.types import CacheMode, Condition, col
+from orcapod.types.condition import check_equality_conditions
 from tests.test_databases import fake_spiral_sdk
 
 _PROJECT = "workshop-sample"
@@ -291,7 +291,7 @@ class TestSeveralConditionsInOneCall:
         [
             ({"subject_id": "m1", "channel": 1.0}, "channel"),
             ({"subject_id": b"m1", "channel": 1}, "subject_id"),
-            ({"flag": True, "subject_id": "m1", "amplitude": 3}, "amplitude"),
+            ({"flag": True, "subject_id": "m1", "amplitude": True}, "amplitude"),
         ],
     )
     def test_a_value_of_another_type_among_several_is_refused(
@@ -355,7 +355,7 @@ class TestRefusals:
             ("channel", True, "bool"),
             ("channel", 1.0, "float"),
             ("channel", np.int64(1), "int64"),
-            ("amplitude", 3, "int"),
+            ("amplitude", True, "bool"),
             ("note", b"n1", "bytes"),
             ("day", _START, "datetime"),
             ("started", "2026-11-20T09:30:00", "str"),
@@ -374,14 +374,13 @@ class TestRefusals:
         with pytest.raises(TypeError, match="channel"):
             _source(where={"channel": "1"})
 
-    def test_a_float_beyond_the_column_range_is_refused(self):
-        """A finite float a float32 column cannot reach is refused; rounding is not."""
+    @pytest.mark.parametrize("value", [1e300, 0.1])
+    def test_an_inexact_float_is_refused_by_the_equality_check(self, value):
+        """The equality check refuses both overflow and lost precision."""
         schema = pa.schema([pa.field("x", pa.float32())])
 
-        # About the condition check itself: the fake has no float32 data to match.
-        with pytest.raises(TypeError, match="range"):
-            _checked_conditions({"x": 1e300}, schema)
-        assert _checked_conditions({"x": 0.1}, schema) == {"x": 0.1}
+        with pytest.raises(TypeError, match="cannot hold .* exactly"):
+            check_equality_conditions({"x": value}, schema)
 
     @pytest.mark.parametrize("value", [1e300, -1e300])
     def test_a_float_overflow_is_refused_by_where_and_the_constructor(
@@ -409,9 +408,9 @@ class TestRefusals:
         aware = _START.replace(tzinfo=dt.timezone.utc)
 
         # About the condition check itself: the pyspiral fake keeps no time zone.
-        assert _checked_conditions({"at": aware}, schema) == {"at": aware}
+        assert check_equality_conditions({"at": aware}, schema) == {"at": aware}
         with pytest.raises(TypeError, match="aware"):
-            _checked_conditions({"at": _START}, schema)
+            check_equality_conditions({"at": _START}, schema)
 
     @pytest.mark.parametrize("fold", [0, 1])
     @pytest.mark.parametrize("zone", ["America/New_York", "UTC"])
@@ -432,9 +431,9 @@ class TestRefusals:
 
         # About the condition check itself: the pyspiral fake keeps no time zone.
         for conditions in ({"at": local, "unit": 1}, {"unit": 1, "at": local}):
-            assert _checked_conditions(conditions, schema) == conditions
+            assert check_equality_conditions(conditions, schema) == conditions
 
-    @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, -0.0])
+    @pytest.mark.parametrize("value", [math.inf, -math.inf, 0.0])
     @pytest.mark.parametrize(
         "restrict",
         [
@@ -456,11 +455,12 @@ class TestRefusals:
             "Condition.of mapping",
         ],
     )
-    def test_a_non_finite_or_signed_zero_float_is_pushed_down_as_given(
+    def test_an_infinite_float_or_zero_is_pushed_down_as_given(
         self, project, restrict, value
     ):
         """Accepted, and sent to the table system as ``column == value``: which rows
-        it selects is that system's equality (developer decision, 2026-11-19)."""
+        it selects is that system's equality (developer decision, 2026-11-19). ``-0.0``
+        and NaN are refused (ITL-1480; ``test_spiraldb_table_source_float_equalities``)."""
         source = restrict(value)
         source.as_table()
 
@@ -482,7 +482,7 @@ class TestRefusals:
         schema = pa.schema([pa.field("at", pa.timestamp("s"))])
 
         with pytest.raises(TypeError, match="exactly"):
-            _checked_conditions({"at": _START.replace(microsecond=5)}, schema)
+            check_equality_conditions({"at": _START.replace(microsecond=5)}, schema)
 
     def test_none_is_refused(self, project):
         """``None`` matches no row (a null equals nothing), so it is refused."""
@@ -680,7 +680,7 @@ class TestColumnTypes:
         (About the check itself: pyarrow, and so the fake, has no float16 equality.)"""
         schema = pa.schema([pa.field("h", pa.float16()), pa.field("k", pa.int64())])
         for conditions in ({"h": 1.5, "k": 1}, {"k": 1, "h": 1.5}):
-            assert _checked_conditions(conditions, schema) == conditions
+            assert check_equality_conditions(conditions, schema) == conditions
 
 
 # Two layouts of one table: three key columns (two timestamps and an integer), three
@@ -1486,6 +1486,16 @@ class TestConditionInstances:
         [(0.0, -0.0), (-0.0, 0.0), (math.nan, math.nan)],
         ids=["0.0 then -0.0", "-0.0 then 0.0", "NaN twice"],
     )
+    def test_equal_float_conditions_of_two_reads_are_refused(self, project, values):
+        """``0.0`` and ``-0.0``, or NaN twice, are one condition to Orcapod but not to
+        SpiralDB, so ``where`` refuses the ``-0.0`` or NaN read (ITL-1480) before a
+        pipeline could hold both."""
+        events = _source(source_id="events", tag_only_columns=True)
+        with pytest.raises(TypeError, match="ITL-1480"):
+            for value in values:
+                events.where(amplitude=value)
+
+    @pytest.mark.parametrize("values", [(0.0, 0.0), (0.5, 0.5)])
     def test_equal_float_conditions_still_require_one_source_object(
         self, project, tmp_path, values
     ):
@@ -1536,6 +1546,10 @@ _RESTRICTED_FORMS: dict[str, tuple[Callable[[], SpiralDBTableSource], list[str]]
     "the constructor's where=": (
         lambda: _source(where={"channel": 0, "subject_id": "m1"}),
         ["channel=0", "subject_id='m1'"],
+    ),
+    "a range and an equality": (
+        lambda: _source().where(col("timestamp") >= 2, col("timestamp") < 4, flag=True),
+        ["timestamp >= 2", "timestamp < 4", "flag=True"],
     ),
 }
 
@@ -1619,6 +1633,7 @@ _RESTRICTIONS: dict[str, _Restrict] = {
     "a condition and a limit": lambda s: SpiralDBTableSource(
         _PROJECT, "event", source_id="events", tag_only_columns=True, limit=3
     ).where(subject_id="m1"),
+    "a range": lambda s: s.where(col("timestamp") >= 2, col("timestamp") < 4),
 }
 _CACHING = [CacheMode.LOG, CacheMode.REPLAY]
 
@@ -2595,33 +2610,50 @@ class TestSummaryKeys:
         assert set(restrictions_in_force([second, first])) == {"a", "b"}
 
 
-class TestWhereTakesEqualitiesOnly:
-    """``where`` refuses every condition but equalities, pointing to ``filter`` (ITL-1374)."""
+class TestWhereTakesEqualitiesAndRanges:
+    """``where`` refuses every condition but equalities and ranges, pointing to
+    ``filter`` (ITL-1374, ITL-998)."""
 
     @pytest.mark.parametrize(
         "build",
         [
-            lambda: col("timestamp") >= 3,
             lambda: col("subject_id").is_in(["m1", "m2"]),
             lambda: col("note").is_null(),
             lambda: (col("subject_id") == "m1") | (col("subject_id") == "m2"),
             lambda: ~(col("subject_id") == "m1"),
             lambda: col("subject_id") != "m1",
-            lambda: (col("subject_id") == "m1") & (col("subject_id") == "m2"),
+            lambda: col("timestamp") < col("channel"),
+            lambda: (col("timestamp") < 2) | (col("timestamp") > 4),
+            lambda: ~(col("timestamp") >= 3),
+            lambda: (col("timestamp") >= 3) & ~(col("timestamp") < 5),
         ],
         ids=[
-            "comparison",
             "is_in",
             "null test",
             "or",
             "not",
             "not equal",
-            "two values",
+            "two columns",
+            "or of ranges",
+            "not a range",
+            "range and not",
         ],
     )
-    def test_a_condition_other_than_equality_is_refused(self, project, build):
-        with pytest.raises(TypeError, match=r"equality conditions only.*filter"):
-            _source().where(build())
+    def test_any_other_condition_is_refused(self, project, build):
+        """The whole condition is refused, pointing to ``filter``; nothing is read."""
+        source = _source()
+        fake_spiral_sdk.scan_log.clear()
+
+        with pytest.raises(TypeError, match=r"equalities .* and ranges .*filter"):
+            source.where(build())
+        assert fake_spiral_sdk.scan_log == []
+
+    def test_two_values_of_one_column_are_refused(self, project):
+        """A column equals one value: two different ones are refused."""
+        both = (col("subject_id") == "m1") & (col("subject_id") == "m2")
+
+        with pytest.raises(ValueError, match="already restricted to 'm1'"):
+            _source().where(both)
 
     def test_an_equality_built_with_col_is_taken(self, project):
         """``col(c) == v`` is the equality ``where`` takes, with the keyword's rows."""
@@ -2631,5 +2663,5 @@ class TestWhereTakesEqualitiesOnly:
         assert restricted.condition == Condition.of(subject_id="m2")
 
     def test_the_constructor_refuses_it_too(self, project):
-        with pytest.raises(TypeError, match="equality conditions only"):
-            _source(where=col("timestamp") >= 3)
+        with pytest.raises(TypeError, match=r"equalities .* and ranges"):
+            _source(where=col("timestamp").is_in([3]))

@@ -18,6 +18,8 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
     SourceStreamBuilder,
     SourceStreamResult,
+    require_custom_system_tags,
+    require_supported_nullable_types,
 )
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -119,7 +121,9 @@ def _refuse_overflow(values: pa.ChunkedArray[Any], texts: pa.ChunkedArray[Any]) 
                 )
 
 
-def _read_declared(path: str, schema: pa.Schema) -> pa.Table:
+def _read_declared(
+    path: str, schema: pa.Schema, system_tag_columns: Collection[str]
+) -> pa.Table:
     """Read a CSV file with every column parsed as ``schema`` declares it (ITL-1322).
 
     The text of each cell is parsed as its column's declared type; nothing is
@@ -246,7 +250,8 @@ def _read_declared(path: str, schema: pa.Schema) -> pa.Table:
         table = table.set_column(
             table.column_names.index(field.name), field.name, value
         )
-    # A null in a non-nullable field raises here, naming the field.
+    require_custom_system_tags(table, system_tag_columns, schema=schema)
+    # A null in an ordinary non-nullable field raises here, naming the field.
     return table.cast(schema)
 
 
@@ -343,9 +348,13 @@ class CSVSource(RootSource):
 
         if self._schema is None:
             table: pa.Table = pa_csv.read_csv(self._access_path)
+            require_supported_nullable_types(table.schema)
             return table.cast(arrow_utils.infer_schema_nullable(table))
+        require_supported_nullable_types(self._schema)
         try:
-            return _read_declared(self._access_path, self._schema)
+            return _read_declared(
+                self._access_path, self._schema, self._system_tag_columns
+            )
         except ValueError as exc:  # pyarrow's ArrowInvalid is a ValueError
             # The reader names a column by its position in the file, which is the
             # schema's field order (a schema names every column, in order).

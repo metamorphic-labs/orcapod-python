@@ -1390,8 +1390,13 @@ data. The rules:
 - Every output column takes the large-normalized form of its input type
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
   to `large_list`, recursively). Width, nullability and logical (extension) types are never
-  changed; `int8` stays `int8`, and `null` stays `null` (operators and the type converter pass
-  `keep_null=True`; only `Data` maps `null` to `large_string`, the function's default).
+  changed, so `int8` stays `int8`. Sources refuse Arrow type `null` at any depth, including
+  in reserved raw columns. Declare a supported nullable type for missing values.
+  A source's custom system-tag names must each identify an existing non-nullable text
+  column with no null values. When Join sorts tied system tags, an output field is
+  nullable if any of the corresponding input fields can hold a null.
+  A raw `ArrowTableStream` still preserves `null` in its table in ITL-1543 part A.
+  A row built by `Data` still gives an untyped null the `large_string` type.
   `PolarsFilter` is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (`arrow_utils.restore_column_types` and
   `restore_schema_nullability`). Every other operator takes its values from the input's Arrow
@@ -1618,11 +1623,15 @@ data. The rules:
   not; never Python's `==`, which ignores `fold` within one tzinfo), with a consistent hash.
   That equality decides whether two restrictions are one, never which rows a source returns:
   a condition is pushed down as `column == value` and the table system's equality decides
-  (developer, November 19, 2026: a NaN, an infinity or a signed zero is accepted, pushed down
-  and documented, never filtered on the client or refused; a NaN or infinite value is saved
-  as `{"float": "nan" | "inf" | "-inf"}`); `text()`/`str`, and
+  (developer, November 19, 2026: an infinity or a zero is accepted, pushed down and
+  documented, never filtered on the client; a NaN or infinite value is saved as
+  `{"float": "nan" | "inf" | "-inf"}`). For now, SpiralDB where refuses equality to -0.0 or a NaN
+  (developer, November 27, 2026), checked on the arguments as given, before merging. SpiralDB
+  matches them by their bits, so the rows read would depend on which of two equal values was
+  kept. Float ranges are also refused for now (ITL-1477). Revisit the float refusals in
+  ITL-1480. The condition has `text()`/`str` and
   `to_config`/`from_config` (the saved `where` mapping). Internally terms (column, operator,
-  value), equality only today; the public surface names no operator. Never add a second
+  value), including equalities and supported ranges. Never add a second
   restriction class: a limit stays the source's own (`limit=`). Today only
   `SpiralDBTableSource.where(mapping=None, /, **columns)` exists: `Condition.of`, then the
   source checks it against its table (unknown column, the column's exact Python type and

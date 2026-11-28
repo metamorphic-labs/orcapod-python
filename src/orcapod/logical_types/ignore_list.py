@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import polars as pl
 import pyarrow as pa
 
+from orcapod.logical_types.arrow_lifetime import keep_for_process
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.identifier import (
     LogicalTypeIdentifier,
@@ -189,7 +190,7 @@ class _ExtensionFamily:
         with _LOCK:
             cached = self._arrow_types.get(ignore)
             if cached is None:
-                cached = self._make_arrow_class(ignore)()
+                cached = keep_for_process(self._make_arrow_class(ignore)())
                 self._arrow_types[ignore] = cached
             return cached
 
