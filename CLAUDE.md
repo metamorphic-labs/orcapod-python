@@ -1524,7 +1524,9 @@ data. The rules:
   `source_ids.build_source_id` and parsed only by `source_ids.parse_source_id` (split at the
   first `:`; the kind part never holds `:`, the name may). Bump a kind's version when a row
   read before a change could read differently after it (other values, Arrow types or record
-  id). A saved config holds `source_name`, `source_name_given` (given or default:
+  id). The provisional `DerivedSource` is an exception. It retains `derived_v1` when its
+  default record IDs move from positional IDs to folded upstream lineage (ITL-1564).
+  A saved config holds `source_name`, `source_name_given` (given or default:
   read back, never guessed, by `RootSource._from_saved_name`) and `source_version` apart (the kind is
   `source_type`); loaded where the class declares another version, the source has the
   installed version's id (`SourceVersionWarning`), never a rewritten one. A slot (a

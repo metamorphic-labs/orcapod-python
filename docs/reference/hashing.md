@@ -177,6 +177,8 @@ ITL-1154). A given name that starts like an id of a registered kind (`delta_tabl
 is kept as the name, after the reader's kind part (`csv_v1:delta_table_v1:units`), and
 issues `SourceNameWarning`. A kind's version moves when a row read before a change could
 read differently after it; a new version is a new source id, so a new source.
+The provisional `DerivedSource` is an exception. It retains `derived_v1` when its default
+record IDs move from positional IDs to folded upstream lineage (ITL-1564).
 
 A derived source stamps fresh provenance. Its default record id is the labelled
 `derived_row_v1` fold of the upstream pairs. It sorts by record-id column name and feeds
@@ -696,8 +698,7 @@ arbitrary; that is harmless because the final table hash ignores the same bits.
 **Inputs of a commutative operator are a set (kept by decision, ITL-942).** A pipeline hash
 covers the structure of the pipeline, not only its schemas: a commutative operator's identity
 holds its inputs (`Join`'s) as an unordered set compared by identity, so input order never
-matters, and two inputs with the same source identity (same class, schemas and `source_id`)
-count as one input.
+matters, and two inputs with the same source identity count as one input.
 
 **Inputs with equal pipeline hashes tie, and argument order never breaks the tie** (developer
 decision, November 16, 2026, ITL-1154). The system-tag column names follow the stable

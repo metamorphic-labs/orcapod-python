@@ -783,12 +783,12 @@ class DerivedSource(RootSource):
         """Return the first rows of the origin's records, without computing.
 
         The records are the ones this source already read. Otherwise, an origin source
-        gives its own ``head(n)`` (so a polling or caching origin is never polled or
-        written), and an origin job node gives its stored rows, read now and not kept.
-        An origin job node that has not run gives no rows. With ``sort_by_tags`` (or
-        ``all_info``), the rows are sorted by tag as ``as_table`` sorts them: all the
-        stored rows of an origin job node, but only the rows an origin source reads for
-        its head (see ``StreamBase.head``).
+        gives a preview, without polling or writing a cache, and an origin job node
+        gives its stored rows, read now and not kept. An origin job node that has not
+        run gives no rows. When the origin holds all its rows, validate them together
+        before slicing so a duplicate lineage outside the preview still raises. A
+        bounded origin read validates only the rows it read. With ``sort_by_tags`` (or
+        ``all_info``), the rows are sorted by tag before slicing (see ``StreamBase.head``).
         """
         check_head_size(n)
         # A preview is a read of rows: it notes the provisional use (ITL-1331).
@@ -803,16 +803,13 @@ class DerivedSource(RootSource):
             origin_columns = {"system_tags": True}
             origin_head = self._origin.head(n, columns=origin_columns)
             if (
-                config.sort_by_tags
-                and origin_head.status is ViewStatus.ROWS
+                origin_head.status is ViewStatus.ROWS
                 and not origin_head.total_is_estimate
                 and origin_head.total_rows is not None
-                and origin_head.total_rows > n
+                and origin_head.total_rows > origin_head.table.num_rows
             ):
-                # The origin has all its rows (its total is exact): sorting needs them
-                # all, and the system tags this source adds follow the origin's row
-                # order, so the origin is not sorted first. A bounded origin (an
-                # estimated total) is sorted among the rows it read.
+                # Validate all held lineages even for a short, unsorted head. Keep
+                # the origin's order for an explicitly positional record-id policy.
                 origin_head = self._origin.head(
                     origin_head.total_rows, columns=origin_columns
                 )

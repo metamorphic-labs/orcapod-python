@@ -82,6 +82,8 @@ A kind's version moves when a row read before a change of its implementation cou
 differently after it (other values, other Arrow types, another record id). Saved jobs keep
 each source's name and version apart; a job loaded where a kind's version moved rebuilds the
 source with the new version's id and warns (`SourceVersionWarning`).
+The provisional `DerivedSource` is an exception. It retains `derived_v1` when its default
+record IDs move from positional IDs to folded upstream lineage (ITL-1564).
 
 Two construction rules apply to every source and are the most common first errors:
 
@@ -885,6 +887,9 @@ before. Things to know:
   system tags by default, just like the plain form. Set `record_id_columns` to choose key
   columns, or pass `()` to keep positional IDs. Explicit positional IDs have a different
   content hash and default cache path from folded IDs. The pipeline hash is schema-only.
+- When the origin source holds several rows with the same lineage, derived reads refuse
+  them under every key policy. `head()` and the notebook preview validate all held rows
+  before showing any, even when the repeated row falls outside the displayed slice.
 - A saved job reloads a derived source whenever its origin can be reloaded (a CSV file, a
   Delta table, a database table). Over an in-memory source it is saved but not reloaded, like
   the in-memory source itself.
@@ -1079,9 +1084,10 @@ print(len({s.source_id for s in as_given}))
 # 3
 ```
 
-A source given a `source_id` is an address: its content hash is built from its class, schema,
-`source_id` and key columns, never from its rows, so changing the rows changes it only when the
-schema changes (a column of another type). This holds for `ListSource` too (developer,
+A named root source uses the content hash recipe `(full source id, Arrow schema identity, key columns)`.
+The full ID includes the source kind and implementation version. With the same name and key
+columns, a change to the rows affects the content hash only if it changes the Arrow schema.
+This recipe applies to `ListSource` too (developer,
 November 21, 2026, ITL-1272): its elements and its tag function enter its identity only through
 its default `source_id` and its output schema.
 

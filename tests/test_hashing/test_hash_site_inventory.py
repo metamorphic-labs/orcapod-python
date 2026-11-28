@@ -17,9 +17,40 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = PROJECT_ROOT / "docs" / "reference" / "hashing.md"
 SITE = re.compile(r"`([\w/]+\.py:[\w.<>]+)`")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/concepts/sources.md",
+        "docs/reference/hashing.md",
+        "CLAUDE.md",
+        ".zed/rules",
+    ],
+)
+def test_source_version_guidance_documents_provisional_derived_exception(
+    path: str,
+) -> None:
+    """The approved fold changes record IDs under the same provisional source version."""
+    guidance = (PROJECT_ROOT / path).read_text(encoding="utf-8").replace("`", "")
+    assert (
+        "The provisional DerivedSource is an exception. It retains derived_v1 "
+        "when its default record IDs move from positional IDs to folded upstream lineage"
+    ) in " ".join(guidance.split())
+
+
+@pytest.mark.parametrize(
+    "path", ["docs/concepts/sources.md", "docs/concepts/identity.md"]
+)
+def test_named_root_source_identity_guidance_uses_qualified_id(path: str) -> None:
+    """The qualified ID already gives the kind and version of a named root source."""
+    guidance = " ".join((PROJECT_ROOT / path).read_text(encoding="utf-8").split())
+    assert "(full source id, Arrow schema identity, key columns)" in guidance
 
 
 def test_tagged_derived_source_identity_table_documents_positional_marker() -> None:

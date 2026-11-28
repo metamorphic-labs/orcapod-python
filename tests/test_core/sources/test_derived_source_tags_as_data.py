@@ -445,7 +445,9 @@ class _SourceWithoutSystemTags(DictSource):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("route", ["table", "head", "async"])
+@pytest.mark.parametrize(
+    "route", ["table", "head", "column_only_head", "nested_head", "preview", "async"]
+)
 @pytest.mark.parametrize(
     "key_columns", [None, (), ("cohort",)], ids=["folded", "positional", "keyed"]
 )
@@ -486,11 +488,21 @@ async def test_source_lineage_is_required_for_every_key_policy(
         source_id="derived",
         record_id_columns=key_columns,
     )
+    if route == "preview":
+        assert expected_error in derived._repr_html_()
+        return
+
     with pytest.raises(RowIdentifierError, match=expected_error):
         if route == "table":
             derived.as_table()
         elif route == "head":
-            derived.head()
+            derived.head(1)
+        elif route == "column_only_head":
+            derived.head(0)
+        elif route == "nested_head":
+            DerivedSource(
+                derived, source_id="nested", tags_as_data={"cohort": "cohort_again"}
+            ).head(1)
         else:
             await anext(derived.async_iter_data())
 
