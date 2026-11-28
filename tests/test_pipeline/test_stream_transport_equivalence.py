@@ -55,6 +55,10 @@ from tests.test_core.operators.several_items import (
     make_source,
 )
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 ALL_COLUMNS = {
     "meta": True,
     "source": True,

@@ -143,22 +143,10 @@ print(busy.explain())
 #     applied after reading: n_spikes > 1200 (Filter)
 ```
 
-When `filter` cannot say what you need (arithmetic between columns, a string function), use
-`polars_filter` with a [Polars](https://docs.pola.rs/) expression:
-
-```python
-import polars as pl
-
-fast = units.join(sessions).polars_filter(pl.col("n_spikes") / pl.col("duration_s") > 8)
-print(fast.as_table().num_rows)
-# 13
-```
-
-The expression can use comparisons, arithmetic, `&`, `|`, `~`, `is_in`, `is_between`,
-`is_null` and a few string tests. One that calls your own Python code (`map_elements`,
-`map_batches`) is refused when the stream is used in a join, a pod or a job; compute such a
-test in a function pod. The full list is in
-[PolarsFilter](../concepts/operators.md#polarsfilter).
+`filter` compares a column with a value or with another column. A test it cannot say
+(arithmetic between columns, such as spikes per second, or a string function) is computed
+first: write a function pod that returns the test's result as a column (Part 2), then
+`filter` on that column.
 
 ## Semi-join
 
@@ -315,7 +303,7 @@ Each list holds the first input's value, then the second's. `MergeJoin()(imec1, 
   names. Rename, or use `MergeJoin`, when names clash.
 - `filter` keeps rows by equality (`column=value`) or by conditions built with `col`
   (comparisons, `is_in`, `between`, null tests, `&`, `|`, `~`), with each comparison in parentheses.
-  `polars_filter` takes a Polars expression for anything else.
+  A test `filter` cannot say is computed as a column by a function pod, then filtered on.
 - `semi_join` filters one stream by the shared tags of another and adds no columns.
 - `map_data` and `map_tags` rename columns and keep the rest unless you pass
   `drop_unmapped=True`.
