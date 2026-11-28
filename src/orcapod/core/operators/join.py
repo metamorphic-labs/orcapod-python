@@ -2,7 +2,7 @@ import asyncio
 import functools
 import itertools
 import json
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Sequence
 from typing import Any, ClassVar, get_args
 
 import polars as pl
@@ -44,7 +44,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
 )
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, ContentHash, DataType, DataValue, Schema
+from orcapod.types import ColumnConfig, ContentHash, DataType, Schema
 from orcapod.utils import arrow_utils, schema_utils
 
 # The row-number columns of the frames Polars joins (``_inner_join``); a tag, so a
@@ -440,7 +440,7 @@ class Join(NonZeroInputOperator):
         )
         return Schema(
             {
-                name: kind | None if nullable[name] else kind
+                name: kind | None if nullable.get(name, False) else kind
                 for name, kind in system_tag_fields.items()
             }
         )
@@ -769,8 +769,6 @@ class Join(NonZeroInputOperator):
             suffixes: Per-input system-tag suffixes (positional).
         """
         n = len(inputs)
-        block_sep = constants.BLOCK_SEPARATOR
-
         if n == 2:
             # Join in canonical order so the merged tag and data keys follow
             # the order ``output_schema`` defines, whatever the operand order.
@@ -783,7 +781,7 @@ class Join(NonZeroInputOperator):
                 rt: TagProtocol,
                 rp: DataProtocol,
             ) -> tuple[TagProtocol, DataProtocol]:
-                return self._merge_pair_rename(lt, lp, rt, rp, pair_suffixes, block_sep)
+                return self._merge_pair_rename(lt, lp, rt, rp, pair_suffixes)
 
             await self._binary_streaming_join(
                 inputs[left_idx], inputs[right_idx], output, merge_fn
@@ -840,9 +838,6 @@ class Join(NonZeroInputOperator):
         """
         from orcapod.channels import Channel
 
-        block_sep = constants.BLOCK_SEPARATOR
-        sys_prefix = constants.SYSTEM_TAG_PREFIX
-
         canon_order = self._canonical_input_order(suffixes)
 
         async with asyncio.TaskGroup() as tg:
@@ -858,8 +853,6 @@ class Join(NonZeroInputOperator):
                         inputs[orig_idx],
                         ch.writer,
                         suffixes[orig_idx],
-                        block_sep,
-                        sys_prefix,
                     )
                 )
                 renamed_readers.append(ch.reader)
@@ -1065,8 +1058,6 @@ class Join(NonZeroInputOperator):
         ch_in: ReadableChannel[tuple[TagProtocol, DataProtocol]],
         ch_out: WritableChannel[tuple[TagProtocol, DataProtocol]],
         suffix: str,
-        block_sep: str,
-        sys_prefix: str,
     ) -> None:
         """Read rows and rename system-tag keys by appending the per-input suffix.
 
@@ -1076,16 +1067,11 @@ class Join(NonZeroInputOperator):
         """
         try:
             async for tag, pkt in ch_in:
-                sys_tags = tag.system_tags()
-                if sys_tags:
-                    renamed: dict[str, DataValue] = {}
-                    for k, v in sys_tags.items():
-                        new_key = (
-                            f"{k}{block_sep}{suffix}" if k.startswith(sys_prefix) else k
-                        )
-                        renamed[new_key] = v
+                if (system_tags := Join._system_tag_table(tag)) is not None:
                     tag = Join._build_tag(
-                        Join._merge_tag_tables(tag, None), renamed, tag.data_context_key
+                        Join._merge_tag_tables(tag, None),
+                        arrow_utils.append_to_system_tags(system_tags, suffix),
+                        tag.data_context_key,
                     )
                 await ch_out.send((tag, pkt))
         finally:
@@ -1157,9 +1143,30 @@ class Join(NonZeroInputOperator):
         return pa.Table.from_arrays(columns, schema=pa.schema(list(fields.values())))
 
     @staticmethod
+    def _system_tag_table(tag: TagProtocol) -> "pa.Table | None":
+        """Return the system-tag columns of a row, with their Arrow fields."""
+        columns = {"system_tags": True}
+        names = [
+            name
+            for name in tag.keys(columns=columns)
+            if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        ]
+        return tag.as_table(columns=columns).select(names) if names else None
+
+    @staticmethod
+    def _join_system_tag_tables(
+        tables: Sequence["pa.Table | None"],
+    ) -> "pa.Table | None":
+        """Join the system-tag tables and sort tied positions."""
+        present = [table for table in tables if table is not None]
+        if not present:
+            return None
+        return arrow_utils.sort_system_tag_values(arrow_utils.hstack_tables(*present))
+
+    @staticmethod
     def _build_tag(
         table: "pa.Table | None",
-        system_tags: Mapping[str, DataValue],
+        system_tags: "pa.Table | None",
         data_context_key: str,
     ) -> TagProtocol:
         """Build a ``Tag`` from a merged Arrow table and its system tags.
@@ -1175,8 +1182,13 @@ class Join(NonZeroInputOperator):
         from orcapod.core.datagrams import Tag
 
         if table is None:
-            return Tag({}, system_tags=system_tags, data_context=data_context_key)
-        return Tag(table, system_tags=system_tags, data_context=data_context_key)
+            return Tag(
+                system_tags if system_tags is not None else {},
+                data_context=data_context_key,
+            )
+        if system_tags is not None:
+            table = arrow_utils.hstack_tables(table, system_tags)
+        return Tag(table, data_context=data_context_key)
 
     @staticmethod
     def _merge_data(
@@ -1292,7 +1304,6 @@ class Join(NonZeroInputOperator):
         right_tag: TagProtocol,
         right_pkt: DataProtocol,
         suffixes: list[str],
-        block_sep: str,
     ) -> tuple[TagProtocol, DataProtocol]:
         """Merge a matched pair, renaming system tags with per-side suffixes.
 
@@ -1300,18 +1311,13 @@ class Join(NonZeroInputOperator):
         during the merge (not pre-renamed). The merged row is built from the
         inputs' Arrow tables, in the left (canonically first) tag's context.
         """
-        sys_prefix = constants.SYSTEM_TAG_PREFIX
-
-        # Rename and merge system tags
-        merged_sys: dict[str, DataValue] = {}
-        for i, tag in enumerate((left_tag, right_tag)):
-            for k, v in tag.system_tags().items():
-                new_key = (
-                    f"{k}{block_sep}{suffixes[i]}" if k.startswith(sys_prefix) else k
-                )
-                merged_sys[new_key] = v
-
-        merged_sys = Join._sort_merged_system_tags(merged_sys)
+        tables = [
+            arrow_utils.append_to_system_tags(table, suffix)
+            if (table := Join._system_tag_table(tag)) is not None
+            else None
+            for tag, suffix in zip((left_tag, right_tag), suffixes, strict=True)
+        ]
+        merged_sys = Join._join_system_tag_tables(tables)
         merged_tag = Join._build_tag(
             Join._merge_tag_tables(left_tag, right_tag),
             merged_sys,
@@ -1334,13 +1340,9 @@ class Join(NonZeroInputOperator):
         inputs' Arrow tables, in the left (canonically first) tag's context.
         ``final`` is true only for the chain's last step (see ``_merge_data``).
         """
-        # Combine system tags (already renamed)
-        merged_sys: dict[str, DataValue] = {}
-        merged_sys.update(left_tag.system_tags())
-        merged_sys.update(right_tag.system_tags())
-
-        # Sort within same-provenance-path groups for commutativity
-        merged_sys = Join._sort_merged_system_tags(merged_sys)
+        merged_sys = Join._join_system_tag_tables(
+            [Join._system_tag_table(left_tag), Join._system_tag_table(right_tag)]
+        )
         merged_tag = Join._build_tag(
             Join._merge_tag_tables(left_tag, right_tag),
             merged_sys,
@@ -1349,64 +1351,6 @@ class Join(NonZeroInputOperator):
         return merged_tag, Join._merge_data(
             left_tag, left_pkt, right_tag, right_pkt, final=final
         )
-
-    @staticmethod
-    def _sort_merged_system_tags(merged_sys: dict) -> dict:
-        """Sort system tag values within same-provenance-path groups.
-
-        When two joined inputs share a pipeline_hash, their system tag
-        columns share a provenance path but occupy different canonical
-        positions.  Sorting the paired (source_id, record_id) values
-        across positions ensures commutativity — mirroring what
-        ``sort_system_tag_values`` does on Arrow tables in
-        ``static_process``.
-        """
-        sys_prefix = constants.SYSTEM_TAG_PREFIX
-        block_sep = constants.BLOCK_SEPARATOR
-        field_sep = constants.FIELD_SEPARATOR
-
-        # Parse keys → groups[provenance_path][position][field_type] = key
-        groups: dict[str, dict[str, dict[str, str]]] = {}
-        for key in merged_sys:
-            if not key.startswith(sys_prefix):
-                continue
-            base, sep, position = key.rpartition(field_sep)
-            if not sep or not position.isdigit():
-                continue
-            after_prefix = base[len(sys_prefix) :]
-            field_type, bsep, prov_path = after_prefix.partition(block_sep)
-            if not bsep:
-                continue
-            groups.setdefault(prov_path, {}).setdefault(position, {})[field_type] = key
-
-        sid_field = constants.SYSTEM_TAG_SOURCE_ID_PREFIX[len(sys_prefix) :]
-        rid_field = constants.SYSTEM_TAG_RECORD_ID_PREFIX[len(sys_prefix) :]
-
-        for _prov_path, positions in groups.items():
-            if len(positions) <= 1:
-                continue
-
-            sorted_pos_keys = sorted(positions.keys(), key=int)
-
-            # Collect (sort_key, {field_type: value}) per position
-            entries: list[tuple[tuple, dict[str, object]]] = []
-            for pos in sorted_pos_keys:
-                fmap = positions[pos]
-                sid_val = merged_sys.get(fmap.get(sid_field, ""))
-                rid_val = merged_sys.get(fmap.get(rid_field, ""))
-                vals = {ft: merged_sys[k] for ft, k in fmap.items()}
-                entries.append(((sid_val or "", rid_val or b""), vals))
-
-            entries.sort(key=lambda e: e[0])
-
-            # Write sorted values back to the original position keys
-            for pos, (_, sorted_vals) in zip(sorted_pos_keys, entries):
-                fmap = positions[pos]
-                for field_type, key in fmap.items():
-                    if field_type in sorted_vals:
-                        merged_sys[key] = sorted_vals[field_type]
-
-        return merged_sys
 
     def rows_dropped_text(
         self,

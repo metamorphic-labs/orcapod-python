@@ -1393,9 +1393,16 @@ data. The rules:
   changed, so `int8` stays `int8`. Sources refuse Arrow type `null` at any depth, including
   in reserved raw columns. Declare a supported nullable type for missing values.
   A source's custom system-tag names must each identify an existing non-nullable text
-  column with no null values. When Join sorts tied system tags, an output field is
-  nullable if any of the corresponding input fields can hold a null.
+  column with no null values and no Arrow field metadata. Remove field metadata before
+  building the source. This restriction is a stopgap pending ITL-1561. System-tag fields on
+  a raw ArrowTableStream keep their metadata. When Join sorts tied system tags, it declares
+  the rebuilt fields without operand metadata. A rebuilt field is nullable if any of the
+  corresponding input fields can hold a null.
   A raw `ArrowTableStream` still preserves `null` in its table in ITL-1543 part A.
+  A row's system-tag fields come from its stream, including raw streams. Join
+  uses those declarations on the async row path as well as in its tables.
+  Source-info token declarations and the row-built gate are tracked separately
+  under ITL-1557 and the PR 601 follow-up.
   A row built by `Data` still gives an untyped null the `large_string` type.
   `PolarsFilter` is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (`arrow_utils.restore_column_types` and

@@ -912,10 +912,8 @@ def _system_tag_job(values: list[int | None], exact: bool) -> tuple[Any, Any]:
     return job, database
 
 
-def test_a_narrow_system_tag_is_stored_as_the_rows_give() -> None:
-    """A result over an exact ``ArrowTableStream`` with an ``int16`` system tag: kept,
-    stored and record-hashed as ``main``'s rows give it (``int64``, non-null), the
-    same as ``main``'s own row path (an unproven stream) gives."""
+def test_a_narrow_raw_system_tag_is_stored_with_its_declared_field() -> None:
+    """Both the exact stream and the fallback row path keep the declared field."""
     from orcapod.system_constants import constants
 
     name = f"{constants.SYSTEM_TAG_PREFIX}region"
@@ -925,29 +923,30 @@ def test_a_narrow_system_tag_is_stored_as_the_rows_give() -> None:
         job.run()
         node: Any = job.nodes["marked"]
         kept = node.as_table(columns={"system_tags": True}).schema.field(name)
-        assert (kept.type, kept.nullable) == (pa.int64(), False)
+        assert kept.equals(pa.field(name, pa.int16()), check_metadata=True)
         stored[exact] = database.at("log").get_all_records(
             node._stored_table_path,  # pyright: ignore[reportPrivateUsage]  # the raw LOG table
             record_id_column="_record_hash",
         )
     for table in stored.values():
         field = table.schema.field(name)
-        assert (field.type, field.nullable) == (pa.int64(), False)
+        assert field.equals(pa.field(name, pa.int16()), check_metadata=True)
     assert (
         stored[True]["_record_hash"].to_pylist()
         == stored[False]["_record_hash"].to_pylist()
     )
 
 
-def test_a_null_system_tag_raises_at_the_operator_as_main_does() -> None:
-    """With a null among its values, ``main``'s rows cannot make one table: the
-    operator raises ``ArrowInvalid`` before its end event, as on ``main``."""
+def test_an_operator_keeps_null_values_in_a_nullable_raw_system_tag() -> None:
+    """A nullable declared field lets rows with and without a value share a table."""
     job, _ = _system_tag_job([None, 2], exact=True)
     observer = _NodeEvents()
-    with pytest.raises(pa.ArrowInvalid):
-        job.run(observer=observer)
+    job.run(observer=observer)
     assert ("start", "marked") in observer.events
-    assert ("end", "marked") not in observer.events
+    assert ("end", "marked") in observer.events
+    table = job.nodes["marked"].as_table(columns={"system_tags": True})
+    assert table.schema.field("_tag_region").equals(pa.field("_tag_region", pa.int16()))
+    assert table.column("_tag_region").to_pylist() == [None, 2]
 
 
 def test_a_source_refuses_a_non_text_custom_system_tag() -> None:

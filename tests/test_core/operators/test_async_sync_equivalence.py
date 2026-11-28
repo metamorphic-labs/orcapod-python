@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import decimal
+import itertools
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from orcapod.channels import Channel
 from orcapod.contexts import get_default_context, get_default_type_converter
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.datagrams import Tag
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import (
     AddTags,
@@ -1011,6 +1013,191 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
     assert_equivalent(
         sync_rows(case.make_op(), *sources), async_rows(case.make_op(), *sources)
     )
+
+
+@pytest.mark.parametrize("reverse_columns", [False, True])
+@pytest.mark.parametrize("metadata", ["none", "same", "different"])
+def test_standalone_async_join_rows_keep_declared_system_tag_fields(
+    reverse_columns: bool,
+    metadata: str,
+) -> None:
+    source_id = "_tag_source_id::seed"
+    record_id = "_tag_record_id::seed"
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("g", pa.large_string(), False),
+            pa.field(source_id, pa.large_string(), False),
+            pa.field(record_id, pa.large_string(), True),
+        ]
+    )
+    inputs = []
+    empty_inputs = []
+    for source, records in (("a", [None, "q"]), ("b", ["r", "t"]), ("c", ["s", "u"])):
+        field_metadata: dict[bytes | str, bytes | str] | None = (
+            None
+            if metadata == "none"
+            else {b"owner": b"a" if metadata == "same" else source.encode()}
+        )
+        fields = pa.schema(
+            [
+                field.with_metadata(field_metadata)
+                if field_metadata is not None and field.name in (source_id, record_id)
+                else field
+                for field in schema
+            ]
+        )
+        table = pa.Table.from_pylist(
+            [
+                {"k": i, "g": group, source_id: source, record_id: record}
+                for i, (group, record) in enumerate(
+                    zip(("x", "y"), records, strict=True)
+                )
+            ],
+            schema=fields,
+        )
+        if reverse_columns:
+            table = table.select(list(reversed(schema.names)))
+        inputs.append(
+            ArrowTableStream(table, tag_columns=("k", "g"), data_tags=("k", "g"))
+        )
+        empty_inputs.append(
+            ArrowTableStream(
+                table.slice(0, 0), tag_columns=("k", "g"), data_tags=("k", "g")
+            )
+        )
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    columns = {"system_tags": True}
+    for positions in itertools.permutations(range(len(inputs))):
+        ordered = [inputs[i] for i in positions]
+        empty = [empty_inputs[i] for i in positions]
+        join = Join()
+        stream = join(*ordered)
+        table = stream.as_table(columns=columns)
+        empty_table = join(*empty).as_table(columns=columns)
+        assert empty_table.num_rows == 0
+        assert empty_table.schema.equals(table.schema, check_metadata=True)
+        tags, _ = join.output_schema(*ordered, columns=columns)
+        tag_names = [name for name in tags if name.startswith("_tag_")]
+        assert len(tag_names) == 6
+        for name in tag_names:
+            field = table.schema.field(name)
+            assert field.metadata is None
+            assert field.nullable == name.startswith(record_id)
+            assert tags[name] == (str | None if field.nullable else str)
+        for rows in (list(stream.iter_data()), async_rows(join, *ordered)):
+            assert len(rows) == table.num_rows == 2
+            for tag, data in rows:
+                tag_table = tag.as_table(columns=columns)
+                assert tag_table.schema.equals(
+                    table.select(tag_table.column_names).schema, check_metadata=True
+                )
+                data_table = data.as_table()
+                assert data_table.schema.equals(
+                    table.select(data_table.column_names).schema, check_metadata=True
+                )
+
+
+@pytest.mark.parametrize("reverse_columns", [False, True])
+def test_tied_join_keeps_custom_system_tags_with_their_operand(
+    reverse_columns: bool,
+) -> None:
+    source_id, record_id, custom = (
+        "_tag_source_id::seed",
+        "_tag_record_id::seed",
+        "_tag_rev::seed",
+    )
+    inputs = {}
+    for name in "abc":
+        schema = pa.schema(
+            [
+                pa.field("k", pa.int64(), False),
+                pa.field("g", pa.large_string(), False),
+                pa.field(source_id, pa.large_string(), False),
+                pa.field(record_id, pa.large_string(), False),
+                pa.field(
+                    custom, pa.large_string(), name == "a", {b"owner": name.encode()}
+                ),
+            ]
+        )
+        table = pa.Table.from_pylist(
+            [
+                {
+                    "k": i,
+                    "g": group,
+                    source_id: name,
+                    record_id: record,
+                    custom: f"{name}{i}",
+                }
+                for i, (group, record) in enumerate((("x", "p"), ("y", "q")), start=1)
+            ],
+            schema=schema,
+        )
+        if reverse_columns:
+            table = table.select(list(reversed(table.column_names)))
+        inputs[name] = ArrowTableStream(
+            table, tag_columns=["k", "g"], data_tags=["k", "g"]
+        )
+    assert len({stream.pipeline_hash() for stream in inputs.values()}) == 1
+    columns = {"system_tags": True}
+    for order in itertools.permutations(inputs):
+        operands = [inputs[name] for name in order]
+        join = Join()
+        stream = join(*operands)
+        expected = stream.as_table(columns=columns)
+        prediction, _ = join.output_schema(*operands, columns=columns)
+        names = sorted(
+            name for name in expected.column_names if name.startswith(custom)
+        )
+        for name, owner in zip(names, order, strict=True):
+            assert expected[name].to_pylist() == [f"{owner}1", f"{owner}2"]
+            assert prediction[name] == (str | None if owner == "a" else str)
+        for rows in (list(stream.iter_data()), async_rows(join, *operands)):
+            assert len(rows) == expected.num_rows
+            actual = pa.concat_tables(
+                [tag.as_table(columns=columns).select(names) for tag, _ in rows]
+            )
+            target = expected.select(names)
+            assert actual.equals(target, check_metadata=True)
+            assert actual.schema.equals(target.schema, check_metadata=True)
+
+
+@pytest.mark.parametrize("reverse_columns", [False, True])
+def test_raw_stream_rows_keep_system_tag_width_flags_and_metadata(
+    reverse_columns: bool,
+) -> None:
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("g", pa.large_string(), False),
+            pa.field("x", pa.int16(), False),
+            pa.field("y", pa.large_string(), True),
+            pa.field("_tag_rank", pa.int8(), False, metadata={b"purpose": b"rank"}),
+            pa.field("_tag_label", pa.large_string(), True),
+        ]
+    )
+    table = pa.Table.from_pylist(
+        [
+            {"k": 1, "g": "a", "x": 4, "y": "x", "_tag_rank": 7, "_tag_label": "a"},
+            {"k": 2, "g": "b", "x": 5, "y": None, "_tag_rank": 8, "_tag_label": None},
+        ],
+        schema=schema,
+    )
+    if reverse_columns:
+        table = table.select(list(reversed(schema.names)))
+    stream = ArrowTableStream(table, tag_columns=("k", "g"))
+    columns = {"system_tags": True}
+    for tag, data in stream.iter_data():
+        assert isinstance(tag, Tag)
+        for row in (tag, tag.copy(include_cache=False)):
+            got = row.as_table(columns=columns)
+            assert got.schema.equals(
+                table.select(got.column_names).schema, check_metadata=True
+            )
+        got_data = data.as_table()
+        assert got_data.schema.equals(
+            table.select(got_data.column_names).schema, check_metadata=True
+        )
 
 
 # ── inputs that are not root sources (ITL-906) ──────────────────────────────

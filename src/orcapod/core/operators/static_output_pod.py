@@ -516,23 +516,23 @@ class StaticOutputOperatorPod(TraceableBase):
         return StaticOutputOperatorPod._zero_rows_in_row_order(result)
 
     @staticmethod
-    def _flag_by_values(table: pa.Table) -> pa.Table:
-        """Flag each system-tag and source-info field nullable only when it holds a null.
+    def _flag_by_values(table: pa.Table, *, system_tags: bool = True) -> pa.Table:
+        """Flag value-based fields nullable only when they hold a null.
 
-        The last step of F (``_row_built_form``), which needs the complete table. A table
-        built from rows takes its system tags and source-info tokens from each row's
-        values, so those fields are non-nullable unless a value is missing, whatever
-        flags the table the rows came from had (a join over inputs tied on pipeline hash
-        declares its system tags nullable). The table built from rows also carries no
-        schema metadata (``arrow_utils.hstack_tables``), so none is kept.
+        The row-built form settles source-info flags from the complete table.
+        Callers that settle both provenance groups use this for transport layouts.
+        The table built from rows carries no schema metadata.
 
         Args:
             table: A table of user tags, system tags, data and source info.
+            system_tags: Also settle system-tag flags from values.
 
         Returns:
             The same arrays under the new field flags, with no schema metadata.
         """
-        prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+        prefixes = (constants.SOURCE_PREFIX,)
+        if system_tags:
+            prefixes = (*prefixes, constants.SYSTEM_TAG_PREFIX)
         fields = [
             field.with_nullable(table.column(i).null_count > 0)
             if field.name.startswith(prefixes)
@@ -615,11 +615,11 @@ class StaticOutputOperatorPod(TraceableBase):
         F in the ITL-1347 spec: the same table, without making the rows. Two steps:
 
         - per slice (``streams.base.row_built_columns``), what each row decides on its
-          own: the columns, their order, their large types, and the provenance fields'
-          form (no system-tag field metadata, source-info lists of nullable items);
+          own: the columns, their order, the declared system-tag fields, and the
+          source-info fields in the form the rows give them;
         - on the complete table, what depends on the values of every row: each
           source-info column's type, from its tokens (``_type_source_info_by_values``),
-          then the system-tag and source-info field flags (``_flag_by_values``).
+          then the source-info field flags (``_flag_by_values``).
 
         The equality with ``_rows_to_table`` is tested over every operator, source kind,
         column role and raw-stream provenance shape (ITL-1347, L0-L2).
@@ -642,7 +642,8 @@ class StaticOutputOperatorPod(TraceableBase):
             return StaticOutputOperatorPod._flag_by_values(
                 StaticOutputOperatorPod._type_source_info_by_values(
                     row_built_columns(table, keys)
-                )
+                ),
+                system_tags=False,
             )
         except RowBuiltFormUnavailable:
             raise
@@ -1317,10 +1318,10 @@ def stream_from_batches(
     (``InputChannel.to_stream``), and the record batches a row-by-row operator is
     applied to. The batches are put under one another in the order given, and the
     table is handed on as a node hands its rows to its successors
-    (``_output_stream``): in the row-built form, each system-tag and source-info field
-    flagged nullable only when one of its values is null (decided over the complete
-    table, never per batch), with ``stream``'s identity: its producer, upstreams,
-    pipeline hash and data context. With no batch it is ``stream``'s zero-row input,
+    (``_output_stream``): declared system-tag flags are restored and source-info
+    flags are settled from values over the complete table. The result keeps
+    ``stream``'s producer, upstreams, pipeline hash and data context.
+    With no batch it is ``stream``'s zero-row input,
     typed by its description and never by rows.
 
     Args:
@@ -1335,6 +1336,20 @@ def stream_from_batches(
     table = concatenate_batches(batches)
     if table is None:
         return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
+    declared = typed_zero_row_table(stream)
+    fields = []
+    for field, column in zip(table.schema, table.columns, strict=True):
+        if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
+            typed = (
+                declared.schema.field(field.name)
+                if declared is not None and field.name in declared.column_names
+                else None
+            )
+            field = field.with_nullable(
+                typed.nullable if typed is not None else column.null_count > 0
+            )
+        fields.append(field)
+    table = pa.Table.from_arrays(table.columns, schema=pa.schema(fields))
     return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
         table, _keys_in_delivered_order(stream.keys(), table.column_names), stream
     )

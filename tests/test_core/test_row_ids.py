@@ -21,6 +21,7 @@ from orcapod.core import row_ids
 from orcapod.core.data_function import output_source_info
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.datagrams.tag_data import EmptyData
+from orcapod.core.streams import ArrowTableStream
 from orcapod.system_constants import constants
 
 HASHER = get_default_context().arrow_hasher
@@ -52,6 +53,34 @@ def _data(
 
 def _binary(value: bytes) -> "pa.Array[Any]":
     return pa.array([value], type=pa.large_binary())
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "values"),
+    [(pa.null(), [None, None]), (pa.large_list(pa.null()), [[None], [None, None]])],
+)
+def test_entry_id_explains_how_to_replace_a_raw_null_system_tag(
+    arrow_type: pa.DataType,
+    values: list[Any],
+) -> None:
+    name = "_tag_record_id::seed"
+    stream = ArrowTableStream(
+        pa.table(
+            {
+                "subject": pa.array(["m1", "m2"], pa.large_string()),
+                "session": [1, 2],
+                "_tag_source_id::seed": pa.array(
+                    ["source", "source"], pa.large_string()
+                ),
+                name: pa.array(values, type=arrow_type),
+                "weight": [25, 30],
+            }
+        ),
+        tag_columns=["subject", "session"],
+    )
+    for tag, data in stream.iter_data():
+        with pytest.raises(ValueError, match=rf"{name}.*supported nullable type"):
+            row_ids.entry_id(HASHER, tag, data)
 
 
 class TestEntryId:
