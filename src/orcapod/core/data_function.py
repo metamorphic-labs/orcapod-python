@@ -115,7 +115,11 @@ def _log_validated_outcome(
         yield deferred
     except Exception:
         if deferred.pending:
-            failure_traceback = traceback.format_exc()
+            failure_traceback = (
+                traceback.format_exc()
+                .encode("utf-8", "backslashreplace")
+                .decode("utf-8")
+            )
             for fields in deferred.pending:
                 fields["success"] = False
                 if "traceback" in fields:
