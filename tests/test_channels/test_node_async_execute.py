@@ -924,7 +924,13 @@ class TestAsyncPipelineThenSyncRetrieval:
             {
                 "id": pa.array([0, 1, 2], type=pa.int64()),
                 "result": pa.array([0, 2, 4], type=pa.int64()),
-            }
+            },
+            schema=pa.schema(
+                [
+                    pa.field("id", pa.int64(), nullable=False),
+                    pa.field("result", pa.int64(), nullable=False),
+                ]
+            ),
         )
         stage1_stream = ArrowTableStream(stage1_table, tag_columns=["id"])
         op = SelectDataColumns(["result"])
