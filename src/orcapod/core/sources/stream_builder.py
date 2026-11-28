@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 
+from orcapod.core.sources import dict_keys
 from orcapod.core.sources.source_ids import (
     build_source_id,
     hash_source_name,
@@ -23,7 +24,11 @@ from orcapod.core.sources.source_ids import (
     require_source_name,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.errors import InputValidationError, RowIdentifierError
+from orcapod.errors import (
+    InputValidationError,
+    RepeatedDictKeyError,
+    RowIdentifierError,
+)
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
@@ -579,6 +584,18 @@ class SourceStreamBuilder:
                 f"tag_columns not found in table: {missing_tags}. "
                 f"Available columns: {list(table.column_names)}"
             )
+
+        # A dict holds a key once (ITL-907): a column whose type holds a dict type
+        # (the converter's definition) is refused when a cell repeats a key, before
+        # anything is hashed. Only such columns are scanned, in name order, so the
+        # column named does not follow the table's layout.
+        converter = self._data_context.type_converter
+        for name in sorted(table.column_names):
+            if dict_keys.holds_dict_type(table.schema.field(name).type, converter):
+                try:
+                    dict_keys.refuse_repeated_dict_keys(table.column(name), converter)
+                except RepeatedDictKeyError as exc:
+                    raise exc.in_column(name) from exc
 
         # 3. The row identifiers (validates the key columns: a missing, null or
         # repeated key is refused here, before anything is hashed).
