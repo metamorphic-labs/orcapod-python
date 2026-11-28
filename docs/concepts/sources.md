@@ -86,9 +86,11 @@ Two distinct objects with the same content hash raise
 `InconsistentSourceError` even when their rows agree, including sources that read
 rows later. Capture, binding, loading and execution all check for conflicts.
 Rebinding replaces a slot's source. On load, slots with identical saved source
-configurations share one reconstructed object. Jobs with two slots sharing
-one live source identity can be inspected. Running them requires distinct
-bindings (ITL-1559).
+configurations share one reconstructed object. Jobs saved with shared bindings
+can be inspected when the slots feed different function pods. A saved shared
+source feeding the same function pod through several slots still fails to load
+(ITL-1554). Running a job with shared bindings requires distinct sources
+(ITL-1559).
 
 A job accepts new steps only while every slot holds the exact source object
 it held when that slot was first compiled. A slot originally compiled unbound

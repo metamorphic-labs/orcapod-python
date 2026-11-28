@@ -376,8 +376,10 @@ Two inputs claiming the same label raise `SourceSlotNameCollisionError`. Rebuild
 the graph to rename a captured slot (ITL-1559).
 
 A graph uses a single slot for each live source identity for now (ITL-1559).
-An older saved job with shared bindings can be loaded, saved and read directly.
-Running it, including in load-only mode, requires distinct bindings.
+An older saved job with shared bindings can be loaded, saved and read directly
+when the slots feed different function pods. Saved slots that shared a source
+and fed the same function pod still fail to load (ITL-1554). Running a job with
+shared bindings, including in load-only mode, requires distinct bindings.
 
 A source bound to a slot must have the slot's tag and data columns
 with the same Arrow types (a column the slot declares nullable also accepts a non-null one);
