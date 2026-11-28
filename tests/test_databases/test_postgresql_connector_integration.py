@@ -25,13 +25,24 @@ import datetime
 import os
 import uuid
 from collections.abc import Iterator
+from typing import cast
+from unittest.mock import DEFAULT, patch
 
 import psycopg
 import pyarrow as pa
 import pytest
+from psycopg import sql
 
 from orcapod.databases import ConnectorArrowDatabase, PostgreSQLConnector
+from orcapod.databases._sql_store import STORE_PATH_CATALOG
+from orcapod.errors import OrcapodDatabaseError
 from orcapod.types import ColumnInfo
+from tests.test_databases.test_sqlite_connector_integration import (
+    _check_catalog_operation,
+    _check_pending_collision,
+    _check_sql_listing_normalizes_subclass_prefix,
+    _check_sql_path_rejects_hidden_separator,
+)
 from tests.test_core.test_result_cache import (
     TIE_ORDERS,
     check_result_lookup_timestamp_tie,
@@ -236,9 +247,24 @@ class TestGetColumnInfo:
     ) -> None:
         assert connector.get_column_info("no_such_table") == []
 
-    def test_raises_on_invalid_table_name(self, connector: PostgreSQLConnector) -> None:
-        with pytest.raises(ValueError, match="double-quote"):
-            connector.get_column_info('bad"name')
+    def test_accepts_a_decoded_quoted_table_name(
+        self, connector: PostgreSQLConnector
+    ) -> None:
+        _, _, _, schema = connector.current_location()
+        table = sql.Identifier(schema, 'order"items')
+        conn = connector._require_open()
+        _ = conn.execute(
+            sql.SQL("CREATE TABLE {} (value BIGINT NOT NULL)").format(table)
+        )
+        _ = conn.execute(sql.SQL("INSERT INTO {} VALUES (7)").format(table))
+        conn.commit()
+
+        query = sql.SQL("SELECT value FROM {}").format(table).as_string(conn)
+        batches = list(connector.iter_batches(query))
+
+        assert len(batches) == 1
+        assert batches[0].schema == pa.schema([pa.field("value", pa.int64(), False)])
+        assert batches[0].column(0).to_pylist() == [7]
 
     def test_array_column(self, connector: PostgreSQLConnector) -> None:
         with connector._conn.cursor() as cur:
@@ -589,7 +615,7 @@ def test_operator_cache_refused_at_write_and_nothing_written(
     """An operator cache's system-tag column names exceed 63 bytes (ITL-1162)."""
     from orcapod import PipelineJob
     from orcapod.core.operators import SelectDataColumns
-    from orcapod.errors import UnstorableColumnError, UnstorableTableNameError
+    from orcapod.errors import UnstorableColumnError
     from orcapod.sources import DictSource
     from orcapod.types import CacheMode
 
@@ -608,32 +634,526 @@ def test_operator_cache_refused_at_write_and_nothing_written(
     )
     with pytest.raises(Exception) as exc_info:
         _ = job.run()
-    # The cache's table name (over 63 bytes) or its system-tag column names are
-    # refused, whichever entry comes first; nothing reaches the server.
+    # The system-tag column names are refused before any write.
     chain: list[BaseException] = []
     err: BaseException | None = exc_info.value
     while err is not None:
         chain.append(err)
         err = err.__cause__ or err.__context__
-    assert any(
-        isinstance(e, (UnstorableColumnError, UnstorableTableNameError)) for e in chain
-    ), chain
+    assert any(isinstance(e, UnstorableColumnError) for e in chain), chain
     assert connector.get_table_names() == []
 
 
 @pytest.mark.postgres
-def test_long_table_name_refused_and_nothing_written(
+def test_long_non_ascii_paths_fit_postgresql_table_names(
     connector: PostgreSQLConnector,
 ) -> None:
-    """A table name PostgreSQL would truncate is never sent to it (ITL-1162)."""
-    from orcapod.errors import UnstorableTableNameError
+    """Keep separate tables even when PostgreSQL would truncate the old names."""
+    db = ConnectorArrowDatabase(connector)
+    first = ("job", "é" * 70 + "a", "pdb_v2")
+    second = ("job", "é" * 70 + "b", "pdb_v2")
+    db.add_record(first, b"one", pa.table({"value": [1]}), flush=True)
+    db.add_record(second, b"one", pa.table({"value": [2]}), flush=True)
+
+    names = [name for name in connector.get_table_names() if name.startswith("o1_")]
+    assert len(names) == 2
+    assert all(len(name.encode("utf-8")) == 63 for name in names)
+    with PostgreSQLConnector(connector._dsn) as reopened:
+        store = ConnectorArrowDatabase(reopened)
+        assert store.list_table_paths(("job", first[1])) == [first]
+        assert store.at("job").list_table_paths() == [first[1:], second[1:]]
+        first_rows = store.get_all_records(first)
+        second_rows = store.get_all_records(second)
+    assert first_rows is not None and first_rows.to_pylist() == [{"value": 1}]
+    assert second_rows is not None and second_rows.to_pylist() == [{"value": 2}]
+
+
+@pytest.mark.postgres
+def test_record_write_failure_rolls_back_the_table_and_registration(
+    connector: PostgreSQLConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog, record table and rows are committed together."""
+    store = ConnectorArrowDatabase(connector)
+    path = ("job", "new")
+    record = pa.table({"value": [1]})
+
+    def fail_write(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(connector, "upsert_records", fail_write)
+        with pytest.raises(RuntimeError, match="simulated write failure"):
+            store.add_record(path, b"one", record, flush=True)
+
+    with PostgreSQLConnector(connector._dsn) as reopened:
+        assert reopened.get_table_names() == []
+        other = ConnectorArrowDatabase(reopened)
+        assert other.list_table_paths() == []
+        other.add_record(path, b"one", record, flush=True)
+        assert other.list_table_paths() == [path]
+
+
+@pytest.mark.postgres
+def test_unknown_catalog_entries_are_ignored(connector: PostgreSQLConnector) -> None:
+    path = ("job", "pdb_v2")
+    store = ConnectorArrowDatabase(connector)
+    store.add_record(path, b"one", pa.table({"value": [1]}), flush=True)
+    catalog = sql.Identifier(STORE_PATH_CATALOG)
+    with psycopg.connect(connector._dsn) as conn:
+        row = conn.execute(
+            sql.SQL("SELECT layout_version, table_name FROM {}").format(catalog)
+        ).fetchone()
+        assert row is not None
+        version, name = row
+        assert version == 1
+        _ = conn.execute(
+            sql.SQL("""
+                INSERT INTO {} (layout_version, table_name, entry_kind, entry_name, entry_value)
+                VALUES (%s, %s, 'future', 'short_name', 'an opaque value')
+                """).format(catalog),
+            (version, name),
+        )
+    assert store.list_table_paths(("job",)) == [path]
+    rows = store.get_all_records(path)
+    assert rows is not None and rows.to_pylist() == [{"value": 1}]
+    store.add_record(path, b"two", pa.table({"value": [2]}), flush=True)
+
+
+@pytest.mark.postgres
+def test_catalog_uses_the_first_schema_on_the_search_path(
+    connector: PostgreSQLConnector,
+) -> None:
+    _, _, _, primary = connector.current_location()
+    fallback = f'JOIN."%{uuid.uuid4().hex[:12]}'
+    base_dsn = _base_dsn()
+    path = ("job", "pdb_v2")
+    with psycopg.connect(base_dsn, autocommit=True) as admin:
+        _ = admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(fallback)))
+        try:
+            with (
+                PostgreSQLConnector(base_dsn) as other,
+                PostgreSQLConnector(base_dsn) as first,
+            ):
+                _ = other._require_open().execute(
+                    sql.SQL("SET search_path TO {}").format(sql.Identifier(fallback))
+                )
+                _ = first._require_open().execute(
+                    sql.SQL("SET search_path TO {}, {}").format(
+                        sql.Identifier(primary), sql.Identifier(fallback)
+                    )
+                )
+                other_store = ConnectorArrowDatabase(other)
+                store = ConnectorArrowDatabase(first)
+                other_store.add_record(
+                    path, b"one", pa.table({"value": [1]}), flush=True
+                )
+
+                assert store.list_table_paths() == []
+                assert store.get_all_records(path) is None
+                store.add_record(path, b"one", pa.table({"value": [2]}), flush=True)
+
+                assert len(STORE_PATH_CATALOG.encode("utf-8")) <= 63
+                assert STORE_PATH_CATALOG in first.get_table_names()
+                assert STORE_PATH_CATALOG in other.get_table_names()
+                assert (
+                    store.list_table_paths() == other_store.list_table_paths() == [path]
+                )
+                primary_rows = store.get_all_records(path)
+                fallback_rows = other_store.get_all_records(path)
+                assert primary_rows is not None and primary_rows.to_pylist() == [
+                    {"value": 2}
+                ]
+                assert fallback_rows is not None and fallback_rows.to_pylist() == [
+                    {"value": 1}
+                ]
+                _ = first._require_open().execute(
+                    sql.SQL("SET search_path TO {}").format(sql.Identifier(fallback))
+                )
+                switched_rows = store.get_all_records(path)
+                assert switched_rows is not None and switched_rows.equals(fallback_rows)
+        finally:
+            _ = admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(fallback))
+            )
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    "operation", ["list", "read", "pending_point", "queue", "flush"]
+)
+def test_unsupported_catalog_layout_is_refused(
+    connector: PostgreSQLConnector, operation: str
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("versioned",)
+    one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
+    db.add_record(path, b"id", one, flush=True)
+    if operation in ("flush", "pending_point"):
+        db.add_record(path, b"id", two)
+        connector._require_open().commit()
+    catalog = sql.Identifier(STORE_PATH_CATALOG)
+    with psycopg.connect(connector._dsn) as conn:
+        _ = conn.execute(
+            sql.SQL("ALTER TABLE {} DROP CONSTRAINT {}").format(
+                catalog, sql.Identifier(f"{STORE_PATH_CATALOG}_layout_version_check")
+            )
+        )
+        _ = conn.execute(sql.SQL("UPDATE {} SET layout_version = 2").format(catalog))
+    with pytest.raises(
+        OrcapodDatabaseError, match="unsupported catalog layout version 2"
+    ):
+        _check_catalog_operation(db, path, two, operation)
+    name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+    with psycopg.connect(connector._dsn) as conn:
+        assert conn.execute(
+            sql.SQL("SELECT value FROM {}").format(sql.Identifier(name))
+        ).fetchone() == (1,)
+
+
+@pytest.mark.postgres
+def test_missing_record_table_ignores_unsupported_catalog_version(
+    connector: PostgreSQLConnector,
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("orphan",)
+    db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+    name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+    catalog = sql.Identifier(STORE_PATH_CATALOG)
+    with psycopg.connect(connector._dsn) as conn:
+        _ = conn.execute(
+            sql.SQL("ALTER TABLE {} DROP CONSTRAINT {}").format(
+                catalog, sql.Identifier(f"{STORE_PATH_CATALOG}_layout_version_check")
+            )
+        )
+        _ = conn.execute(sql.SQL("UPDATE {} SET layout_version = 2").format(catalog))
+        _ = conn.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(name)))
+
+    assert db.get_all_records(path) is None
+    assert db.list_table_paths() == []
+
+
+@pytest.mark.postgres
+def test_str_subclass_path_reopens_as_ordinary_string(
+    connector: PostgreSQLConnector,
+) -> None:
+    class OddString(str):
+        def __eq__(self, other: object) -> bool:
+            return self is other
+
+        __hash__ = str.__hash__
 
     db = ConnectorArrowDatabase(connector)
-    path = ("fn", "x" * 70)
-    table = pa.table({"v": pa.array([1], type=pa.int64())})
-    with pytest.raises(UnstorableTableNameError):
-        db.add_record(path, b"1", table)
-    with pytest.raises(UnstorableTableNameError):
-        db.get_all_records(path)
-    db.flush()
-    assert connector.get_table_names() == []
+    db.add_record(("same",), b"id", pa.table({"value": [1]}), flush=True)
+
+    rows = db.get_all_records((OddString("same"),))
+    assert rows is not None and rows.to_pylist() == [{"value": 1}]
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("scoped", [False, True])
+def test_sql_path_rejects_hidden_separator(
+    connector: PostgreSQLConnector, scoped: bool
+) -> None:
+    _check_sql_path_rejects_hidden_separator(
+        ConnectorArrowDatabase(connector), scoped=scoped
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("flush", [False, True])
+def test_sql_listing_normalizes_subclass_prefix(
+    connector: PostgreSQLConnector, flush: bool
+) -> None:
+    _check_sql_listing_normalizes_subclass_prefix(
+        ConnectorArrowDatabase(connector), flush=flush
+    )
+
+
+@pytest.mark.postgres
+def test_metadata_lookup_folds_unquoted_schema_identifier(
+    connector: PostgreSQLConnector,
+) -> None:
+    _, _, _, schema = connector.current_location()
+    _ = connector._require_open().execute(
+        "CREATE TABLE records (value BIGINT NOT NULL)"
+    )
+    _ = connector._require_open().execute("INSERT INTO records VALUES (7)")
+    connector._require_open().commit()
+
+    batches = list(
+        connector.iter_batches(f"SELECT value FROM {schema.upper()}.records")
+    )
+
+    assert len(batches) == 1
+    assert batches[0].schema.field("value").type == pa.int64()
+    assert batches[0].schema.field("value").nullable is False
+    assert batches[0].column(0).to_pylist() == [7]
+
+    _ = connector._require_open().execute(
+        'CREATE TABLE "MixedCase" (value BIGINT NOT NULL)'
+    )
+    _ = connector._require_open().execute('INSERT INTO "MixedCase" VALUES (8)')
+    connector._require_open().commit()
+    quoted = list(connector.iter_batches(f'SELECT value FROM "{schema}"."MixedCase"'))
+    assert quoted[0].schema.field("value").type == pa.int64()
+    assert quoted[0].column(0).to_pylist() == [8]
+
+
+@pytest.mark.postgres
+def test_standalone_catalog_lookup_releases_its_transaction(
+    connector: PostgreSQLConnector,
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    db.add_record(("lock-test",), b"id", pa.table({"value": [1]}), flush=True)
+
+    paths = connector.get_store_table_paths("o1_", exact=False)
+
+    assert paths
+    assert connector._require_open().info.transaction_status.name == "IDLE"
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("read", ["get_all_records", "get_table_schema"])
+def test_public_store_read_and_listing_release_catalog_lock(
+    connector: PostgreSQLConnector, read: str
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("lock-test",)
+    db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+
+    assert getattr(db, read)(path) is not None
+    assert db.list_table_paths() == [path]
+
+    _check_catalog_can_be_locked(connector)
+    assert connector._require_open().info.transaction_status.name == "IDLE"
+
+
+def _check_catalog_can_be_locked(connector: PostgreSQLConnector) -> None:
+    """Verify the store's catalog can take an exclusive lock from another connection."""
+    with psycopg.connect(connector._dsn) as independent:
+        _ = independent.execute(
+            sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE NOWAIT").format(
+                sql.Identifier(STORE_PATH_CATALOG)
+            )
+        )
+
+
+@pytest.mark.postgres
+def test_catalog_lookup_does_not_commit_a_callers_transaction(
+    connector: PostgreSQLConnector,
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("lock-test",)
+    db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+    conn = connector._require_open()
+    _ = conn.execute("CREATE TABLE caller_work (value INTEGER)")
+
+    assert db.list_table_paths() == [path]
+    _check_catalog_can_be_locked(connector)
+
+    assert conn.info.transaction_status.name == "INTRANS"
+    conn.rollback()
+    with psycopg.connect(connector._dsn) as check:
+        assert check.execute("SELECT to_regclass('caller_work')").fetchone() == (None,)
+
+
+@pytest.mark.postgres
+def test_pending_rows_remain_bound_to_their_postgresql_schema(
+    connector: PostgreSQLConnector,
+) -> None:
+    base_dsn = _base_dsn()
+    schema_b = f"pending_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(base_dsn, autocommit=True) as admin:
+        _ = admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_b)))
+    try:
+        db = ConnectorArrowDatabase(connector)
+        path = ("same",)
+        (schema_a,) = (
+            connector._require_open().execute("SELECT current_schema()").fetchone()
+        )
+        db.add_record(path, b"a", pa.table({"value": [1]}))
+
+        _ = connector._require_open().execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_b))
+        )
+        assert db.get_record_by_id(path, b"a") is None
+        with pytest.raises(OrcapodDatabaseError, match="pending.*schema"):
+            db.flush()
+
+        _ = connector._require_open().execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_a))
+        )
+        db.flush()
+        rows = db.get_all_records(path)
+        assert rows is not None and rows.to_pylist() == [{"value": 1}]
+    finally:
+        with psycopg.connect(base_dsn, autocommit=True) as admin:
+            _ = admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema_b))
+            )
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("operation", ["read", "flush"])
+def test_store_uses_the_queued_schema_when_a_preferred_schema_appears(
+    connector: PostgreSQLConnector, operation: str
+) -> None:
+    base_dsn = _base_dsn()
+    preferred = f"preferred_{uuid.uuid4().hex[:12]}"
+    fallback = connector.get_current_store_schema()
+    conn = connector._require_open()
+    _ = conn.execute(
+        sql.SQL("SET search_path TO {}, {}").format(
+            sql.Identifier(preferred), sql.Identifier(fallback)
+        )
+    )
+    conn.commit()
+    db = ConnectorArrowDatabase(connector)
+    path = ("same",)
+    db.add_record(path, b"stored", pa.table({"value": [1]}), flush=True)
+    db.add_record(path, b"queued", pa.table({"value": [2]}))
+
+    def create_preferred_schema(*_args: object, **_kwargs: object) -> object:
+        with psycopg.connect(base_dsn, autocommit=True) as admin:
+            _ = admin.execute(
+                sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(preferred))
+            )
+        with PostgreSQLConnector(
+            f"{base_dsn} options=-csearch_path={preferred}"
+        ) as other:
+            ConnectorArrowDatabase(other).add_record(
+                path, b"queued", pa.table({"value": [3]}), flush=True
+            )
+        return DEFAULT
+
+    try:
+        if operation == "read":
+            with patch.object(
+                connector,
+                "get_store_table_paths",
+                wraps=connector.get_store_table_paths,
+                side_effect=create_preferred_schema,
+            ):
+                rows = db.get_all_records(path)
+            assert rows is not None and rows.to_pylist() == [{"value": 1}, {"value": 2}]
+        else:
+            with patch.object(
+                connector,
+                "store_table_transaction",
+                wraps=connector.store_table_transaction,
+                side_effect=create_preferred_schema,
+            ):
+                db.flush()
+            rows = db.get_all_records(path)
+            assert rows is not None and rows.to_pylist() == [{"value": 3}]
+            _ = conn.execute(
+                sql.SQL("SET search_path TO {}").format(sql.Identifier(fallback))
+            )
+            rows = db.get_all_records(path, record_id_column="id")
+            assert rows is not None
+            assert {row["id"]: row["value"] for row in rows.to_pylist()} == {
+                b"stored": 1,
+                b"queued": 2,
+            }
+    finally:
+        conn.rollback()
+        with psycopg.connect(base_dsn, autocommit=True) as admin:
+            _ = admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(preferred)
+                )
+            )
+
+
+@pytest.mark.postgres
+def test_store_writes_to_the_verified_schema_when_a_temp_table_shadows_its_name(
+    connector: PostgreSQLConnector,
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("shadow",)
+    db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+    name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+    conn = connector._require_open()
+    _ = conn.execute(
+        sql.SQL(
+            'CREATE TEMP TABLE {} ("__record_id" BYTEA PRIMARY KEY, value BIGINT)'
+        ).format(sql.Identifier(name))
+    )
+    temp = sql.Identifier("pg_temp", name)
+    _ = conn.execute(
+        sql.SQL("INSERT INTO {} VALUES (%s, %s)").format(temp), (b"id", 99)
+    )
+    db.add_record(path, b"id", pa.table({"value": [2]}), flush=True)
+    assert conn.execute(sql.SQL("SELECT value FROM {}").format(temp)).fetchone() == (
+        99,
+    )
+    rows = db.get_all_records(path)
+    assert rows is not None and rows.to_pylist() == [{"value": 2}]
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("operation", ["list", "queue", "flush"])
+@pytest.mark.parametrize("toast", [False, True], ids=["pg_temp", "temporary_toast"])
+def test_store_refuses_a_temporary_schema(
+    connector: PostgreSQLConnector, operation: str, toast: bool
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("temporary",)
+    data = pa.table({"value": [1]})
+    if operation == "flush":
+        db.add_record(path, b"id", data)
+    conn = connector._require_open()
+    _ = conn.execute("CREATE TEMP TABLE seed (value INTEGER)")
+    schema = "pg_temp"
+    if toast:
+        (temporary_schema,) = conn.execute(
+            "SELECT nspname FROM pg_catalog.pg_namespace WHERE oid = pg_my_temp_schema()"
+        ).fetchone()
+        schema = cast(str, temporary_schema).replace("pg_temp_", "pg_toast_temp_", 1)
+    _ = conn.execute(
+        sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema))
+    )
+    conn.commit()
+
+    with pytest.raises(OrcapodDatabaseError, match="temporary PostgreSQL schema"):
+        _check_catalog_operation(db, path, data, operation)
+
+    assert conn.execute(
+        """
+        SELECT relname FROM pg_catalog.pg_class
+        WHERE relnamespace = pg_my_temp_schema() AND relkind = 'r'
+        """
+    ).fetchall() == [("seed",)]
+
+
+@pytest.mark.postgres
+def test_pending_path_is_refused_if_another_writer_claims_name(
+    connector: PostgreSQLConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orcapod.databases import store_table_names
+
+    monkeypatch.setattr(store_table_names, "store_table_digest", lambda path: "a" * 64)
+    with PostgreSQLConnector(connector._dsn) as other:
+        _check_pending_collision(connector, other)
+
+
+@pytest.mark.postgres
+def test_paths_with_a_forced_digest_collision_cannot_share_a_table(
+    connector: PostgreSQLConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from orcapod.databases import store_table_names
+
+    monkeypatch.setattr(store_table_names, "store_table_digest", lambda path: "a" * 64)
+    db = ConnectorArrowDatabase(connector)
+    committed, colliding = ("name-part",), ("name:part",)
+    one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
+    db.add_record(committed, b"id", one)
+    with pytest.raises(OrcapodDatabaseError, match="name-part.*name:part"):
+        db.add_record(colliding, b"id", two)
+    db.flush_batch(committed)
+    with pytest.raises(OrcapodDatabaseError, match="name-part.*name:part"):
+        db.add_record(colliding, b"id", two)
+    with pytest.raises(OrcapodDatabaseError, match="name-part.*name:part"):
+        db.get_all_records(colliding)
+    rows = db.get_all_records(committed)
+    assert rows is not None and rows.equals(one)
