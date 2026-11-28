@@ -144,7 +144,15 @@ class ArrowDatabaseProtocol(Protocol):
         column_values: Collection[tuple[str, Any]] | Mapping[str, Any],
         record_id_column: str | None = None,
         flush: bool = False,
-    ) -> pa.Table | None: ...
+        *,
+        columns: Collection[str] | None = None,
+    ) -> pa.Table | None:
+        """Read matching rows, projecting only the requested data columns if given.
+
+        Column names in the filter refer to the stored schema. The database's
+        record id is returned separately when ``record_id_column`` is supplied.
+        """
+        ...
 
     def flush(self) -> None:
         """Flush any buffered writes to the underlying storage."""

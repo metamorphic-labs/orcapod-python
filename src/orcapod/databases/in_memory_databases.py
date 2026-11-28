@@ -706,6 +706,8 @@ class InMemoryArrowDatabase:
         column_values: "Collection[tuple[str, Any]] | Mapping[str, Any]",
         record_id_column: str | None = None,
         flush: bool = False,
+        *,
+        columns: Collection[str] | None = None,
     ) -> "pa.Table | None":
         if flush:
             self.flush()
@@ -741,6 +743,8 @@ class InMemoryArrowDatabase:
         filtered = parts[0] if len(parts) == 1 else pa.concat_tables(parts)
         if filtered.num_rows == 0:
             return None
+        if columns is not None:
+            filtered = filtered.select([*columns, self.RECORD_ID_COLUMN])
         return self._handle_record_id_column(filtered, record_id_column)
 
     def _filter_committed(

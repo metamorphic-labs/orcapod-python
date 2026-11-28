@@ -339,9 +339,13 @@ class ConnectorArrowDatabase:
         return None
 
     def _get_committed_table(
-        self, record_path: tuple[str, ...], *, schema: str | None
+        self,
+        record_path: tuple[str, ...],
+        *,
+        schema: str | None,
+        columns: Collection[str] | None = None,
     ) -> pa.Table | None:
-        """Fetch all committed records for a path from the connector."""
+        """Fetch committed records for a path from the connector."""
         full_path = self._path_prefix + record_path
         table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
@@ -349,9 +353,12 @@ class ConnectorArrowDatabase:
         if table is None:
             return None
         schema, name = table
+        projection = (
+            "*" if columns is None else ", ".join(map(sql_table_identifier, columns))
+        )
         batches = list(
             self._connector.iter_batches(
-                f"SELECT * FROM {sql_table_identifier(name, schema)}"
+                f"SELECT {projection} FROM {sql_table_identifier(name, schema)}"
             )
         )
         if not batches:
@@ -1105,19 +1112,38 @@ class ConnectorArrowDatabase:
         column_values: Collection[tuple[str, Any]] | Mapping[str, Any],
         record_id_column: str | None = None,
         flush: bool = False,
+        *,
+        columns: Collection[str] | None = None,
     ) -> pa.Table | None:
         if flush:
             self.flush()
-        all_records = self.get_all_records(
-            record_path, record_id_column=self.RECORD_ID_COLUMN
+        pairs = (
+            list(column_values.items())
+            if isinstance(column_values, Mapping)
+            else list(column_values)
         )
+
+        if columns is None:
+            all_records = self.get_all_records(
+                record_path, record_id_column=self.RECORD_ID_COLUMN
+            )
+        else:
+            # The connector returns only the requested and predicate columns.
+            required = list(dict.fromkeys([*columns, self.RECORD_ID_COLUMN]))
+            required.extend(name for name, _ in pairs if name not in required)
+            key = self._get_record_key(record_path)
+            committed = self._get_committed_table(
+                record_path, schema=self._schema_from_record_key(key), columns=required
+            )
+            pending = self._pending_batches.get(key)
+            parts = [
+                part.select(required)
+                for part in (committed, pending)
+                if part is not None and part.num_rows
+            ]
+            all_records = pa.concat_tables(_alike(parts)) if parts else None
         if all_records is None:
             return None
-
-        if isinstance(column_values, Mapping):
-            pairs = list(column_values.items())
-        else:
-            pairs = cast(list[tuple[str, Any]], list(column_values))
 
         expr = None
         for col, val in pairs:
@@ -1127,6 +1153,8 @@ class ConnectorArrowDatabase:
         filtered = all_records.filter(expr)
         if filtered.num_rows == 0:
             return None
+        if columns is not None:
+            filtered = filtered.select([*columns, self.RECORD_ID_COLUMN])
         return self._handle_record_id_column(filtered, record_id_column)
 
     # ── Config ────────────────────────────────────────────────────────────────

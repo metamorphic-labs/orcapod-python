@@ -342,9 +342,11 @@ def test_another_source_of_the_job_may_write_before_a_refusal_fails_the_run(
 
     accepted_cache, refused_cache = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     _ = CachedSource(other(ROWS[:2]), cache_database=accepted_cache).as_table()
-    _conflicting_cache(refused_cache)
+    _ = CachedSource(_source(ROWS), cache_database=refused_cache).as_table()
     accepted = CachedSource(other(ROWS), cache_database=accepted_cache)
-    refused = CachedSource(_source(ROWS), cache_database=refused_cache)
+    refused = CachedSource(
+        _source(_changed(ROWS, ("s1", 2))), cache_database=refused_cache
+    )
     before = _stored(refused, refused_cache)
     database = InMemoryArrowDatabase()
     job = PipelineJob(name="two_sources", database=database)
@@ -352,9 +354,127 @@ def test_another_source_of_the_job_may_write_before_a_refusal_fails_the_run(
         summarize.pod(refused, label="summary")
         accepted.select_tag_columns(["subject", "session"], label="others")
 
-    with pytest.raises(CachedSourceChangedRowError, match="the cache"):
+    with pytest.raises(CachedSourceChangedRowError, match="the source delivered"):
         job.run(orchestrator=ORCHESTRATORS[orchestrator]())
 
     assert _stored(refused, refused_cache) == before
     assert CALLS == []
     assert len(_stored(accepted, accepted_cache)) == len(ROWS)
+
+
+@pytest.mark.parametrize("read", ["head", "get_all_records", "as_table"])
+def test_an_unbound_proxy_refuses_conflicts_with_a_custom_provenance_pair(
+    tmp_path: Path, read: str
+) -> None:
+    def with_custom_pair(value: int) -> ArrowTableSource:
+        table = pa.table(
+            {
+                "id": [1],
+                "value": [value],
+                "record_id::custom": ["constant"],
+                "source_id::custom": ["arrow_table_v1:proxy"],
+            }
+        )
+        return ArrowTableSource(
+            table.cast(pa.schema([f.with_nullable(False) for f in table.schema])),
+            source_id="proxy",
+            record_id_columns="id",
+            tag_columns="id",
+            system_tag_columns=["record_id::custom", "source_id::custom"],
+        )
+
+    db = DeltaTableDatabase(tmp_path)
+    source = with_custom_pair(10).cached(db)
+    assert source.as_table()["value"].to_pylist() == [10]
+    config = source.to_config()
+    write_outside_the_rule(with_custom_pair(20), db)
+
+    loaded = CachedSource.from_config(config)
+    with pytest.raises(
+        CachedSourceChangedRowError, match=r'1 record id .*: \{"id":1\}'
+    ):
+        READS[read](loaded)
+
+
+def test_freshness_refuses_a_conflicted_cache_over_an_unchanged_source() -> None:
+    db = InMemoryArrowDatabase()
+    _conflicting_cache(db)
+    source = CachedSource(_source(ROWS), cache_database=db)
+
+    with pytest.raises(CachedSourceChangedRowError, match="2 record ids"):
+        source.check_for_new_data()
+
+
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_an_unchanged_job_rerun_refuses_a_newly_conflicted_cache(
+    orchestrator: str,
+) -> None:
+    db = InMemoryArrowDatabase()
+    source = CachedSource(_source(ROWS), cache_database=db)
+    job = PipelineJob(name="unchanged_readings", database=InMemoryArrowDatabase())
+    with job:
+        summarize.pod(source, label="summary")
+    job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    assert len(CALLS) == len(ROWS)
+    write_outside_the_rule(_source(_changed(ROWS, ("s1", 2))), db)
+
+    with pytest.raises(CachedSourceChangedRowError, match="1 record id"):
+        job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    assert len(CALLS) == len(ROWS)
+
+
+@pytest.mark.parametrize("read", ["head", "get_all_records"])
+def test_a_warm_delta_reader_refuses_conflicts_committed_by_another_handle(
+    tmp_path: Path, read: str
+) -> None:
+    observer = DeltaTableDatabase(tmp_path)
+    writer = DeltaTableDatabase(tmp_path)
+    _ = CachedSource(_source(ROWS), cache_database=observer).as_table()
+    source = CachedSource(_source(ROWS), cache_database=observer)
+    assert source.get_all_records() is not None
+    write_outside_the_rule(_source(_changed(ROWS, ("s1", 2))), writer)
+
+    with pytest.raises(CachedSourceChangedRowError, match="1 record id"):
+        READS[read](source)
+
+
+@pytest.mark.parametrize("preview", [False, True], ids=["head", "notebook"])
+def test_an_unheld_delta_head_scans_only_record_ids_and_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preview: bool
+) -> None:
+    from orcapod.databases import delta_lake_databases
+
+    db = DeltaTableDatabase(tmp_path)
+    _ = CachedSource(_source(ROWS), cache_database=db).as_table()
+    source = CachedSource(_source(ROWS), cache_database=DeltaTableDatabase(tmp_path))
+    scans: list[list[str]] = []
+    original = delta_lake_databases.delta_to_pyarrow_dataset
+
+    class ScanProbe:
+        def __init__(self, dataset: Any) -> None:
+            self.dataset = dataset
+
+        def to_table(self, *args: Any, **kwargs: Any) -> pa.Table:
+            table = self.dataset.to_table(*args, **kwargs)
+            scans.append(table.column_names)
+            return table
+
+        def to_batches(self, *, columns: list[str]) -> Any:
+            scans.append(columns)
+            return self.dataset.to_batches(columns=columns)
+
+    def tracked(*args: Any, **kwargs: Any) -> ScanProbe:
+        return ScanProbe(original(*args, **kwargs))
+
+    monkeypatch.setattr(delta_lake_databases, "delta_to_pyarrow_dataset", tracked)
+    if preview:
+        assert "could not read" not in source._repr_html_()
+    else:
+        assert source.head(0).table.num_rows == 0
+    (columns,) = scans
+    (record_id,) = [name for name in columns if name.startswith("_tag_record_id::")]
+    assert set(columns) == {
+        record_id,
+        DeltaTableDatabase.RECORD_ID_COLUMN,
+        "__data_context",
+    }

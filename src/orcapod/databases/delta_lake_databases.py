@@ -3246,6 +3246,8 @@ class DeltaTableDatabase:
         column_values: Collection[tuple[str, Any]] | Mapping[str, Any],
         record_id_column: str | None = None,
         flush: bool = False,
+        *,
+        columns: Collection[str] | None = None,
     ) -> "pa.Table | None":
         if flush:
             self.flush_batch(record_path)
@@ -3262,6 +3264,15 @@ class DeltaTableDatabase:
         combined_expression = expressions[0]
         for next_expression in expressions[1:]:
             combined_expression = combined_expression & next_expression
+
+        if columns is not None:
+            return self._read_projected_matches(
+                record_path,
+                columns,
+                pair_list,
+                combined_expression,
+                record_id_column,
+            )
 
         pending = self._pending_rows(record_path)
         if pending is not None:
@@ -3297,6 +3308,63 @@ class DeltaTableDatabase:
         return self._combine_stored_and_pending(
             result, pending_matches, record_id_column
         )
+
+    def _read_projected_matches(
+        self,
+        record_path: tuple[str, ...],
+        columns: Collection[str],
+        pairs: list[tuple[str, Any]],
+        expression: pc.Expression,
+        record_id_column: str | None,
+    ) -> pa.Table | None:
+        """Scan just the selected and predicate columns, without loading the row index."""
+        projection = list(columns)
+        if record_id_column is not None:
+            projection.append(self.RECORD_ID_COLUMN)
+        stored = None
+        if (delta_table := self._get_delta_table(record_path)) is not None:
+            try:
+                physical = _stored_arrow_schema(delta_table)
+                metadata = {
+                    field.name: metadata_bytes(field.metadata)
+                    for field in delta_table.schema().fields
+                }
+                required = dict.fromkeys([*projection, *(name for name, _ in pairs)])
+                scan_schema = pa.schema(
+                    physical.field(name)
+                    .with_type(
+                        arrow_utils.normalize_to_large_types(
+                            arrow_utils.normalize_view_types(physical.field(name).type),
+                            keep_null=True,
+                        )
+                    )
+                    .with_metadata(
+                        cast("dict[bytes | str, bytes | str]", metadata[name])
+                    )
+                    for name in required
+                )
+                dataset = delta_to_pyarrow_dataset(delta_table, schema=scan_schema)
+                # Evaluate the predicates batchwise on the narrow scan. Arrow
+                # cannot compare string_view in Parquet statistics (ENG-601).
+                result_schema = pa.schema(
+                    scan_schema.field(name) for name in projection
+                )
+                batches = (
+                    batch.filter(expression).select(projection)
+                    for batch in dataset.to_batches(columns=list(required))
+                )
+                stored = from_delta_layout(
+                    pa.Table.from_batches(batches, schema=result_schema)
+                )
+            except TypeIdentityError:
+                raise
+            except Exception as exc:
+                raise self._read_failed(record_path) from exc
+
+        pending = self._pending_not_stored(record_path)
+        if pending is not None:
+            pending = pending.filter(expression).select(projection)
+        return self._combine_stored_and_pending(stored, pending, record_id_column)
 
     def get_record_by_id(
         self,

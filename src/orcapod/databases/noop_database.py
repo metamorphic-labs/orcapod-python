@@ -95,6 +95,8 @@ class NoOpArrowDatabase:
         column_values: Collection[tuple[str, Any]] | Mapping[str, Any],
         record_id_column: str | None = None,
         flush: bool = False,
+        *,
+        columns: Collection[str] | None = None,
     ) -> "pa.Table | None":
         return None
 
