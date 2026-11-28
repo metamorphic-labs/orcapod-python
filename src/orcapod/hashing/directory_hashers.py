@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 
 from upath import UPath
 
+from orcapod.hashing.hash_utils import SHA256_ALGORITHM
 from orcapod.protocols.hashing_protocols import FileContentHasherProtocol
 from orcapod.types import ContentHash, PathLike
 
@@ -24,8 +25,6 @@ hash with its label (``b"<label>:" + digest``: a hash fed into another hash carr
 label, ITL-1154), symlinks recorded by target. A change that gives an existing directory a
 different digest takes a new label (``directory_v2``).
 """
-
-_DIRECTORY_V1_ALGORITHM = "sha256"
 
 
 def _compile_ignore(
@@ -165,12 +164,12 @@ class BasicDirectoryHasher:
     def __init__(
         self,
         file_hasher: FileContentHasherProtocol,
-        algorithm: str = "sha256",
+        algorithm: str = SHA256_ALGORITHM,
         buffer_size: int = 65536,
     ) -> None:
-        if algorithm != _DIRECTORY_V1_ALGORITHM:
+        if algorithm != SHA256_ALGORITHM:
             raise ValueError(
-                f"{DIRECTORY_HASH_LABEL} is defined over {_DIRECTORY_V1_ALGORITHM} "
+                f"{DIRECTORY_HASH_LABEL} is defined over {SHA256_ALGORITHM} "
                 f"entry and node digests; got algorithm {algorithm!r}"
             )
         self.file_hasher = file_hasher

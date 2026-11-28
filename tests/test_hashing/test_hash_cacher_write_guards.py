@@ -22,7 +22,9 @@ from orcapod.types import ContentHash
 def make_key(
     path: str = "/a/b.txt", mtime_ns: int = 1000, size: int = 100
 ) -> FileHashKey:
-    return FileHashKey(path=UPath(path), mtime_ns=mtime_ns, size=size)
+    return FileHashKey(
+        path=UPath(path), mtime_ns=mtime_ns, size=size, algorithm="sha256"
+    )
 
 
 def make_hash(digest: bytes = b"\xab" * 32) -> ContentHash:
@@ -351,7 +353,7 @@ class TestCachedFileHasherWithReadOnlyCacher:
 
         path = UPath(f).resolve()
         stat = path.stat()
-        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size)
+        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, "sha256")
         assert cacher.get(key) is None
 
 
@@ -377,7 +379,7 @@ class TestCachedFileHasherWithThresholdCacher:
 
         path = UPath(f).resolve()
         stat = path.stat()
-        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size)
+        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, "sha256")
         assert cacher.get(key) is None  # nothing stored
 
     def test_large_file_hashed_and_stored(self, tmp_path):
@@ -393,7 +395,7 @@ class TestCachedFileHasherWithThresholdCacher:
 
         path = UPath(f).resolve()
         stat = path.stat()
-        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size)
+        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, "sha256")
         stored = cacher.get(key)
         assert stored is not None
         assert stored.digest == result.digest
