@@ -9,7 +9,7 @@ import tokenize
 import types
 import uuid
 from abc import abstractmethod
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import typing
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
@@ -30,8 +30,10 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
 from orcapod.core.result_cache import ResultCache
 from orcapod.errors import (
     NoOutputsDeclaredError,
+    OutputContainerTypeError,
     OutputTypeError,
     UnstorableDatetimeError,
+    type_text,
 )
 from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.protocols.core_protocols.executor import (
@@ -78,8 +80,21 @@ def _get_sync_executor():
     return _sync_executor
 
 
+class _UnexpectedOutputContainer(ValueError):
+    """The parser received a value outside the required output container."""
+
+    def __init__(self, returned_type: type) -> None:
+        """Record the returned type without retaining the value.
+
+        Args:
+            returned_type: Type of the value passed to the parser.
+        """
+        self.returned_type = returned_type
+        super().__init__(f"Unexpected output container type {type_text(returned_type)}")
+
+
 def parse_function_outputs(
-    output_keys: Sequence[str], values: Any
+    output_keys: Sequence[str], values: Any, return_container: type = tuple
 ) -> dict[str, DataValue]:
     """
     Map raw function return values to a keyed output dict.
@@ -89,30 +104,31 @@ def parse_function_outputs(
           returned value other than ``None`` before this is called (ITL-1257).
         - ``output_keys = ["result"]``: any value (including iterables) is stored as-is
           under the single key.
-        - ``output_keys = ["a", "b", ...]``: ``values`` must be iterable and its length
-          must match the number of keys.
+        - ``output_keys = ["a", "b", ...]``: ``values`` must match the declared container
+          and hold one value per key.
 
     Args:
         output_keys: Ordered list of output key names.
         values: Raw return value from the function.
+        return_container: Runtime type required for several outputs.
 
     Returns:
         Dict mapping each output key to its corresponding value.
 
     Raises:
-        ValueError: If ``values`` is not iterable when multiple keys are given, or if
-            the number of values does not match the number of keys.
+        _UnexpectedOutputContainer: If the value is not an accepted output container.
+        ValueError: If the number of values does not match the number of keys.
     """
     if len(output_keys) == 0:
         output_values: list[Any] = []
     elif len(output_keys) == 1:
         output_values = [values]
-    elif isinstance(values, Iterable):
-        output_values = list(values)
     else:
-        raise ValueError(
-            "Values returned by function must be sequence-like if multiple output keys are specified"
-        )
+        if not isinstance(values, return_container) or isinstance(
+            values, (Mapping, str, bytes, bytearray)
+        ):
+            raise _UnexpectedOutputContainer(type(values))
+        output_values = list(values)
 
     if len(output_values) != len(output_keys):
         raise ValueError(
@@ -848,7 +864,12 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         )
 
         # extract input and output schema from the function signature
-        self._input_schema, self._output_schema = schema_utils.extract_function_schemas(
+        (
+            self._input_schema,
+            self._output_schema,
+            self._return_container,
+            self._container_annotation,
+        ) = schema_utils.extract_function_schemas_with_container(
             self._function,
             self._output_keys,
             input_typespec=input_schema,
@@ -999,7 +1020,17 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             # No output keys declare an empty return (ITL-1257): a returned value
             # contradicts the declaration and is refused, never dropped.
             raise NoOutputsDeclaredError(self.canonical_function_name, values)
-        output_data = parse_function_outputs(self._output_keys, values)
+        try:
+            output_data = parse_function_outputs(
+                self._output_keys, values, self._return_container
+            )
+        except _UnexpectedOutputContainer as exc:
+            raise OutputContainerTypeError(
+                self.canonical_function_name,
+                type_text(exc.returned_type),
+                self._return_container,
+                self._container_annotation,
+            ) from exc
         output_schema = self.output_data_schema
         for key, value in output_data.items():
             mismatch = check_conformance(

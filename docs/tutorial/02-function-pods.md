@@ -125,7 +125,10 @@ print(units.drop_data_columns(["region", "n_spikes"]).keys())
 
 ## Returning more than one output
 
-Give `output_keys` a list, return a tuple, and annotate the return type as a tuple:
+Give `output_keys` a list and annotate one tuple element per key. Return a tuple
+or a tuple subclass, such as a named tuple, with the values in the same order
+as the keys. A list or dictionary returned for a tuple annotation raises
+`OutputContainerTypeError` before any values are stored.
 
 ```python
 @function_pod(output_keys=["depth_mm", "layer"])

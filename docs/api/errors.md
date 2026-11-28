@@ -70,6 +70,8 @@ These exceptions and warnings report problems running pipelines, processing rows
 
 ::: orcapod.errors.OutputTypeError
 
+::: orcapod.errors.OutputContainerTypeError
+
 ::: orcapod.errors.NoOutputsDeclaredError
 
 ::: orcapod.errors.RowFailuresWarning
