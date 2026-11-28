@@ -41,9 +41,11 @@ fields matched by NAME (an append may evolve a struct, and the record then descr
 merged column: ``merged_type``); a fixed-size list is rebuilt from the list Delta gives
 back (a null row comes back with no items, which a cast cannot fill), refusing a row of
 another length; a ``float16`` is checked to hold exactly the ``float32`` value read; and a
-fixed-size binary to hold values of its width. A column whose type has an extension
-(logical) type anywhere is left as it is: its type is restored from its extension
-metadata.
+fixed-size binary to hold values of its width. A column containing a Python Arrow
+extension type bypasses type recording. Supported extension fields are restored from
+their extension metadata. ``DeltaTableDatabase.require_storable`` refuses nested
+extension types and annotations that would be lost or prevent an identical append
+(ITL-1372).
 
 A table written before this existed has no recorded type and reads back with Delta's
 types; such a database must be rebuilt.

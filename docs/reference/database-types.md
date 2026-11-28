@@ -12,8 +12,8 @@ it, with an error naming the column, before anything of the table is written: no
 it back as another type. The page is generated from a test that writes and reads each
 type through each database, so it cannot drift from the code. The rows are
 representative, not every Arrow type: dictionary-encoded columns are refused by every
-stream before they reach a database, and union, run-end-encoded and list-view types are
-not covered.
+stream before they reach a database (the dictionary row uses a raw Arrow table), and
+union, run-end-encoded and list-view types are not covered.
 
 What a cell says:
 
@@ -254,6 +254,15 @@ fields is not covered: a struct whose fields are in another order is another typ
 |---|---|---|---|---|
 | `int64 not null` | kept | kept | kept | kept (by rule) |
 | `string not null` | kept | kept | kept | kept (by rule) |
+
+## Nested extension type
+
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `extension type in struct child` | kept | kept | refused | refused |
+| `extension type in list item` | kept | refused | refused | refused |
+| `extension type in map value` | kept | refused | refused | refused |
+| `extension type in dictionary values` | kept | refused | refused | refused |
 
 ## Orcapod logical type
 

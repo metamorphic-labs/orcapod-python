@@ -1372,6 +1372,77 @@ def _holds_null_type(arrow_type: pa.DataType) -> bool:
     )
 
 
+def _unsupported_nested_extension(
+    field: "pa.Field[Any]",
+    *,
+    extension_slot: str | None = None,
+    annotation_slot: str | None = None,
+) -> str | None:
+    """Describe a nested logical type Delta cannot keep (ITL-1372).
+
+    Args:
+        field: The column or nested field to check.
+        extension_slot: An enclosing list item or dictionary value, where no
+            Arrow extension type is supported, even through a struct.
+        annotation_slot: An enclosing list item or map key or value, where
+            a stored annotation can restore as a different field once registered.
+
+    Returns:
+        A description of the unsupported type and nesting, or ``None``.
+    """
+    arrow_type = field.type
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        if extension_slot is not None:
+            return f"an Arrow extension type in {extension_slot}"
+        return None
+    if annotation_slot is not None and b"ARROW:extension:name" in (
+        field.metadata or {}
+    ):
+        return f"an extension type supplied as annotated storage in {annotation_slot}"
+
+    t = pa.types
+    if (
+        t.is_list(arrow_type)
+        or t.is_large_list(arrow_type)
+        or t.is_fixed_size_list(arrow_type)
+    ):
+        return _unsupported_nested_extension(
+            arrow_type.value_field,
+            extension_slot=extension_slot or "a list item",
+            annotation_slot=annotation_slot or "a list item",
+        )
+    if t.is_dictionary(arrow_type):
+        return _unsupported_nested_extension(
+            field.with_type(arrow_type.value_type),
+            extension_slot=extension_slot or "dictionary values",
+            annotation_slot=annotation_slot,
+        )
+    if t.is_map(arrow_type):
+        for child, slot in (
+            (arrow_type.key_field, "a map key"),
+            (arrow_type.item_field, "a map value"),
+        ):
+            if isinstance(child.type, pa.BaseExtensionType):
+                return f"an Arrow extension type in {extension_slot or slot}"
+            reason = _unsupported_nested_extension(
+                child,
+                extension_slot=extension_slot,
+                annotation_slot=annotation_slot or slot,
+            )
+            if reason is not None:
+                return reason
+        return None
+    for i in range(arrow_type.num_fields):
+        reason = _unsupported_nested_extension(
+            arrow_type.field(i),
+            extension_slot=extension_slot,
+            annotation_slot=annotation_slot,
+        )
+        if reason is not None:
+            return reason
+    return None
+
+
 def _unmergeable_name_reason(name: str) -> str | None:
     """Say why Delta cannot commit to a table with a column named ``name``, or ``None``.
 
@@ -2322,8 +2393,9 @@ class DeltaTableDatabase:
         names are case-insensitive (ITL-1403).
 
         Raises:
-            UnstorableColumnError: For the first column Delta cannot hold, naming the
-                column, its Arrow type and Delta's reason.
+            UnstorableColumnError: Naming every column with an unsupported nested
+                extension type, or the first otherwise unstorable column, with
+                its Arrow type and Delta's reason.
         """
         position = _case_clash_position(schema.names)
         if position is not None:
@@ -2336,6 +2408,29 @@ class DeltaTableDatabase:
                 column=clash[1],
                 arrow_type=schema.field(position).type,
                 reason=_case_reason(*clash),
+            )
+        unsupported = [
+            (field, reason)
+            for field in schema
+            if (reason := _unsupported_nested_extension(field)) is not None
+        ]
+        if unsupported:
+            (field, reason), *others = unsupported
+            details = [f"Delta cannot reliably round-trip {reason}"]
+            details.extend(
+                f"Column {other.name!r} of Arrow type {other.type} has {why}"
+                for other, why in others
+            )
+            details.append(
+                "Store the affected columns in their storage form"
+                if others
+                else "Store the column in its storage form"
+            )
+            raise UnstorableColumnError(
+                database_kind=type(self).__name__,
+                column=field.name,
+                arrow_type=field.type,
+                reason=". ".join(details),
             )
         for field in schema:
             reason = delta_unstorable_reason(field)
