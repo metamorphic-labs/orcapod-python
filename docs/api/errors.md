@@ -120,6 +120,8 @@ These exceptions and warnings report storage, schema, and connector problems.
 
 ::: orcapod.errors.SpiralDBWriteNotSupportedError
 
+::: orcapod.errors.SpiralDBObserverNotSupportedError
+
 ::: orcapod.errors.SpiralDBSignInError
 
 ## Feature availability and stability
