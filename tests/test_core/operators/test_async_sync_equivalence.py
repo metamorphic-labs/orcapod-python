@@ -1016,8 +1016,10 @@ def test_async_rows_equal_sync_rows(case: Case) -> None:
 
 
 @pytest.mark.parametrize("reverse_columns", [False, True])
+@pytest.mark.parametrize("metadata", ["none", "same", "different"])
 def test_standalone_async_join_rows_keep_declared_system_tag_fields(
     reverse_columns: bool,
+    metadata: str,
 ) -> None:
     source_id = "_tag_source_id::seed"
     record_id = "_tag_record_id::seed"
@@ -1030,7 +1032,21 @@ def test_standalone_async_join_rows_keep_declared_system_tag_fields(
         ]
     )
     inputs = []
+    empty_inputs = []
     for source, records in (("a", [None, "q"]), ("b", ["r", "t"]), ("c", ["s", "u"])):
+        field_metadata: dict[bytes | str, bytes | str] | None = (
+            None
+            if metadata == "none"
+            else {b"owner": b"a" if metadata == "same" else source.encode()}
+        )
+        fields = pa.schema(
+            [
+                field.with_metadata(field_metadata)
+                if field_metadata is not None and field.name in (source_id, record_id)
+                else field
+                for field in schema
+            ]
+        )
         table = pa.Table.from_pylist(
             [
                 {"k": i, "g": group, source_id: source, record_id: record}
@@ -1038,19 +1054,38 @@ def test_standalone_async_join_rows_keep_declared_system_tag_fields(
                     zip(("x", "y"), records, strict=True)
                 )
             ],
-            schema=schema,
+            schema=fields,
         )
         if reverse_columns:
             table = table.select(list(reversed(schema.names)))
         inputs.append(
             ArrowTableStream(table, tag_columns=("k", "g"), data_tags=("k", "g"))
         )
+        empty_inputs.append(
+            ArrowTableStream(
+                table.slice(0, 0), tag_columns=("k", "g"), data_tags=("k", "g")
+            )
+        )
     assert len({stream.pipeline_hash() for stream in inputs}) == 1
     columns = {"system_tags": True}
-    for ordered in itertools.permutations(inputs):
-        stream = Join()(*ordered)
+    for positions in itertools.permutations(range(len(inputs))):
+        ordered = [inputs[i] for i in positions]
+        empty = [empty_inputs[i] for i in positions]
+        join = Join()
+        stream = join(*ordered)
         table = stream.as_table(columns=columns)
-        for rows in (list(stream.iter_data()), async_rows(Join(), *ordered)):
+        empty_table = join(*empty).as_table(columns=columns)
+        assert empty_table.num_rows == 0
+        assert empty_table.schema.equals(table.schema, check_metadata=True)
+        tags, _ = join.output_schema(*ordered, columns=columns)
+        tag_names = [name for name in tags if name.startswith("_tag_")]
+        assert len(tag_names) == 6
+        for name in tag_names:
+            field = table.schema.field(name)
+            assert field.metadata is None
+            assert field.nullable == name.startswith(record_id)
+            assert tags[name] == (str | None if field.nullable else str)
+        for rows in (list(stream.iter_data()), async_rows(join, *ordered)):
             assert len(rows) == table.num_rows == 2
             for tag, data in rows:
                 tag_table = tag.as_table(columns=columns)

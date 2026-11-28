@@ -1248,6 +1248,18 @@ def make_schema_non_nullable(schema: "pa.Schema") -> "pa.Schema":
     )
 
 
+def contains_null_type(arrow_type: "pa.DataType") -> bool:
+    """Return whether an Arrow type contains the Null type at any depth."""
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return contains_null_type(arrow_type.storage_type)
+    if pa.types.is_dictionary(arrow_type):
+        return contains_null_type(arrow_type.value_type)
+    return pa.types.is_null(arrow_type) or any(
+        contains_null_type(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )
+
+
 def infer_schema_nullable(table: "pa.Table") -> "pa.Schema":
     """Return a schema where each field's nullable flag is inferred from actual data.
 
@@ -1682,9 +1694,9 @@ def _system_tag_position_groups(
 def sorted_system_tag_nullability(
     nullable_by_name: Mapping[str, bool],
 ) -> dict[str, bool]:
-    """Give each movable system-tag field the nullability of all its inputs."""
-    nullable = dict(nullable_by_name)
-    for positions in _system_tag_position_groups(nullable).values():
+    """Return nullability for the source/record fields rebuilt by a tied sort."""
+    nullable: dict[str, bool] = {}
+    for positions in _system_tag_position_groups(nullable_by_name.keys()).values():
         if len(positions) <= 1:
             continue
         for prefix in (
@@ -1698,6 +1710,11 @@ def sorted_system_tag_nullability(
             )
             nullable.update(dict.fromkeys(names, can_hold_null))
     return nullable
+
+
+def sorted_system_tag_field(field: "pa.Field[Any]", nullable: bool) -> "pa.Field[Any]":
+    """Declare a tied field without metadata from any one operand."""
+    return field.with_nullable(nullable).remove_metadata()
 
 
 def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
@@ -1789,8 +1806,8 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
             ):
                 if name is not None:
                     index = table.schema.get_field_index(name)
-                    field = pa.field(
-                        name, table.schema.field(index).type, nullable=nullable[name]
+                    field = sorted_system_tag_field(
+                        table.schema.field(index), nullable[name]
                     )
                     table = table.set_column(
                         index, field, pa.array(values, type=field.type)

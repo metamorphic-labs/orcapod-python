@@ -440,7 +440,7 @@ class Join(NonZeroInputOperator):
         )
         return Schema(
             {
-                name: kind | None if nullable[name] else kind
+                name: kind | None if nullable.get(name, False) else kind
                 for name, kind in system_tag_fields.items()
             }
         )
@@ -1413,8 +1413,10 @@ class Join(NonZeroInputOperator):
         )
         sources = [take_from.get(name, name) for name in table.column_names]
         fields = [
-            field.with_nullable(
-                nullable[field.name] or table.schema.field(source).nullable
+            arrow_utils.sorted_system_tag_field(field, nullable[field.name])
+            if field.name in nullable
+            else field.with_nullable(
+                field.nullable or table.schema.field(source).nullable
             )
             for field, source in zip(table.schema, sources)
         ]
