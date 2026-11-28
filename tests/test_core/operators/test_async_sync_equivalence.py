@@ -16,9 +16,11 @@ from __future__ import annotations
 import asyncio
 import decimal
 import itertools
+import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypeAlias, cast
 
@@ -27,7 +29,11 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.config import HashingConfig, OrcapodConfig
-from orcapod.contexts import get_default_context, get_default_type_converter
+from orcapod.contexts import (
+    get_default_arrow_hasher,
+    get_default_context,
+    get_default_type_converter,
+)
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.datagrams import Tag
@@ -38,8 +44,8 @@ from orcapod.core.operators import (
     DropColumns,
     DropDataColumns,
     DropNulls,
-    Filter,
     DropTagColumns,
+    Filter,
     GroupBy,
     Index,
     Join,
@@ -47,9 +53,9 @@ from orcapod.core.operators import (
     MapData,
     MapTags,
     MergeJoin,
-    Rejoin,
     Pick,
     PolarsFilter,
+    Rejoin,
     SelectColumns,
     SelectDataColumns,
     SelectTagColumns,
@@ -58,6 +64,7 @@ from orcapod.core.operators import (
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.operators.streaming_joins import TRANSPORT_COLUMNS, StreamingJoin
+from orcapod.core.row_ids import entry_id
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
@@ -1161,163 +1168,123 @@ def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
     assert calls == [arity]
 
 
-@pytest.mark.parametrize("declarations", ["different", "same", "missing"])
-@pytest.mark.parametrize("reverse_columns", [False, True])
-def test_tied_join_keeps_custom_system_tags_with_their_operand(
-    reverse_columns: bool, declarations: str
-) -> None:
-    source_id, record_id, custom = (
-        "_tag_source_id::seed",
-        "_tag_record_id::seed",
-        "_tag_rev::seed",
+def _tied_join_inputs(
+    arity: int, *, missing: str | None = None, matching: bool = True
+) -> list[ArrowTableStream]:
+    names = ["k", "_tag_source_id", "_tag_record_id", "_tag_rev"]
+    schema = pa.schema(
+        [pa.field("k", pa.int64(), nullable=False)]
+        + [pa.field(name, pa.large_string(), nullable=False) for name in names[1:]]
     )
-    same_declarations = declarations == "same"
-    inputs = {}
-    for name in "abc":
-        schema = pa.schema(
-            [
-                pa.field("k", pa.int64(), False),
-                pa.field("g", pa.large_string(), False),
-                pa.field(source_id, pa.large_string(), False),
-                pa.field(record_id, pa.large_string(), False),
-                pa.field(
-                    custom,
-                    pa.large_string(),
-                    name == "a" and not same_declarations,
-                    {b"owner": b"shared" if same_declarations else name.encode()},
-                ),
-            ]
-        )
+    inputs = []
+    pairs = (
+        ("az", "record-a"),
+        ("z", "record-z"),
+        ("zzzz", "record-last"),
+        ("z", "record-b"),
+    )
+    for index, (source_id, record_id) in enumerate(pairs[:arity]):
+        key = 1 if matching else index
         table = pa.Table.from_pylist(
-            [
-                {
-                    "k": i,
-                    "g": group,
-                    source_id: name,
-                    record_id: record,
-                    custom: f"{name}{i}",
-                }
-                for i, (group, record) in enumerate((("x", "p"), ("y", "q")), start=1)
-            ],
+            [dict(zip(names, (key, source_id, record_id, "shared"), strict=True))],
             schema=schema,
         )
-        if declarations == "missing" and name == "b":
-            table = table.drop([source_id, record_id, custom])
-        if reverse_columns:
-            table = table.select(list(reversed(table.column_names)))
-        inputs[name] = ArrowTableStream(
-            table, tag_columns=["k", "g"], data_tags=["k", "g"]
-        )
-    assert len({stream.pipeline_hash() for stream in inputs.values()}) == 1
+        if len(inputs) == arity - 1 and missing is not None:
+            table = table.drop([missing])
+        inputs.append(ArrowTableStream(table, tag_columns=["k"], data_tags=["k"]))
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    return inputs
+
+
+def _tied_join_outputs(
+    mode: str, join: Join, inputs: Sequence[ArrowTableStream]
+) -> tuple[pa.Table, list[Row]]:
     columns = {"system_tags": True}
-    canonical: pa.Table | None = None
-    for order in itertools.permutations(inputs):
-        operands = [inputs[name] for name in order]
-        join = Join()
-        stream = join(*operands)
-        expected = stream.as_table(columns=columns)
-        prediction, _ = join.output_schema(*operands, columns=columns)
-        names = sorted(
-            name for name in expected.column_names if name.startswith("_tag_")
-        )
-        assert sorted(name for name in prediction if name.startswith("_tag_")) == names
-        target = expected.select(names)
-        if canonical is None:
-            canonical = target
-        else:
-            assert target.equals(canonical, check_metadata=True)
-        for name in (name for name in names if name.startswith(custom)):
-            source = name.replace(custom, source_id, 1)
-            owner = expected[source][0].as_py()
-            assert expected[name].to_pylist() == [f"{owner}1", f"{owner}2"]
-            assert prediction[name] == (
-                str | None if owner == "a" and not same_declarations else str
-            )
-            assert expected.schema.field(name).metadata == {
-                b"owner": b"shared" if same_declarations else owner.encode()
-            }
-        for rows in (list(stream.iter_data()), async_rows(join, *operands)):
-            assert len(rows) == expected.num_rows
-            actual = pa.concat_tables(
-                [tag.as_table(columns=columns).select(names) for tag, _ in rows]
-            )
-            assert actual.equals(target, check_metadata=True)
-            assert actual.schema.equals(target.schema, check_metadata=True)
-        kernel = StreamingJoin(join, operands)
-        batches = [
-            batch
-            for index, operand in enumerate(operands)
+    if mode == "rows":
+        rows = async_rows(join, *inputs)
+        return pa.concat_tables(
+            [tag.as_table(columns=columns) for tag, _ in rows]
+        ), rows
+    if mode == "sync":
+        stream = join(*inputs)
+        return stream.as_table(columns=columns), list(stream.iter_data())
+    kernel = StreamingJoin(join, inputs)
+    table = pa.Table.from_batches(
+        [
+            result
+            for i, operand in enumerate(inputs)
             for packet in operand.as_table(columns=TRANSPORT_COLUMNS).to_batches()
-            for batch in kernel.push(index, packet)
+            for result in kernel.push(i, packet)
         ]
-        actual = pa.Table.from_batches(batches).sort_by("k").select(names)
-        assert actual.equals(target, check_metadata=True)
-        assert (
-            kernel.zero_row_result.as_table(columns=columns)
-            .select(names)
-            .schema.equals(target.schema, check_metadata=True)
-        )
+    )
+    stream = ArrowTableStream(table, tag_columns=["k"], data_tags=["k"])
+    return stream.as_table(columns=columns), list(stream.iter_data())
 
 
-@pytest.mark.parametrize("reverse", [False, True])
-def test_tied_join_keeps_record_id_when_only_one_input_declares_it(
-    reverse: bool,
+def _symmetric_tie_snapshot(arity: int, mode: str) -> tuple[str, ...]:
+    """Digest the Arrow IPC tables and collect the entry IDs in permutation order."""
+    hasher = get_default_arrow_hasher()
+    snapshot = []
+    for order in itertools.permutations(_tied_join_inputs(arity)):
+        table, rows = _tied_join_outputs(mode, Join(), order)
+        output = pa.BufferOutputStream()
+        with pa.ipc.new_stream(output, table.schema) as writer:
+            writer.write_table(table.combine_chunks())
+        snapshot.append(sha256(output.getvalue().to_pybytes()).hexdigest())
+        snapshot.extend(entry_id(hasher, tag, data).to_string() for tag, data in rows)
+    return tuple(snapshot)
+
+
+# Captured from origin/main at 37f78431, where all permutations and modes agree.
+@pytest.mark.parametrize(
+    ("arity", "table_digest", "expected_entry_id"),
+    [
+        (
+            2,
+            "da59e70321d0172c50fe3e828b4a1889ce7bab343e24e1c288405a43056b061e",
+            "arrow_v1:0000029a37059d124668f54cd4a141a99266d84c5ba57f4007947f0ac0bee1e88eadbf",
+        ),
+        (
+            3,
+            "c0745b28e9bfcb112a8ef786e01e9188de67c1f8c9bd15c9dc633dc6ce031bb4",
+            "arrow_v1:000002b259085d031998a9850c2a998f2e41a76e931410be81f8b1f5198dd1416d5170",
+        ),
+        (
+            4,
+            "e1f1b75a17ac2d9006a7c3bf606050703a8216db58901cb0e515c3da84e90f4a",
+            "arrow_v1:00000278a840e460fa1d24285bfec361a11ac9a3efc5d0ddea290a6683cdaec5c119fc",
+        ),
+    ],
+)
+@pytest.mark.parametrize("mode", ["sync", "rows", "batches"])
+def test_symmetric_tied_join_matches_main(
+    arity: int, mode: str, table_digest: str, expected_entry_id: str
 ) -> None:
-    source_id, record_id = "_tag_source_id", "_tag_record_id"
-    sources = [
-        pa.table({"k": [1], source_id: ["same"]}),
-        pa.table({"k": [1], source_id: ["same"], record_id: ["real"]}),
-    ]
-    inputs = [
-        ArrowTableStream(table, tag_columns=["k"], data_tags=["k"]) for table in sources
-    ]
-    assert inputs[0].pipeline_hash() == inputs[1].pipeline_hash()
-    operands = inputs[::-1] if reverse else inputs
-    columns = {"system_tags": True}
-    join = Join()
-    stream = join(*operands)
-    table = stream.as_table(columns=columns)
-    prediction, _ = join.output_schema(*operands, columns=columns)
-    suffix = inputs[0].pipeline_hash().to_hex()
-    record_name = f"{record_id}::{suffix}:0"
-    expected = {
-        f"{source_id}::{suffix}:0": "same",
-        record_name: "real",
-        f"{source_id}::{suffix}:1": "same",
-    }
-    results = [table]
-    for rows in (list(stream.iter_data()), async_rows(join, *operands)):
-        [(tag, _)] = rows
-        results.append(tag.as_table(columns=columns))
-    kernel = StreamingJoin(join, operands)
-    results.append(
-        pa.Table.from_batches(
-            [
-                result
-                for index, operand in enumerate(operands)
-                for batch in operand.as_table(columns=TRANSPORT_COLUMNS).to_batches()
-                for result in kernel.push(index, batch)
-            ]
-        )
-    )
-    for result in results:
-        assert [
-            name for name in result.column_names if name.startswith("_tag_")
-        ] == list(expected)
-        assert {
-            name: result[name][0].as_py()
-            for name in result.column_names
-            if name.startswith("_tag_")
-        } == expected
-        assert result.select(list(expected)).schema.equals(
-            table.select(list(expected)).schema, check_metadata=True
-        )
-    assert [name for name in prediction if name.startswith("_tag_")] == list(expected)
-    assert (
-        kernel.zero_row_result.as_table(columns=columns)
-        .select(list(expected))
-        .schema.equals(table.select(list(expected)).schema, check_metadata=True)
-    )
+    assert _symmetric_tie_snapshot(arity, mode) == (
+        table_digest,
+        expected_entry_id,
+    ) * math.factorial(arity)
+
+
+@pytest.mark.parametrize("arity", [2, 3, 4])
+@pytest.mark.parametrize("mode", ["sync", "rows", "batches"])
+@pytest.mark.parametrize("missing", ["_tag_source_id", "_tag_record_id", "_tag_rev"])
+@pytest.mark.parametrize("matching", [True, False])
+def test_tied_join_rejects_asymmetric_system_tag_declarations(
+    arity: int, mode: str, missing: str, matching: bool
+) -> None:
+    inputs = _tied_join_inputs(arity, missing=missing, matching=matching)
+    for order in itertools.permutations(inputs):
+        join = Join()
+        if mode == "rows":
+            with pytest.raises(ExceptionGroup) as excinfo:
+                _tied_join_outputs(mode, join, order)
+            assert excinfo.group_contains(TypeError, match="same system-tag fields")
+        else:
+            with pytest.raises(TypeError, match="same system-tag fields"):
+                _tied_join_outputs(mode, join, order)
+        with pytest.raises(TypeError, match="same system-tag fields"):
+            join.output_schema(*order, columns={"system_tags": True})
 
 
 @pytest.mark.parametrize("reverse", [False, True])
