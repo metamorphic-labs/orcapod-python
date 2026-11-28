@@ -137,6 +137,13 @@ _PIPELINE_RECORDING_FIELDS = (
 )
 
 
+def _pipeline_record_order(
+    recorded_at: datetime, result_id: bytes
+) -> tuple[datetime, bytes]:
+    """Order records of one instance by recording time, then by result UUID bytes."""
+    return recorded_at, result_id
+
+
 def _pipeline_meta_schema() -> pa.Schema:
     """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
 
@@ -3815,12 +3822,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             for index, row in enumerate(unmatched_table.to_pylist()):
                 instance = row[INSTANCE_ID_COL]
                 previous = empty_taginfo_rows.get(instance)
-                # Several rows of one instance whose results are gone: the one
-                # recorded last stands for the instance.
-                if (
-                    previous is not None
-                    and previous[PIPELINE_RECORDED_AT_COL]
-                    > row[PIPELINE_RECORDED_AT_COL]
+                # Keep the newest record for the instance, even if its result is gone.
+                if previous is not None and _pipeline_record_order(
+                    row[PIPELINE_RECORDED_AT_COL], row[constants.DATA_RECORD_ID]
+                ) <= _pipeline_record_order(
+                    previous[PIPELINE_RECORDED_AT_COL],
+                    previous[constants.DATA_RECORD_ID],
                 ):
                     continue
                 # Use OUTPUT_DATA_HASH_COL so that the downstream result cache
@@ -3852,7 +3859,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         # ------------------------------------------------------------------
         # Keep both databases' rows until the latest row of each instance is chosen.
-        # Persistent rows come last so they retain priority when recording times tie.
         # ------------------------------------------------------------------
         if ephemeral_df.height > 0 and persistent_df.height > 0:
             merged_df = pl.concat([ephemeral_df, persistent_df], how="diagonal")
@@ -4004,9 +4010,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """Return the persistent stored rows of *fetched* as a stream.
 
         The stream is built over the stored Arrow records with the internal
-        columns dropped, so every column keeps the type it was stored with. A
-        instance with several records (it was recomputed) contributes only the one
-        recorded last (``__recorded_at``).
+        columns dropped, so every column keeps the type it was stored with.
+        An instance with several records contributes only the one with the latest
+        ``__recorded_at``, breaking ties by the greater result id.
 
         Returns:
             The instance id of each row, in stream order, the stream, and the
@@ -4017,16 +4023,19 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if joined.num_rows == 0:
             return None
         all_instance_ids = cast(list[bytes], joined.column(INSTANCE_ID_COL).to_pylist())
-        # One row per instance id: when a instance has several records (it
-        # was recomputed), the one recorded last -- the latest result -- wins, in the position where the instance first
-        # appears. Ties keep the later row.
+        # Keep the winning record in the position where its instance first appears.
         recorded_at = cast(
             "list[datetime]", joined.column(PIPELINE_RECORDED_AT_COL).to_pylist()
+        )
+        result_ids = cast(
+            "list[bytes]", joined.column(constants.DATA_RECORD_ID).to_pylist()
         )
         chosen_row: dict[bytes, int] = {}
         for row, instance_id in enumerate(all_instance_ids):
             current = chosen_row.get(instance_id)
-            if current is None or recorded_at[row] >= recorded_at[current]:
+            if current is None or _pipeline_record_order(
+                recorded_at[row], result_ids[row]
+            ) > _pipeline_record_order(recorded_at[current], result_ids[current]):
                 chosen_row[instance_id] = row
         chosen_row = {
             instance: row
@@ -4046,10 +4055,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if c.startswith(constants.META_PREFIX)
             or c == constants.NODE_CONTENT_HASH_COL
         ]
-        data_ids = [
-            uuid.UUID(bytes=bytes(cast(bytes, record_id)))
-            for record_id in joined.column(constants.DATA_RECORD_ID).to_pylist()
-        ]
+        data_ids = [uuid.UUID(bytes=result_ids[row]) for row in chosen_row.values()]
         # A fall-through column is the stored tag column in its data role (ITL-1023):
         # the table states which (ITL-1019). In the stream the binding is the shared
         # name, so the marker stays with the stored table.
