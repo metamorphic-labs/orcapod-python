@@ -146,10 +146,16 @@ class _InputTap:
 
     Attributes:
         rows: The kept rows, in arrival order.
+        stream: The upstream stream describing the rows.
     """
 
-    def __init__(self, reader: ReadableChannel[tuple[TagProtocol, DataProtocol]]):
+    def __init__(
+        self,
+        reader: ReadableChannel[tuple[TagProtocol, DataProtocol]],
+        stream: StreamProtocol,
+    ) -> None:
         self._reader = reader
+        self.stream = stream
         self.rows: list[tuple[TagProtocol, DataProtocol]] = []
         self._null_sources: set[str] = set()
 
@@ -2377,7 +2383,10 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
 
             hashes = [s.pipeline_hash() for s in self._input_streams]
             operator = cast(StaticOutputOperatorPod, self._operator)
-            taps = [_InputTap(reader) for reader in inputs]
+            taps = [
+                _InputTap(reader, stream)
+                for reader, stream in zip(inputs, self._input_streams, strict=True)
+            ]
             try:
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(

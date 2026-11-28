@@ -13,12 +13,12 @@ from orcapod.types.explanation import plain_repr
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
-from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.operators.base import ProjectionType, UnaryOperator
 from orcapod.system_constants import constants
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
-from orcapod.types import ColumnConfig, ContentHash, Schema, SourceInfoValue
+from orcapod.types import ColumnConfig, ContentHash, DataType, Schema, SourceInfoValue
 from orcapod.utils import arrow_utils, schema_utils
 
 logger = logging.getLogger(__name__)
@@ -73,13 +73,7 @@ class Index(UnaryOperator):
             schema_utils.require_names_without_separator([out])
         self.out = out
         self.fail_on_miss = fail_on_miss
-        self._output_type: type = None  # type: ignore[assignment]
-        self._mode: str = ""
-        # Fallback Arrow type of the element, resolved at validation from the
-        # stream's context (``async_execute`` has no stream). ``None`` with a
-        # reason when the stream's converter cannot map the element type.
-        self._element_arrow_type_fallback: pa.DataType | None = None
-        self._element_arrow_type_error: str = ""
+        self._projections: dict[ContentHash, ProjectionType] = {}
         super().__init__(**kwargs)
 
     def rows_dropped_text(
@@ -101,20 +95,9 @@ class Index(UnaryOperator):
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, self.column, self.i, self.out)
 
-    def _output_nullable(self) -> bool:
-        """Return whether the projected column is nullable.
-
-        Nullability follows the predicted output type: the column is nullable
-        only when that type is Optional. The rule is the same for every row and
-        for the all-skipped result, so the materialized schema always equals
-        the predicted ``output_schema``.
-
-        Returns:
-            True when the predicted output type admits ``None``.
-        """
-        return type(None) in typing.get_args(self._output_type)
-
-    def _element_arrow_type(self, column_type: pa.DataType) -> pa.DataType:
+    def _element_arrow_type(
+        self, column_type: pa.DataType, projection: ProjectionType
+    ) -> pa.DataType:
         """Return the Arrow type of one element of a column of ``column_type``.
 
         The element type is read from the input column's Arrow type, so a
@@ -125,6 +108,7 @@ class Index(UnaryOperator):
 
         Args:
             column_type: Arrow type of the indexed column.
+            projection: The output type and fallback for this input.
 
         Returns:
             The Arrow type of the extracted element.
@@ -137,20 +121,30 @@ class Index(UnaryOperator):
             column_type, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)
         ):
             return cast("pa.DataType", column_type.value_type)
-        if self._element_arrow_type_fallback is None:
+        if projection.arrow_fallback is None:
             raise ValueError(
                 "Index: cannot derive the Arrow type of the element of column"
-                + f" {self.column!r}: output type {self._output_type!r} has no"
+                + f" {self.column!r}: output type {projection.python_type!r} has no"
                 + " Arrow type in the stream's context"
-                + f" ({self._element_arrow_type_error or 'not validated'})."
+                + f" ({projection.fallback_error or 'not validated'})."
             )
-        return self._element_arrow_type_fallback
+        return projection.arrow_fallback
 
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
+        """Save the output type for this input's row-channel execution."""
+        projection = self._resolve_projection(stream)
+        self._projections[stream.pipeline_hash()] = projection
+
+    def _projection_for(self, stream: StreamProtocol) -> ProjectionType:
+        """Read the type for this stream, resolving it if validation was bypassed."""
+        projection = self._projections.get(stream.pipeline_hash())
+        return self._resolve_projection(stream) if projection is None else projection
+
+    def _resolve_projection(self, stream: StreamProtocol) -> ProjectionType:
         """Validate input schema and resolve output element type.
 
         Args:
@@ -210,8 +204,7 @@ class Index(UnaryOperator):
 
         if origin is list:
             args = typing.get_args(col_type)
-            self._output_type = args[0] if args else Any  # type: ignore[assignment]
-            self._mode = "list"
+            output_type = cast(DataType, args[0] if args else Any)
         else:
             # Extension type — delegate to logical type's index_element via the
             # stream's own type converter (not a global default).
@@ -223,19 +216,9 @@ class Index(UnaryOperator):
                     f"logical type)."
                 )
             # May raise NotImplementedError for types not yet implemented
-            self._output_type = lt.index_element()
-            self._mode = "extension"
+            output_type = lt.index_element()
 
-        # Resolved now because the streaming path has no stream. A failure is
-        # deferred to the point of use: most columns never need the fallback.
-        try:
-            self._element_arrow_type_fallback = converter.python_type_to_arrow_type(
-                self._output_type
-            )
-            self._element_arrow_type_error = ""
-        except (ValueError, TypeError, NotImplementedError) as exc:
-            self._element_arrow_type_fallback = None
-            self._element_arrow_type_error = str(exc)
+        return ProjectionType.resolve(output_type, converter)
 
     # ------------------------------------------------------------------
     # Schema prediction
@@ -261,12 +244,14 @@ class Index(UnaryOperator):
         tag_schema, data_schema = stream.output_schema(
             columns=columns, all_info=all_info
         )
+        projection = self._projection_for(stream)
+        assert projection.python_type is not None
         data_dict = dict(data_schema)
 
         if self.out is None:
-            data_dict[self.column] = self._output_type
+            data_dict[self.column] = projection.python_type
         else:
-            data_dict[self.out] = self._output_type
+            data_dict[self.out] = projection.python_type
 
         return tag_schema, Schema(data_dict)
 
@@ -278,6 +263,7 @@ class Index(UnaryOperator):
         self,
         tag: TagProtocol,
         data: DataProtocol,
+        projection: ProjectionType,
     ) -> tuple[TagProtocol, DataProtocol] | None:
         """Process a single (tag, data) packet.
 
@@ -286,13 +272,10 @@ class Index(UnaryOperator):
         applied.  Returns ``None`` if the index is out of bounds and
         ``fail_on_miss=False``.
 
-        The output schema is already known at build time (``self._output_type``),
-        so a new ``Data`` object is created with the correct type directly —
-        no schema re-derivation needed at runtime.
-
         Args:
             tag: The tag for this packet.
             data: The data for this packet.
+            projection: The output type and fallback for this input.
 
         Returns:
             A ``(tag, new_data)`` pair with the projected column, or ``None``
@@ -324,12 +307,12 @@ class Index(UnaryOperator):
             return None
 
         extracted = col_val[self.i]
-        nullable = self._output_nullable()
+        nullable = projection.nullable
         if extracted is None and not nullable:
             raise ValueError(
                 f"Index: element {self.i} of column {self.column!r} is None in"
                 + f" the row with tag {tag}, but the output type"
-                + f" {self._output_type} is not Optional."
+                + f" {projection.python_type} is not Optional."
             )
 
         old_src = data.source_info().get(self.column)
@@ -346,7 +329,8 @@ class Index(UnaryOperator):
         element_field = pa.field(
             self.out or self.column,
             self._element_arrow_type(
-                arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+                arrow_utils.column_arrow_type(data.arrow_schema(), self.column),
+                projection,
             ),
             nullable=nullable,
         )
@@ -397,9 +381,10 @@ class Index(UnaryOperator):
             ValueError: If an extracted element is ``None`` but the predicted
                 output type is not Optional.
         """
+        projection = self._projection_for(stream)
         out_rows = []
         for tag, data in stream.iter_data():
-            result = self._process_one(tag, data)
+            result = self._process_one(tag, data, projection)
             if result is not None:
                 out_rows.append(result)
 
@@ -420,9 +405,9 @@ class Index(UnaryOperator):
             element_field = pa.field(
                 self.out or self.column,
                 self._element_arrow_type(
-                    arrow_utils.column_arrow_type(input_schema, self.column)
+                    arrow_utils.column_arrow_type(input_schema, self.column), projection
                 ),
-                nullable=self._output_nullable(),
+                nullable=projection.nullable,
             )
             token_name = f"{constants.SOURCE_PREFIX}{self.column}"
             input_token = input_schema.field(token_name)
@@ -474,14 +459,20 @@ class Index(UnaryOperator):
         Args:
             inputs: Single-element sequence of readable channels.
             output: Channel to send transformed packets to.
-            input_pipeline_hashes: Not used: this operator keeps system-tag
-                names as they are, so no column is named after an input's
-                pipeline hash.
+            input_pipeline_hashes: The input hash used to find its validated type.
         """
         try:
             output = WithoutMetaWriter(output)
+            projection = self._projections.get(input_pipeline_hashes[0])
+            if projection is None:
+                stream: StreamProtocol | None = getattr(inputs[0], "stream", None)
+                projection = (
+                    ProjectionType()
+                    if stream is None
+                    else self._resolve_projection(stream)
+                )
             async for tag, data in inputs[0]:
-                result = self._process_one(tag, data)
+                result = self._process_one(tag, data, projection)
                 if result is not None:
                     await output.send(result)
         finally:

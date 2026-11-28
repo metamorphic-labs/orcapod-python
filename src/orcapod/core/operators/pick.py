@@ -13,12 +13,12 @@ from orcapod.types.explanation import plain_repr
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
-from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.operators.base import ProjectionType, UnaryOperator
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
-from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.types import ColumnConfig, ContentHash, DataType, Schema
 from orcapod.utils import arrow_utils, schema_utils
 
 logger = logging.getLogger(__name__)
@@ -75,13 +75,7 @@ class Pick(UnaryOperator):
             schema_utils.require_names_without_separator([out])
         self.out = out
         self.fail_on_miss = fail_on_miss
-        self._output_type: type = None  # type: ignore[assignment]
-        self._mode: str = ""
-        # Fallback Arrow type of the value, resolved at validation from the
-        # stream's context (``async_execute`` has no stream). ``None`` with a
-        # reason when the stream's converter cannot map the value type.
-        self._value_arrow_type_fallback: pa.DataType | None = None
-        self._value_arrow_type_error: str = ""
+        self._projections: dict[ContentHash, ProjectionType] = {}
         super().__init__(**kwargs)
 
     def rows_dropped_text(
@@ -93,7 +87,7 @@ class Pick(UnaryOperator):
         """What the step drops, for ``explain()``: rows missing the key of a ``dict``
         column, unless a miss raises. A struct field is known to exist (checked when the
         step is built), so a struct projection drops none."""
-        if self.fail_on_miss or self._mode != "map":
+        if self.fail_on_miss or self._projection_for(inputs[0]).known_key:
             return None
         return (
             f"rows whose {plain_repr(self.column)} has no key "
@@ -106,20 +100,9 @@ class Pick(UnaryOperator):
         # not the functional transformation.
         return (self.__class__.__name__, self.column, self.key, self.out)
 
-    def _output_nullable(self) -> bool:
-        """Return whether the projected column is nullable.
-
-        Nullability follows the predicted output type: the column is nullable
-        only when that type is Optional. The rule is the same for every row and
-        for the all-skipped result, so the materialized schema always equals
-        the predicted ``output_schema``.
-
-        Returns:
-            True when the predicted output type admits ``None``.
-        """
-        return type(None) in typing.get_args(self._output_type)
-
-    def _value_arrow_type(self, column_type: pa.DataType) -> pa.DataType:
+    def _value_arrow_type(
+        self, column_type: pa.DataType, projection: ProjectionType
+    ) -> pa.DataType:
         """Return the Arrow type of the value picked from a ``column_type`` column.
 
         The value type is read from the input column's Arrow type: a ``map``
@@ -131,6 +114,7 @@ class Pick(UnaryOperator):
 
         Args:
             column_type: Arrow type of the picked column.
+            projection: The output type and fallback for this input.
 
         Returns:
             The Arrow type of the extracted value.
@@ -145,20 +129,30 @@ class Pick(UnaryOperator):
             entry = cast("pa.DataType", column_type.value_type)
             if isinstance(entry, pa.StructType) and entry.get_field_index("value") >= 0:
                 return cast("pa.DataType", entry.field("value").type)  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
-        if self._value_arrow_type_fallback is None:
+        if projection.arrow_fallback is None:
             raise ValueError(
                 f"Pick: cannot derive the Arrow type of key {self.key!r} of column"
-                + f" {self.column!r}: output type {self._output_type!r} has no"
+                + f" {self.column!r}: output type {projection.python_type!r} has no"
                 + " Arrow type in the stream's context"
-                + f" ({self._value_arrow_type_error or 'not validated'})."
+                + f" ({projection.fallback_error or 'not validated'})."
             )
-        return self._value_arrow_type_fallback
+        return projection.arrow_fallback
 
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:
+        """Save the output type for this input's row-channel execution."""
+        projection = self._resolve_projection(stream)
+        self._projections[stream.pipeline_hash()] = projection
+
+    def _projection_for(self, stream: StreamProtocol) -> ProjectionType:
+        """Read the type for this stream, resolving it if validation was bypassed."""
+        projection = self._projections.get(stream.pipeline_hash())
+        return self._resolve_projection(stream) if projection is None else projection
+
+    def _resolve_projection(self, stream: StreamProtocol) -> ProjectionType:
         """Validate input schema and resolve output type.
 
         Args:
@@ -219,8 +213,7 @@ class Pick(UnaryOperator):
         if origin is dict:
             # dict[K, V] — dynamic key lookup at runtime
             args = typing.get_args(col_type)
-            self._output_type = args[1] if args else Any  # type: ignore[assignment]
-            self._mode = "map"
+            output_type = cast(DataType, args[1] if args else Any)
         else:
             # Extension type — delegate to logical type's pick_field via the
             # stream's own type converter (not a global default).
@@ -232,7 +225,7 @@ class Pick(UnaryOperator):
                     f"logical type)."
                 )
             try:
-                self._output_type = lt.pick_field(self.key)
+                output_type = lt.pick_field(self.key)
             except NotImplementedError as exc:
                 # A logical type without keyed access is an invalid pick target,
                 # reported like every other invalid operator input (ITL-883).
@@ -241,18 +234,10 @@ class Pick(UnaryOperator):
                     f"logical type {lt.logical_type_name!r} does not support pick "
                     f"(keyed field access): {exc}"
                 ) from exc
-            self._mode = "struct"
 
-        # Resolved now because the streaming path has no stream. A failure is
-        # deferred to the point of use: most columns never need the fallback.
-        try:
-            self._value_arrow_type_fallback = converter.python_type_to_arrow_type(
-                self._output_type
-            )
-            self._value_arrow_type_error = ""
-        except (ValueError, TypeError, NotImplementedError) as exc:
-            self._value_arrow_type_fallback = None
-            self._value_arrow_type_error = str(exc)
+        return ProjectionType.resolve(
+            output_type, converter, known_key=origin is not dict
+        )
 
     # ------------------------------------------------------------------
     # Schema prediction
@@ -278,14 +263,16 @@ class Pick(UnaryOperator):
         tag_schema, data_schema = stream.output_schema(
             columns=columns, all_info=all_info
         )
+        projection = self._projection_for(stream)
+        assert projection.python_type is not None
         data_dict = dict(data_schema)
 
         if self.out is None:
             # Replace existing column type in-place
-            data_dict[self.column] = self._output_type
+            data_dict[self.column] = projection.python_type
         else:
             # Add new column; source column type unchanged
-            data_dict[self.out] = self._output_type
+            data_dict[self.out] = projection.python_type
 
         return tag_schema, Schema(data_dict)
 
@@ -297,6 +284,7 @@ class Pick(UnaryOperator):
         self,
         tag: TagProtocol,
         data: DataProtocol,
+        projection: ProjectionType,
     ) -> tuple[TagProtocol, DataProtocol] | None:
         """Process a single (tag, data) packet.
 
@@ -304,13 +292,10 @@ class Pick(UnaryOperator):
         and returns a new (tag, data) pair with the projection applied.
         Returns ``None`` if the key is absent and ``fail_on_miss=False``.
 
-        The output schema is already known at build time (``self._output_type``),
-        so a new ``Data`` object is created with the correct type directly —
-        no schema re-derivation needed at runtime.
-
         Args:
             tag: The tag for this packet.
             data: The data for this packet.
+            projection: The output type and fallback for this input.
 
         Returns:
             A ``(tag, new_data)`` pair with the projected column, or ``None``
@@ -323,7 +308,7 @@ class Pick(UnaryOperator):
         """
         col_val = data[self.column]
 
-        if self._mode == "struct":
+        if projection.known_key:
             # Statically guaranteed to exist; any access error is a bug.
             extracted = col_val[self.key]
         else:  # map
@@ -341,12 +326,12 @@ class Pick(UnaryOperator):
                 return None
             extracted = col_val[self.key]
 
-        nullable = self._output_nullable()
+        nullable = projection.nullable
         if extracted is None and not nullable:
             raise ValueError(
                 f"Pick: value of key {self.key!r} in column {self.column!r} is"
                 + f" None in the row with tag {tag}, but the output type"
-                + f" {self._output_type} is not Optional."
+                + f" {projection.python_type} is not Optional."
             )
 
         old_src = data.source_info().get(self.column)
@@ -355,7 +340,8 @@ class Pick(UnaryOperator):
         value_field = pa.field(
             self.out or self.column,
             self._value_arrow_type(
-                arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+                arrow_utils.column_arrow_type(data.arrow_schema(), self.column),
+                projection,
             ),
             nullable=nullable,
         )
@@ -404,9 +390,10 @@ class Pick(UnaryOperator):
             RuntimeError: If ``fail_on_miss=True`` and any packet's dict
                 lacks ``self.key``.
         """
+        projection = self._projection_for(stream)
         out_rows = []
         for tag, data in stream.iter_data():
-            result = self._process_one(tag, data)
+            result = self._process_one(tag, data, projection)
             if result is not None:
                 out_rows.append(result)
 
@@ -424,9 +411,9 @@ class Pick(UnaryOperator):
             value_field = pa.field(
                 self.out or self.column,
                 self._value_arrow_type(
-                    arrow_utils.column_arrow_type(input_schema, self.column)
+                    arrow_utils.column_arrow_type(input_schema, self.column), projection
                 ),
-                nullable=self._output_nullable(),
+                nullable=projection.nullable,
             )
             # A picked value's token is a string (``_process_one``), typed by the
             # source-info type rule.
@@ -471,14 +458,20 @@ class Pick(UnaryOperator):
         Args:
             inputs: Single-element sequence of readable channels.
             output: Channel to send transformed packets to.
-            input_pipeline_hashes: Not used: this operator keeps system-tag
-                names as they are, so no column is named after an input's
-                pipeline hash.
+            input_pipeline_hashes: The input hash used to find its validated type.
         """
         try:
             output = WithoutMetaWriter(output)
+            projection = self._projections.get(input_pipeline_hashes[0])
+            if projection is None:
+                stream: StreamProtocol | None = getattr(inputs[0], "stream", None)
+                projection = (
+                    ProjectionType()
+                    if stream is None
+                    else self._resolve_projection(stream)
+                )
             async for tag, data in inputs[0]:
-                result = self._process_one(tag, data)
+                result = self._process_one(tag, data, projection)
                 if result is not None:
                     await output.send(result)
         finally:
