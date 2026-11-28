@@ -212,6 +212,7 @@ class AsyncPipelineOrchestrator:
         from orcapod.core.operators.static_output_pod import (
             rows_on_read,
         )
+        from orcapod.pipeline.edges import node_inputs
         from orcapod.pipeline.observer import NoOpObserver
 
         run_id = run_id or str(uuid.uuid4())
@@ -226,27 +227,34 @@ class AsyncPipelineOrchestrator:
             topo_order = list(graph.topological_sort())
             buf = self._buffer_size
 
-            # Build edge maps
-            out_edges: dict[Any, list[Any]] = defaultdict(list)
-            in_edges: dict[Any, list[Any]] = defaultdict(list)
-            for upstream_node, downstream_node in graph.edges():
-                out_edges[upstream_node].append(downstream_node)
-                in_edges[downstream_node].append(upstream_node)
+            # One edge per input of a node, in position order: an upstream given to
+            # two inputs (``MergeJoin()(a, a)``) is two edges, each with its own
+            # reader (ITL-1419). An edge is (upstream, node, index of the input).
+            in_edges: dict[Any, list[tuple[Any, Any, int]]] = {}
+            out_edges: dict[Any, list[tuple[Any, Any, int]]] = defaultdict(list)
+            for node in topo_order:
+                # A node with no predecessor in the graph (a source, or a node the
+                # run holds without its inputs) reads no edge.
+                upstreams = node_inputs(node, graph) if graph.predecessors(node) else []
+                edges = [(upstream, node, i) for i, upstream in enumerate(upstreams)]
+                in_edges[node] = edges
+                for edge in edges:
+                    out_edges[edge[0]].append(edge)
 
             # Create channels for each edge
             node_output_channels: dict[Any, Channel | BroadcastChannel] = {}
-            edge_readers: dict[tuple[Any, Any], Any] = {}
+            edge_readers: dict[tuple[Any, Any, int], Any] = {}
 
-            for node, downstreams in out_edges.items():
-                if len(downstreams) == 1:
+            for node, edges in out_edges.items():
+                if len(edges) == 1:
                     ch = Channel(buffer_size=buf)
                     node_output_channels[node] = ch
-                    edge_readers[(node, downstreams[0])] = ch.reader
+                    edge_readers[edges[0]] = ch.reader
                 else:
                     bch = BroadcastChannel(buffer_size=buf)
                     node_output_channels[node] = bch
-                    for ds in downstreams:
-                        edge_readers[(node, ds)] = bch.add_reader()
+                    for edge in edges:
+                        edge_readers[edge] = bch.add_reader()
 
             # Terminal nodes need sink channels
             terminal_channels: list[Channel] = []
@@ -275,8 +283,8 @@ class AsyncPipelineOrchestrator:
                         # Not run: the rows of its current run feed its successors. Its
                         # own inputs are read and discarded, so no producer blocks on
                         # a channel nobody reads.
-                        for upstream in in_edges.get(node, []):
-                            tg.create_task(_drain(edge_readers[(upstream, node)]))
+                        for edge in in_edges[node]:
+                            tg.create_task(_drain(edge_readers[edge]))
                         _start_node(
                             tg,
                             failed_nodes,
@@ -292,12 +300,7 @@ class AsyncPipelineOrchestrator:
                             node.async_execute(writer, observer=effective_observer),
                         )
                     elif is_function_node(node) or is_side_effect_function_node(node):
-                        predecessors = in_edges.get(node, [])
-                        if len(predecessors) != 1:
-                            raise ValueError(
-                                f"FunctionNode expects exactly 1 upstream, got {len(predecessors)}"
-                            )
-                        input_reader = edge_readers[(predecessors[0], node)]
+                        (input_reader,) = [edge_readers[e] for e in in_edges[node]]
                         _start_node(
                             tg,
                             failed_nodes,
@@ -312,18 +315,7 @@ class AsyncPipelineOrchestrator:
                             ),
                         )
                     elif is_operator_node(node):
-                        predecessors = in_edges.get(node, [])
-                        # Sort by node.upstreams order for non-commutative operators
-                        upstream_order = {
-                            id(s): i for i, s in enumerate(node.upstreams)
-                        }
-                        sorted_preds = sorted(
-                            predecessors,
-                            key=lambda p: upstream_order.get(id(p), 0),
-                        )
-                        input_readers = [
-                            edge_readers[(upstream, node)] for upstream in sorted_preds
-                        ]
+                        input_readers = [edge_readers[e] for e in in_edges[node]]
                         _start_node(
                             tg,
                             failed_nodes,
@@ -336,12 +328,7 @@ class AsyncPipelineOrchestrator:
                             ),
                         )
                     elif is_side_effect_node(node):
-                        predecessors = in_edges.get(node, [])
-                        if not predecessors:
-                            raise ValueError(
-                                "SideEffectNode expects exactly 1 upstream, got 0"
-                            )
-                        input_reader = edge_readers[(predecessors[0], node)]
+                        (input_reader,) = [edge_readers[e] for e in in_edges[node]]
                         # In a load-only run the node passes its rows on and delivers
                         # nothing.
                         _start_node(

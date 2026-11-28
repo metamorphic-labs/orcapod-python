@@ -17,6 +17,13 @@ from orcapod.side_effects import SideEffectNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
+from orcapod.pipeline.edges import (
+    Position,
+    distinct_pairs,
+    edge_sort_key,
+    input_positions,
+    positioned_edges,
+)
 from orcapod.protocols import core_protocols as cp
 from orcapod.utils.lazy_module import LazyModule
 
@@ -297,7 +304,9 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             "orcapod_version": orcapod.__version__,
             "pipeline": {"name": list(self._name)},
             "nodes": nodes,
-            "edges": [list(edge) for edge in self._graph_edges],
+            # Each (upstream, node) pair once, as before ITL-1419: an operator's
+            # ``inputs`` list gives the argument order positions are rebuilt from.
+            "edges": [list(pair) for pair in distinct_pairs(self._graph_edges)],
         }
 
         path = Path(path)
@@ -372,6 +381,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         reconstructed: dict[str, GraphNode] = {}
         # Each operator's input keys in argument order, for the job loader (ITL-1417).
         loaded_input_keys: dict[str, list[str]] = {}
+        # Each node's positioned edges (ITL-1419), from its inputs in argument order.
+        positioned: dict[str, list[tuple[str, str, Position]]] = {}
 
         for node_hash in topo_order:
             descriptor = nodes_data.get(node_hash)
@@ -584,6 +595,18 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         operator, upstream_nodes, up_hashes, descriptor.get("label")
                     )
                 loaded_input_keys[node_hash] = list(up_hashes)
+                # Asked of the rebuilt input streams, never of their keys; with an
+                # input not restored, the inputs are in the file's argument order.
+                positioned[node_hash] = positioned_edges(
+                    node_hash,
+                    list(up_hashes),
+                    input_positions(
+                        operator if len(upstream_nodes) == len(up_hashes) else None,
+                        upstream_nodes
+                        if len(upstream_nodes) == len(up_hashes)
+                        else up_hashes,
+                    ),
+                )
                 node = OperatorNode.from_descriptor(
                     descriptor,
                     operator=operator,
@@ -615,6 +638,17 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
 
         # Keep old files' edge order only for the legacy input-order fallback above.
         edges = sorted((up, down) for up, down in edges)
+        # A node with one input (a function or side-effect node), and one this version
+        # does not restore, has its inputs in the order the file gives.
+        for node_hash, up_hashes in upstream_map.items():
+            if node_hash not in positioned:
+                positioned[node_hash] = positioned_edges(
+                    node_hash, up_hashes, input_positions(None, up_hashes)
+                )
+        graph_edges = sorted(
+            (edge for node_edges in positioned.values() for edge in node_edges),
+            key=edge_sort_key,
+        )
         reconstructed = cls._ordered_node_map(reconstructed, edge_graph)
 
         # Build Pipeline instance
@@ -650,7 +684,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 node_dag.add_edge(up_node, down_node)
         pipeline._node_graph = node_dag
 
-        pipeline._graph_edges = edges
+        pipeline._graph_edges = graph_edges
         pipeline._hash_graph = nx.DiGraph()
         for up_hash, down_hash in edges:
             pipeline._hash_graph.add_edge(up_hash, down_hash)

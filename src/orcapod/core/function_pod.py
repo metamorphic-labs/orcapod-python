@@ -644,8 +644,21 @@ class _FunctionPodBase(TraceableBase):
             raise ValueError("At least one input stream is required")
         elif len(streams) > 1:
             # TODO: simplify the multi-stream handling logic
+            from orcapod.core.operators.repeated_operands import (
+                RepeatedOperandError,
+            )
+
             multi_stream_handler = self.multi_stream_handler()
-            joined_stream = multi_stream_handler.process(*streams)
+            try:
+                joined_stream = multi_stream_handler.process(*streams)
+            except RepeatedOperandError as err:
+                # Recording the join forms its identity: the join is named, this
+                # function added as context (ITL-1419). Nothing is formed here that
+                # would not be formed anyway.
+                err.add_context(
+                    f"the inputs of the function pod of {self.canonical_function_name!r}"
+                )
+                raise
             return joined_stream
         return streams[0]
 
@@ -859,7 +872,25 @@ class _FunctionPodBase(TraceableBase):
         return self.process(input_stream, label=label)
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
-        return self.multi_stream_handler().argument_symmetry(streams)
+        """The symmetry of the join the pod puts its inputs through.
+
+        Raises:
+            RepeatedOperandError: If two inputs have one identity (ITL-1419; not
+                supported yet, a stopgap until ITL-1511): the join that formed the set
+                is named, and this function added as context.
+        """
+        from orcapod.core.operators.repeated_operands import (
+            RepeatedOperandError,
+            read_argument_symmetry,
+        )
+
+        try:
+            return read_argument_symmetry(self.multi_stream_handler(), streams)
+        except RepeatedOperandError as err:
+            err.add_context(
+                f"the inputs of the function pod of {self.canonical_function_name!r}"
+            )
+            raise
 
     def output_schema(
         self,

@@ -253,9 +253,9 @@ def main() -> None:
 
     sub("Site 13 — snapshot_hash (deterministic from leaf content hashes)")
     # Reproduce PipelineJob.run() algorithm from the compiled node map.
-    # Edge (u_hash, v_hash): u is upstream → v is downstream.
+    # Edge (u_hash, v_hash, position): u is upstream → v is downstream.
     # Leaf = node whose hash does NOT appear as the upstream (u) in any edge.
-    upstream_set = {u_hash for u_hash, _ in job._graph_edges}
+    upstream_set = {u_hash for u_hash, _, _ in job._graph_edges}
     # Each leaf hash enters with its label, as PipelineJob.run() feeds it (ITL-1154).
     leaf_hashes = sorted(
         n.content_hash().to_string()

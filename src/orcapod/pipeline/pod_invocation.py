@@ -76,7 +76,9 @@ class PodInvocation(ContentIdentifiableBase):
         This matches the identity structure of the corresponding compiled
         node, ensuring hash equality between invocation and node.
         """
-        return (self._pod, self._pod.argument_symmetry(self._input_streams))
+        from orcapod.core.operators.repeated_operands import read_argument_symmetry
+
+        return (self._pod, read_argument_symmetry(self._pod, self._input_streams))
 
     def pipeline_identity_structure(self) -> Any:
         """Return same as ``identity_structure()``."""

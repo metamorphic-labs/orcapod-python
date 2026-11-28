@@ -342,11 +342,8 @@ class BinaryOperator(StaticOutputOperatorPod):
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         if self.is_commutative():
-            # return as symmetric group
             return frozenset(streams)
-        else:
-            # return as ordered group
-            return tuple(streams)
+        return tuple(streams)
 
     async def async_execute(
         self,

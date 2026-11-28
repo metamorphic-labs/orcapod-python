@@ -277,8 +277,11 @@ class Rejoin(Join):
     each branch went through operators that keep system tags (filters, column selection
     and renaming, ``AddTags``, function pods) and no ``Join``, ``GroupBy`` or ``Batch``.
     Data columns must be disjoint, as in ``Join``, and a data-tag in several inputs is
-    one column. These are the only refusals: each is read from the inputs' columns,
-    none from their rows.
+    one column. These refusals are read from the inputs' columns, none from their rows.
+    As for ``Join``, the inputs form a set today, so one stream given twice (two inputs of
+    one identity) is not supported yet: it is refused when the identity is formed, by
+    hashing the result or recording the step (``RepeatedOperandError``, ITL-1419; a
+    stopgap until ITL-1511). For now give each branch once.
 
     Rejoin is an inner join on every column its inputs share (developer, November 22,
     2026, ITL-1355): the system-tag columns, a user tag several inputs have, the source

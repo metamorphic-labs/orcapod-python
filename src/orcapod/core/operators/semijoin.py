@@ -309,8 +309,14 @@ class SemiJoin(BinaryOperator):
             SemiJoinIgnoredColumnWarning: Once per operator and set of names, when
                 the inputs share a name that is not a tag on both sides (ITL-1088).
         """
+        from orcapod.core.operators.repeated_operands import RepeatedOperandError
+
         try:
             common_keys = self._checked_match_keys(left_stream, right_stream)
+        except RepeatedOperandError:
+            # An input's own refusal (one stream given twice upstream, ITL-1419) passes
+            # through as it is: its type and the pod that got the repeat.
+            raise
         except Exception as e:
             raise InputValidationError(
                 f"Input streams are not compatible for semi-join: {e}"

@@ -202,9 +202,15 @@ class Join(NonZeroInputOperator):
 
     def validate_nonzero_inputs(self, *streams: StreamProtocol) -> None:
         """Validate that input streams are compatible for joining."""
+        from orcapod.core.operators.repeated_operands import RepeatedOperandError
+
         # TODO: add more helpful validation
         try:
             self.output_schema(*streams)
+        except RepeatedOperandError:
+            # An input's own refusal (one stream given twice upstream, ITL-1419) passes
+            # through as it is: its type and the pod that got the repeat.
+            raise
         except Exception as e:
             raise InputValidationError(f"Input streams are not compatible: {e}") from e
 
@@ -215,6 +221,7 @@ class Join(NonZeroInputOperator):
         return sorted(streams, key=lambda s: s.pipeline_hash().to_hex())
 
     def argument_symmetry(self, streams: Collection) -> ArgumentGroup:
+        """The inputs as a set because ``Join`` is commutative."""
         return frozenset(streams)
 
     def output_schema(

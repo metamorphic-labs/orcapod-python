@@ -103,6 +103,20 @@ order, so `Join()(a, b)` and `Join()(b, a)` have the same columns in the same or
 ordered operators such as `SemiJoin` and `MergeJoin` keep operand order; either way, address
 columns by name rather than by position.
 
+A commutative operator such as `Join` or `Rejoin`, or a function pod, raises
+`RepeatedOperandError` when it forms its identity from an operand set containing the same
+stream twice. Two separately built sources with the same source ID and schema count as one
+identity. Use the ordered `MergeJoin()(d, d)` for a self-join in a job.
+
+The developer approved this stopgap on 2026-11-27. A standalone row read such as
+`Join()(d, d).as_table()` or a function pod's row read over several inputs can proceed when
+it skips identity formation. The same invocation is refused in a job. ITL-1511 will allow
+repeated operands with a unique/repeat toggle and remove this discrepancy.
+
+**Known limit.** The refusal covers flat unordered declarations, including every
+commutative operator Orcapod ships. Mixed or nested unordered groups are unchecked.
+ITL-1548 tracks how operators declare argument symmetry alongside ITL-1511.
+
 ```python
 from orcapod.sources import DictSource
 from orcapod.operators import Join

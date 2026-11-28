@@ -26,6 +26,7 @@ from orcapod.errors import (
 )
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
+from orcapod.pipeline.edges import distinct_pairs, edge_sort_key
 from orcapod.pipeline.node_run import (
     RunPlan,
     check_sources,
@@ -833,12 +834,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 dict(self._hash_graph.nodes[old_h]) if old_h in self._hash_graph else {}
             )
             bp_hash_graph.add_node(new_h, **old_attrs)
+        # Each edge keeps its position (ITL-1419): the blueprint node has the job
+        # node's pod and its inputs in the same argument order.
         new_graph_edges = sorted(
-            (old_to_new[u], old_to_new[v])
-            for u, v in self._graph_edges
-            if u in old_to_new and v in old_to_new
+            (
+                (old_to_new[u], old_to_new[v], position)
+                for u, v, position in self._graph_edges
+                if u in old_to_new and v in old_to_new
+            ),
+            key=edge_sort_key,
         )
-        bp_hash_graph.add_edges_from(new_graph_edges)
+        bp_hash_graph.add_edges_from(distinct_pairs(new_graph_edges))
 
         pipeline = Pipeline(name=self._name, auto_compile=False)
         pipeline._hash_graph = bp_hash_graph
@@ -862,7 +868,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         bp_dag: OrcaDAG = OrcaDAG()
         for node in pipeline._persistent_node_map.values():
             bp_dag.add_node(node)
-        for up_h, down_h in new_graph_edges:
+        for up_h, down_h in distinct_pairs(new_graph_edges):
             bp_dag.add_edge(new_node_map[up_h], new_node_map[down_h])
         pipeline._node_graph = bp_dag
 
@@ -1303,7 +1309,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
         hash_dag: OrcaDAG[str] = OrcaDAG()
-        for u, v in self._graph_edges:
+        for u, v, _ in self._graph_edges:
             hash_dag.add_edge(u, v)
         for node_hash in self._persistent_node_map:
             if node_hash not in hash_dag:
@@ -1355,7 +1361,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         for node_hash, node in self._persistent_node_map.items():
             if node_hash not in excluded_hashes:
                 exec_dag.add_node(node)
-        for u_hash, v_hash in self._graph_edges:
+        for u_hash, v_hash in distinct_pairs(self._graph_edges):
             if (
                 u_hash not in excluded_hashes
                 and v_hash not in excluded_hashes
@@ -2141,7 +2147,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         job_dag: OrcaDAG = OrcaDAG()
         for node in job._persistent_node_map.values():
             job_dag.add_node(node)
-        for u_hash, v_hash in job._graph_edges:
+        for u_hash, v_hash in distinct_pairs(job._graph_edges):
             u_node = job._persistent_node_map.get(u_hash)
             v_node = job._persistent_node_map.get(v_hash)
             if u_node is not None and v_node is not None:

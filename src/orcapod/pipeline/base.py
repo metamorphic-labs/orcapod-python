@@ -11,6 +11,13 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 from orcapod.core.nodes.function_node import FunctionNodeBase
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
 from orcapod.pipeline.dag import OrcaDAG
+from orcapod.pipeline.edges import (
+    Position,
+    distinct_pairs,
+    edge_sort_key,
+    input_positions,
+    positioned_edges,
+)
 from orcapod.pipeline.pod_invocation import (
     FunctionInvocation,
     OperatorInvocation,
@@ -141,7 +148,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # Populated from _persistent_node_map / _hash_graph at end of compile().
         self._node_lut: dict[str, Any] = {}  # hash → non-source compiled node
         self._upstreams: dict[str, Any] = {}  # hash → source compiled node
-        self._graph_edges: list[tuple[str, str]] = []  # edge list from _hash_graph
+        # (upstream key, node key, position), sorted: one edge per input (ITL-1419).
+        self._graph_edges: list[tuple[str, str, Position]] = []
 
     # ------------------------------------------------------------------
     # Properties
@@ -335,6 +343,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 than the pipeline's streams read it under now, or two of its inputs
                 read one source under two restrictions (ITL-1218), whatever streams
                 lead there. Nothing is recorded then.
+            InputValidationError: If the pod is commutative and two of its inputs have
+                one identity. Forming the invocation's identity raises
+                ``RepeatedOperandError`` as a stopgap until ITL-1511.
         """
         from orcapod.pipeline.restrictions import require_one_restriction
 
@@ -352,8 +363,10 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         require_one_restriction([*self._held_streams(), *inputs])
         self._remember_invocation(key, invocation)
         self._hash_graph.add_node(key)
+        self._hash_graph.add_edges_from(
+            distinct_pairs(_invocation_edges(key, invocation))
+        )
         for upstream, upstream_hash in upstreams:
-            self._hash_graph.add_edge(upstream_hash, key)
             if upstream_hash not in self._source_streams:
                 self._source_streams[upstream_hash] = upstream
 
@@ -625,11 +638,21 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         self._nodes.update((node.label, node) for node in node_map.values())
 
         # 5. Build node_graph (OrcaDAG with node objects as vertices).
-        graph_edges = sorted(self._hash_graph.edges())
+        # One edge per input, positioned (ITL-1419); the node graph holds each
+        # (upstream, node) pair once.
+        graph_edges = sorted(
+            (
+                edge
+                for key, inv in self._invocation_lut.items()
+                if key in self._hash_graph
+                for edge in _invocation_edges(key, inv)
+            ),
+            key=edge_sort_key,
+        )
         node_dag: OrcaDAG[NodeT] = OrcaDAG()
         for node in node_map.values():
             node_dag.add_node(node)
-        for up_hash, down_hash in graph_edges:
+        for up_hash, down_hash in distinct_pairs(graph_edges):
             up_node = node_map.get(up_hash)
             down_node = node_map.get(down_hash)
             if up_node is not None and down_node is not None:
@@ -805,11 +828,25 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             key = inv.content_hash().to_string()
             instance._remember_invocation(key, inv)
             instance._hash_graph.add_node(key)
-            for upstream in inv.input_streams:
-                instance._hash_graph.add_edge(upstream.content_hash().to_string(), key)
+            instance._hash_graph.add_edges_from(
+                distinct_pairs(_invocation_edges(key, inv))
+            )
         # Also add source hashes as isolated nodes (no incoming edges)
         for h in graph.source_streams:
             if h not in instance._hash_graph:
                 instance._hash_graph.add_node(h)
         instance.compile()
         return instance
+
+
+def _invocation_edges(
+    key: str, invocation: PodInvocation
+) -> list[tuple[str, str, Position]]:
+    """The positioned edges ``(upstream key, key, position)`` into an invocation's node,
+    one per input, in argument order (ITL-1419)."""
+    inputs = tuple(invocation.input_streams)
+    return positioned_edges(
+        key,
+        [upstream.content_hash().to_string() for upstream in inputs],
+        input_positions(invocation.pod, inputs),
+    )

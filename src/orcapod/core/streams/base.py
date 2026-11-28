@@ -760,8 +760,13 @@ class StreamBase(TraceableBase):
     def upstreams(self) -> tuple[StreamProtocol, ...]: ...
 
     def identity_structure(self) -> Any:
+        from orcapod.core.operators.repeated_operands import read_argument_symmetry
+
         if self.producer is not None:
-            return (self.producer, self.producer.argument_symmetry(self.upstreams))
+            return (
+                self.producer,
+                read_argument_symmetry(self.producer, self.upstreams),
+            )
 
         raise NotImplementedError("StreamBase.identity_structure")
 

@@ -116,7 +116,7 @@ class SyncPipelineOrchestrator:
                 elif is_source_node(node):
                     outputs[node] = node.execute(observer=effective_observer)
                 elif is_function_node(node) or is_side_effect_function_node(node):
-                    input_stream = self._single_input(node, graph, outputs)
+                    (input_stream,) = self._inputs(node, graph, outputs)
                     outputs[node] = node.execute(
                         input_stream,
                         observer=effective_observer,
@@ -125,12 +125,12 @@ class SyncPipelineOrchestrator:
                         load_only=load_only,
                     )
                 elif is_operator_node(node):
-                    input_streams = self._ordered_inputs(node, graph, outputs)
+                    input_streams = self._inputs(node, graph, outputs)
                     outputs[node] = node.execute(
                         *input_streams, observer=effective_observer, load_only=load_only
                     )
                 elif is_side_effect_node(node):
-                    input_stream = self._single_input(node, graph, outputs)
+                    (input_stream,) = self._inputs(node, graph, outputs)
                     # In a load-only run the node passes its rows on and delivers nothing.
                     outputs[node] = node.execute(
                         input_stream,
@@ -171,37 +171,20 @@ class SyncPipelineOrchestrator:
                 effective_observer.on_run_end(run_id)
 
     @staticmethod
-    def _single_input(
-        node: Any,
-        graph: "GraphProtocol[Any]",
-        outputs: dict[Any, StreamProtocol],
-    ) -> StreamProtocol:
-        """The output stream of a node's one predecessor (function and side-effect nodes)."""
-        predecessors = list(graph.predecessors(node))
-        if len(predecessors) != 1:
-            raise ValueError(
-                f"FunctionNode expects exactly 1 upstream, got {len(predecessors)}"
-            )
-        from orcapod.core.operators.static_output_pod import at_edge
-
-        return at_edge(outputs[predecessors[0]])
-
-    @staticmethod
-    def _ordered_inputs(
+    def _inputs(
         node: Any,
         graph: "GraphProtocol[Any]",
         outputs: dict[Any, StreamProtocol],
     ) -> list[StreamProtocol]:
-        """The output streams of an operator node's predecessors, in ``node.upstreams`` order."""
-        predecessors = list(graph.predecessors(node))
-        upstream_order = {id(upstream): i for i, upstream in enumerate(node.upstreams)}
-        sorted_preds = sorted(
-            predecessors,
-            key=lambda p: upstream_order.get(id(p), 0),
-        )
-        from orcapod.core.operators.static_output_pod import at_edge
+        """The output stream of each of a node's input edges, in position order.
 
-        return [at_edge(outputs[p]) for p in sorted_preds]
+        One stream per edge: an upstream given to two inputs (``MergeJoin()(a, a)``) is
+        read at both (ITL-1419). A held upstream's stream feeds every position alike.
+        """
+        from orcapod.core.operators.static_output_pod import at_edge
+        from orcapod.pipeline.edges import node_inputs
+
+        return [at_edge(outputs[upstream]) for upstream in node_inputs(node, graph)]
 
     @staticmethod
     def _release_built_inputs(
