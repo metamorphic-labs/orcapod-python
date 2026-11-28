@@ -560,10 +560,6 @@ def test_a_same_typed_swap_is_never_served_the_other_orders_rows_silently(
     assert served_its_own or warned
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1254: a dict returned where a tuple is declared is iterated by its keys",
-)
 def test_a_dict_returned_for_a_tuple_annotation_is_refused() -> None:
     def first_and_second(a: str, b: str) -> tuple[str, str]:
         # The defect under test: a dict where the annotation declares a tuple.

@@ -11,6 +11,7 @@ import pyarrow as pa
 
 from orcapod.errors import InputValidationError
 from orcapod.types import ContentHash, Schema, SchemaLike
+from orcapod.utils.output_containers import EXCLUDED_OUTPUT_CONTAINERS
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,29 @@ def extract_function_schemas(
     input_typespec: SchemaLike | None = None,
     output_typespec: SchemaLike | Sequence[type] | None = None,
 ) -> tuple[Schema, Schema]:
+    """Extract the input and output schemas of a function.
+
+    Args:
+        func: Function whose signature supplies inferred types.
+        output_keys: Output column names in return order.
+        input_typespec: Overrides for inferred parameter types.
+        output_typespec: Overrides for inferred output types.
+
+    Returns:
+        The input and output schemas.
+    """
+    inputs, outputs, _, _ = extract_function_schemas_with_container(
+        func, output_keys, input_typespec, output_typespec
+    )
+    return inputs, outputs
+
+
+def extract_function_schemas_with_container(
+    func: Callable[..., object],
+    output_keys: Collection[str],
+    input_typespec: SchemaLike | None = None,
+    output_typespec: SchemaLike | Sequence[type] | None = None,
+) -> tuple[Schema, Schema, type, object | None]:
     """
     Extract input and output data types from a function signature.
 
@@ -179,11 +203,11 @@ def extract_function_schemas(
             return values. For functions returning a single value, provide a single key.
             For functions returning multiple values (tuple/list), provide keys matching
             the number of return items.
-        input_types: Optional mapping of parameter names to their types. If provided,
+        input_typespec: Optional mapping of parameter names to their types. If provided,
             these types override any type annotations in the function signature for the
             specified parameters. If a parameter is not in this mapping and has no
             annotation, an error is raised.
-        output_types: Optional type specification for return values. Can be either:
+        output_typespec: Optional type specification for return values. Can be either:
             - A dict mapping output keys to types (TypeSpec)
             - A sequence of types that will be mapped to output_keys in order
             These types override any inferred types from the function's return annotation.
@@ -192,6 +216,8 @@ def extract_function_schemas(
         A tuple containing:
         - input_types_dict: Mapping of parameter names to their inferred/specified types
         - output_types_dict: Mapping of output keys to their inferred/specified types
+        - return_container: Runtime type required for several outputs, defaulting to tuple.
+        - container_annotation: Resolved annotation for several outputs, if provided.
 
     Raises:
         ValueError: In various scenarios:
@@ -207,41 +233,43 @@ def extract_function_schemas(
     Examples:
         >>> def add(x: int, y: int) -> int:
         ...     return x + y
-        >>> input_types, output_types = extract_function_data_types(add, ['result'])
-        >>> input_types
+        >>> input_types, output_types = extract_function_schemas(add, ['result'])
+        >>> dict(input_types)
         {'x': <class 'int'>, 'y': <class 'int'>}
-        >>> output_types
+        >>> dict(output_types)
         {'result': <class 'int'>}
 
         >>> def process(data: str) -> tuple[int, str]:
         ...     return len(data), data.upper()
-        >>> input_types, output_types = extract_function_data_types(
-        ...     process, ['length', 'upper_data']
+        >>> input_types, output_types, container, annotation = (
+        ...     extract_function_schemas_with_container(process, ['length', 'upper_data'])
         ... )
-        >>> input_types
+        >>> dict(input_types)
         {'data': <class 'str'>}
-        >>> output_types
+        >>> dict(output_types)
         {'length': <class 'int'>, 'upper_data': <class 'str'>}
+        >>> container is tuple and annotation == tuple[int, str]
+        True
 
         >>> def legacy_func(x, y):  # No annotations
         ...     return x + y
-        >>> input_types, output_types = extract_function_data_types(
+        >>> input_types, output_types = extract_function_schemas(
         ...     legacy_func, ['sum'],
-        ...     input_types={'x': int, 'y': int},
-        ...     output_types={'sum': int}
+        ...     input_typespec={'x': int, 'y': int},
+        ...     output_typespec={'sum': int}
         ... )
-        >>> input_types
+        >>> dict(input_types)
         {'x': <class 'int'>, 'y': <class 'int'>}
-        >>> output_types
+        >>> dict(output_types)
         {'sum': <class 'int'>}
 
-        >>> def multi_return(data: list) -> tuple[int, float, str]:
+        >>> def multi_return(data: list[float]) -> tuple[int, float, str]:
         ...     return len(data), sum(data), str(data)
-        >>> input_types, output_types = extract_function_data_types(
+        >>> input_types, output_types = extract_function_schemas(
         ...     multi_return, ['count', 'total', 'repr'],
-        ...     output_types=[int, float, str]  # Override with sequence
+        ...     output_typespec=[int, float, str]  # Override with sequence
         ... )
-        >>> output_types
+        >>> dict(output_types)
         {'count': <class 'int'>, 'total': <class 'float'>, 'repr': <class 'str'>}
     """
     verified_output_types: Schema = {}
@@ -289,6 +317,8 @@ def extract_function_schemas(
     # None: the number of outputs is the number of output keys.
     if _declares_none(return_annot):
         return_annot = None
+    return_container: type = tuple
+    container_annotation = None
     inferred_output_types: Schema = {}
     if return_annot is not inspect.Signature.empty and return_annot is not None:
         output_item_types = []
@@ -299,25 +329,28 @@ def extract_function_schemas(
         elif len(output_keys) == 1:
             # if only one return key, the entire annotation is inferred as the return type
             output_item_types = [return_annot]
-        elif get_origin(return_annot) in (tuple, list) or (
-            isinstance(get_origin(return_annot), type)
-            and issubclass(get_origin(return_annot), Sequence)
-        ):
-            if get_origin(return_annot) is None:
-                # right type was specified but did not specify the type of items
+        else:
+            origin = get_origin(return_annot)
+            if isinstance(origin, type) and issubclass(
+                origin, EXCLUDED_OUTPUT_CONTAINERS
+            ):
                 raise ValueError(
-                    f"Function return type annotation {return_annot} is a Sequence type but does not specify item types."
+                    f"Function return type annotation {return_annot} cannot declare "
+                    "multiple outputs. Use tuple[T1, T2, ...] or a supported "
+                    "sequence annotation with one type per output key."
                 )
+            if not isinstance(origin, type) or not issubclass(origin, Sequence):
+                raise ValueError(
+                    f"Multiple return keys were specified but return type annotation {return_annot} is not a sequence type (list, tuple, Collection)."
+                )
+            return_container = origin
+            container_annotation = return_annot
             output_item_types = get_args(return_annot)
             if len(output_item_types) != len(output_keys):
                 raise ValueError(
                     f"Function return type annotation {return_annot} has {len(output_item_types)} items, "
                     f"but output_keys has {len(output_keys)} items."
                 )
-        else:
-            raise ValueError(
-                f"Multiple return keys were specified but return type annotation {return_annot} is not a sequence type (list, tuple, Collection)."
-            )
         for key, type_annot in zip(output_keys, output_item_types):
             inferred_output_types[key] = type_annot
     elif return_annot is None:
@@ -355,8 +388,11 @@ def extract_function_schemas(
                 f"without type parameters. Use e.g. {example} instead."
             )
 
-    return Schema(param_info, optional_fields=optional_params), Schema(
-        inferred_output_types
+    return (
+        Schema(param_info, optional_fields=optional_params),
+        Schema(inferred_output_types),
+        return_container,
+        container_annotation,
     )
 
 
