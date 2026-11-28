@@ -50,11 +50,12 @@ def test_removed_programmatic_hashing_mapping_field_is_refused(
 
 
 @pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)
-def test_removed_hashing_mapping_field_is_refused(key: str) -> None:
+@pytest.mark.parametrize("value", [6, 0, None])
+def test_removed_hashing_mapping_field_is_refused(key: str, value: int | None) -> None:
     from orcapod.config import OrcapodConfig
 
-    with pytest.raises(ValueError, match=key):
-        OrcapodConfig.from_dict({"hashing": {key: 6}})
+    with pytest.raises(ValueError, match=rf"hashing\.{key}"):
+        OrcapodConfig.from_dict({"hashing": {key: value}})
 
 
 @pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)

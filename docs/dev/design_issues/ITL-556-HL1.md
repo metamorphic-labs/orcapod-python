@@ -14,4 +14,5 @@ The `path_n_char` setting had no callers.
 column names and logical table paths. Programmatic configurations refuse the
 removed fields in typed objects and mappings. Loaders identify removed settings
 in both tables and arrays of tables. Pipeline saves omit the fields, and the
-loader accepts the null defaults older writers included automatically.
+loader accepts the null defaults older writers included automatically. The public
+mapping parser rejects the removed keys even when their values are null.

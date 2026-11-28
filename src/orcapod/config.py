@@ -32,8 +32,8 @@ def _hashing_setting_keys(section: object, *, allow_null: bool) -> Iterable[str]
             yield from _hashing_setting_keys(table, allow_null=allow_null)
 
 
-def reject_removed_hashing_settings(config: object) -> None:
-    """Refuse values for removed hash-length settings.
+def validate_descriptor_config(config: object) -> None:
+    """Refuse non-null removed hash-length settings in a saved descriptor.
 
     Older saved descriptors included null for each unset setting whenever
     another section was customized.
@@ -211,15 +211,33 @@ class OrcapodConfig:
             fall back to built-in defaults.
 
         Raises:
-            ValueError: If a removed hash-length setting has a non-null value.
+            ValueError: If a removed hash-length setting is present.
         """
         try:
-            reject_removed_hashing_settings(data)
+            _reject_removed_hashing_keys(
+                _hashing_setting_keys(data.get("hashing"), allow_null=False)
+            )
         except ValueError as exc:
             if source_path is not None:
                 exc.add_note(f"Loading configuration from {source_path}")
             raise
 
+        return cls._parse_dict(data, source_path)
+
+    @staticmethod
+    def from_node_descriptor(descriptor: Mapping[str, Any]) -> OrcapodConfig:
+        """Restore a saved node's config, accepting old null hash-length defaults."""
+        data = descriptor.get("config")
+        if data is None:
+            return DEFAULT_CONFIG
+        validate_descriptor_config(data)
+        return OrcapodConfig._parse_dict(data)
+
+    @classmethod
+    def _parse_dict(
+        cls, data: Mapping[str, Any], source_path: Path | str | None = None
+    ) -> OrcapodConfig:
+        """Parse a configuration after checking for removed hash-length settings."""
         known_sections = {"hashing", "display", "datetime"}
         path_str = f" in {source_path}" if source_path is not None else ""
 
@@ -346,7 +364,9 @@ def load_config(
         except tomllib.TOMLDecodeError as e:
             raise ValueError(f"Malformed TOML in {path}: {e}") from e
         try:
-            reject_removed_hashing_settings(data)
+            _reject_removed_hashing_keys(
+                _hashing_setting_keys(data.get("hashing"), allow_null=False)
+            )
         except ValueError as exc:
             raise ValueError(f"{path}: {exc}") from exc
 
