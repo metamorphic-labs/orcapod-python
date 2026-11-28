@@ -236,6 +236,7 @@ def test_two_jobs_binding_one_slot_each_keep_their_stored_rows(
             tag_columns=["k", "j"],
             tag_only_columns=True,
             source_id="slot",
+            label="slot",
         )
 
     database = InMemoryArrowDatabase()

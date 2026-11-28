@@ -81,6 +81,7 @@ def _sources(
             tables[name],
             tag_columns=list(tag_order),
             source_id=name,
+            label=name,
             tag_only_columns=() if data_tags else True,
         )
         for name in order
