@@ -81,3 +81,44 @@ class TestTypeGuardDispatch:
 
     def test_is_operator_node_false_for_source(self, source_node):
         assert is_operator_node(source_node) is False
+
+
+@pytest.mark.parametrize("missing", ["node_hash", "source_chain", "name_chain"])
+def test_execution_node_protocols_require_identity_accessors(missing):
+    """An execution-shaped object must expose all three public identities."""
+    from types import SimpleNamespace
+
+    from orcapod.protocols.node_protocols import (
+        FunctionNodeProtocol,
+        OperatorNodeProtocol,
+        SideEffectNodeProtocol,
+        SourceNodeProtocol,
+    )
+
+    def operation(*args, **kwargs):
+        pass
+
+    methods = dict(
+        node_type="source",
+        node_uri=(),
+        pipeline_path=(),
+        node_config=None,
+        execute=operation,
+        async_execute=operation,
+        attach_databases=operation,
+        set_ephemeral_database=operation,
+        node_hash=operation,
+        source_chain=operation,
+        name_chain=operation,
+    )
+    complete = SimpleNamespace(**methods)
+    del methods[missing]
+    incomplete = SimpleNamespace(**methods)
+    for protocol in (
+        SourceNodeProtocol,
+        FunctionNodeProtocol,
+        OperatorNodeProtocol,
+        SideEffectNodeProtocol,
+    ):
+        assert isinstance(complete, protocol)
+        assert not isinstance(incomplete, protocol)

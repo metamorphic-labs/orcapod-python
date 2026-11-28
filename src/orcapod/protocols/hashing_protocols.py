@@ -20,6 +20,7 @@ class IdentityChains:
     sources: ContentHash | None
     names: ContentHash
     unbound_slots: frozenset[str] = frozenset()
+    node_pipeline_hash: Callable[[SemanticHasherProtocol], ContentHash] | None = None
 
 
 class IdentityWalkProtocol(Protocol):

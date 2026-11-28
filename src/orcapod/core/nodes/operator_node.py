@@ -29,7 +29,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod import contexts
-from orcapod.core.identity_chains import INPUT_SYMMETRY_KEY, decode_input_symmetry
+from orcapod.core.identity_chains import INPUT_SYMMETRY_KEY, InputSymmetry
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.data_tags import (
     mark_data_tags,
@@ -85,7 +85,6 @@ from orcapod.contexts.stored import (
     with_data_context,
 )
 from orcapod.protocols.core_protocols import (
-    ArgumentGroup,
     DataProtocol,
     StreamProtocol,
     TagProtocol,
@@ -339,12 +338,13 @@ class OperatorNodeBase(StreamBase):
     # Stream interface
     # ------------------------------------------------------------------
 
-    def _identity_symmetry(self, inputs: tuple[StreamProtocol, ...]) -> ArgumentGroup:
+    def _identity_input_symmetry(
+        self, inputs: tuple[StreamProtocol, ...]
+    ) -> InputSymmetry | None:
         """Recover the grouping of a saved operator when its producer is missing."""
-        saved = self._descriptor.get(INPUT_SYMMETRY_KEY)
-        if self._operator is None and saved is not None:
-            return decode_input_symmetry(saved, inputs)
-        return super()._identity_symmetry(inputs)
+        if self._operator is None:
+            return self._descriptor.get(INPUT_SYMMETRY_KEY)
+        return super()._identity_input_symmetry(inputs)
 
     @property
     def producer(self) -> OperatorPodProtocol:

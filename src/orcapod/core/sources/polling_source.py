@@ -429,10 +429,19 @@ class PollingSource(RootSource, Generic[T]):
     # -------------------------------------------------------------------------
 
     def _identity_pipeline_hash(self, hasher: SemanticHasherProtocol) -> ContentHash:
-        """The combined hashes require a declared schema or a committed batch."""
+        """The source combination requires a declared schema or a committed batch."""
         if self._declared_arrow is None and not self._batches:
             raise ValueError("Polling source pipeline structure requires a schema.")
         return super()._identity_pipeline_hash(hasher)
+
+    def _identity_node_pipeline_hash(
+        self, hasher: SemanticHasherProtocol
+    ) -> ContentHash:
+        """Use a pending-schema structure term until the first batch commits."""
+        if self._declared_arrow is None and not self._batches:
+            self._note_provisional_identity_use()
+            return hasher.hash_object(("polling_source", None))
+        return super()._identity_node_pipeline_hash(hasher)
 
     def identity_structure(self) -> Any:
         """Identity from the source id, the impl's own identity, tags and key columns.

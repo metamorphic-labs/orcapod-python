@@ -137,10 +137,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             serialize_arrow_schemas,
             serialize_output_schema,
         )
-        from orcapod.core.identity_chains import (
-            INPUT_SYMMETRY_KEY,
-            encode_input_symmetry,
-        )
+        from orcapod.core.identity_chains import INPUT_SYMMETRY_KEY
         from orcapod.core.nodes import OperatorNode, FunctionNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
         from orcapod.core.streams.base import shared_zero_row_memo, typed_arrow_schemas
@@ -292,12 +289,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         descriptor["operator_config"] = copy.deepcopy(
                             node._descriptor["operator_config"]
                         )
-                    if node._operator is not None:
-                        symmetry = encode_input_symmetry(
-                            node.upstreams, node._operator.argument_symmetry
-                        )
-                    else:
-                        symmetry = node._descriptor.get(INPUT_SYMMETRY_KEY)
+                    symmetry = node._identity_input_symmetry(node.upstreams)  # pyright: ignore[reportPrivateUsage]  # Persist the same grouping used by the node's identity chains.
                     if symmetry is not None:
                         descriptor[INPUT_SYMMETRY_KEY] = symmetry
                     descriptor["table_scope"] = node._table_scope

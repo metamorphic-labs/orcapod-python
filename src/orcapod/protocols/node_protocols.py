@@ -24,11 +24,27 @@ if TYPE_CHECKING:
         StreamProtocol,
         TagProtocol,
     )
-    from orcapod.types import NodeConfig
+    from orcapod.types import ContentHash, NodeConfig
+
+
+class _NodeIdentityProtocol(Protocol):
+    """Public identities available on every orchestrated node."""
+
+    def node_hash(self) -> ContentHash:
+        """Combine structure and slot names."""
+        ...
+
+    def source_chain(self) -> ContentHash | None:
+        """Return the source chain, absent while a contributing slot is unbound."""
+        ...
+
+    def name_chain(self) -> ContentHash:
+        """Return the chain of source-slot names."""
+        ...
 
 
 @runtime_checkable
-class SourceNodeProtocol(Protocol):
+class SourceNodeProtocol(_NodeIdentityProtocol, Protocol):
     """Protocol for source nodes in orchestrated execution."""
 
     node_type: str
@@ -57,7 +73,7 @@ class SourceNodeProtocol(Protocol):
 
 
 @runtime_checkable
-class FunctionNodeProtocol(Protocol):
+class FunctionNodeProtocol(_NodeIdentityProtocol, Protocol):
     """Protocol for function nodes in orchestrated execution."""
 
     node_type: str
@@ -114,7 +130,7 @@ class FunctionNodeProtocol(Protocol):
 
 
 @runtime_checkable
-class OperatorNodeProtocol(Protocol):
+class OperatorNodeProtocol(_NodeIdentityProtocol, Protocol):
     """Protocol for operator nodes in orchestrated execution."""
 
     node_type: str
@@ -150,7 +166,7 @@ class OperatorNodeProtocol(Protocol):
 
 
 @runtime_checkable
-class SideEffectNodeProtocol(Protocol):
+class SideEffectNodeProtocol(_NodeIdentityProtocol, Protocol):
     """Protocol for side-effect nodes in orchestrated execution."""
 
     node_type: str

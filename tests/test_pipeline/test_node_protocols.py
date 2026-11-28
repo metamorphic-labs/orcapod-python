@@ -29,11 +29,24 @@ from orcapod.core.operators.join import Join
 from orcapod.core.operators import SelectDataColumns
 
 
+class _NodeIdentities:
+    """Identity accessors shared by the structural protocol fixtures."""
+
+    def node_hash(self):
+        return None
+
+    def source_chain(self):
+        return None
+
+    def name_chain(self):
+        return None
+
+
 class TestSourceNodeProtocol:
     def test_requires_execute(self):
         """SourceNodeProtocol requires execute method."""
 
-        class GoodSource:
+        class GoodSource(_NodeIdentities):
             node_type = "source"
 
             @property
@@ -64,7 +77,7 @@ class TestFunctionNodeProtocol:
     def test_requires_execute_and_async_execute(self):
         from orcapod.types import NodeConfig
 
-        class GoodFunction:
+        class GoodFunction(_NodeIdentities):
             node_type = "function"
 
             @property
@@ -118,7 +131,7 @@ class TestFunctionNodeProtocol:
 
 class TestOperatorNodeProtocol:
     def test_requires_execute_and_async_execute(self):
-        class GoodOperator:
+        class GoodOperator(_NodeIdentities):
             node_type = "operator"
 
             @property

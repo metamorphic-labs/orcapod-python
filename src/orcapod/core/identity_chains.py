@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from functools import cached_property
 from itertools import groupby
-from typing import TYPE_CHECKING, cast, final
+from threading import RLock
+from typing import TYPE_CHECKING, ClassVar, final
 from weakref import WeakValueDictionary
 
 from orcapod.errors import UnboundSourceError
@@ -62,21 +64,6 @@ class IdentityWalk:
             self._consumer = consumer
 
 
-@final
-class _InputOccurrence:
-    """One position in a pod's input list, with access to the original stream.
-
-    Identity-based equality keeps repetitions even inside a frozenset.
-    """
-
-    def __init__(self, stream: StreamProtocol, index: int) -> None:
-        self._stream = stream
-        self.index = index
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._stream, name)
-
-
 # JSON needs one explicit marker to distinguish symmetric groups from lists.
 INPUT_SYMMETRY_KEY = "input_symmetry"
 InputSymmetry = int | list["InputSymmetry"] | dict[str, list["InputSymmetry"]]
@@ -86,44 +73,56 @@ def encode_input_symmetry(
     inputs: tuple[StreamProtocol, ...],
     symmetry: Callable[[tuple[StreamProtocol, ...]], ArgumentGroup],
 ) -> InputSymmetry | None:
-    """Encode a nondefault grouping by argument position, preserving repetitions."""
-
-    def encode(group: object) -> InputSymmetry:
-        if isinstance(group, _InputOccurrence):
-            return group.index
-        if isinstance(group, tuple):
-            return [encode(child) for child in cast("tuple[object, ...]", group)]
-        if isinstance(group, frozenset):
-            children = [encode(child) for child in cast("frozenset[object]", group)]
-            return {"symmetric": sorted(children, key=repr)}
-        raise TypeError(
-            "argument_symmetry must group the input occurrences it receives"
-        )
-
+    """Translate a pod's grouping of real streams into argument positions."""
     if len(inputs) < 2:
         return None
-    grouped = encode(symmetry(_occurrences(inputs)))
+
+    remaining = dict(enumerate(inputs))
+    symmetric: list[tuple[frozenset[ArgumentGroup], list[InputSymmetry]]] = []
+
+    def encode(group: ArgumentGroup) -> InputSymmetry:
+        if isinstance(group, tuple):
+            return [encode(child) for child in group]
+        if isinstance(group, frozenset):
+            children = [encode(child) for child in group]
+            symmetric.append((group, children))
+            return {"symmetric": children}
+        for index, stream in remaining.items():
+            if stream is group:
+                del remaining[index]
+                return index
+        raise ValueError("argument_symmetry did not group arguments by occurrence")
+
+    group = symmetry(inputs)
+    try:
+        grouped = encode(group)
+    except ValueError:
+        # Positions are optional metadata. A legacy descriptor can use input order
+        # when a custom grouping cannot be expressed with argument positions.
+        return None
+
+    # A frozenset can collapse repeated or content-equal streams. Restore their
+    # positions after claiming the explicit leaves, including leaves of ordered groups.
+    symmetric.sort(
+        key=lambda entry: min(_input_positions(entry[1]), default=len(inputs))
+    )
+    for index, stream in remaining.items():
+        for members, children in symmetric:
+            if stream in members:
+                children.append(index)
+                break
+
+    for _, children in symmetric:
+        children.sort(key=repr)
     return None if grouped == list(range(len(inputs))) else grouped
 
 
-def decode_input_symmetry(
-    group: InputSymmetry, inputs: tuple[StreamProtocol, ...]
-) -> ArgumentGroup:
-    """Apply the saved grouping to the current input occurrences."""
+def _input_positions(group: InputSymmetry) -> tuple[int, ...]:
+    """Return every explicit position in a grouping."""
     if isinstance(group, int):
-        return inputs[group]
-    if isinstance(group, list):
-        return tuple(decode_input_symmetry(child, inputs) for child in group)
-    return frozenset(
-        decode_input_symmetry(child, inputs) for child in group["symmetric"]
-    )
-
-
-def _occurrences(inputs: tuple[StreamProtocol, ...]) -> tuple[StreamProtocol, ...]:
-    return tuple(
-        cast("StreamProtocol", cast(object, _InputOccurrence(stream, index)))
-        for index, stream in enumerate(inputs)
-    )
+        return (group,)
+    children = group if isinstance(group, list) else group["symmetric"]
+    return tuple(index for child in children for index in _input_positions(child))
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,25 +148,19 @@ def _pool(
 
 
 def _pool_group(
-    group: object,
+    group: InputSymmetry,
     inputs: tuple[_GroupChains, ...],
     hash_term: Callable[[str, tuple[object, ...]], ContentHash],
     source_term: object | None = None,
     name_term: object | None = None,
 ) -> _GroupChains:
     """Pool in structural order, breaking structural ties separately per chain."""
-    if isinstance(group, _InputOccurrence):
-        return inputs[group.index]
-    if not isinstance(group, (tuple, frozenset)):
-        raise TypeError(
-            "argument_symmetry must group the input occurrences it receives"
-        )
+    if isinstance(group, int):
+        return inputs[group]
 
-    children = [
-        _pool_group(child, inputs, hash_term)
-        for child in cast("tuple[object, ...] | frozenset[object]", group)
-    ]
-    symmetric = isinstance(group, frozenset)
+    symmetric = isinstance(group, dict)
+    group_children = group["symmetric"] if isinstance(group, dict) else group
+    children = [_pool_group(child, inputs, hash_term) for child in group_children]
     if symmetric:
         children.sort(key=lambda child: child.structure_key)
     structure_key = (
@@ -201,6 +194,10 @@ def _pool_group(
 class IdentityChainsMixin(ABC):
     """Memoize chains per node and invalidate descendants of a changed slot."""
 
+    # A walk spans arbitrary slots and wrappers, including bindings between jobs.
+    # Guard its reverse edges and memo publication with the same lock as binding.
+    _identity_lock: ClassVar[AbstractContextManager[object]] = RLock()
+
     # Defaults cover loaded stubs constructed without __init__.
     _identity_cache: dict[str, IdentityChains] | None = None
     _identity_name_hashes: dict[tuple[str, tuple[object, ...]], ContentHash] | None = (
@@ -222,22 +219,23 @@ class IdentityChainsMixin(ABC):
 
     def _invalidate_identity_chains(self, *, names: bool = False) -> None:
         """Invalidate cached chains below this node, keeping name hashes on bind."""
-        pending: list[IdentityChainsMixin] = [self]
-        seen: set[int] = set()
-        while pending:
-            node = pending.pop()
-            key = id(node)
-            if key in seen:
-                continue
-            seen.add(key)
-            node._identity_cache = None
-            node._identity_source_hashes = None
-            if names:
-                node._identity_name_hashes = None
-            pending.extend(node._identity_dependents.values())
-            for dependency in list(node._identity_dependencies.values()):
-                dependency._identity_dependents.pop(key, None)
-            node._identity_dependencies.clear()
+        with self._identity_lock:
+            pending: list[IdentityChainsMixin] = [self]
+            seen: set[int] = set()
+            while pending:
+                node = pending.pop()
+                key = id(node)
+                if key in seen:
+                    continue
+                seen.add(key)
+                node._identity_cache = None
+                node._identity_source_hashes = None
+                if names:
+                    node._identity_name_hashes = None
+                pending.extend(node._identity_dependents.values())
+                for dependency in list(node._identity_dependencies.values()):
+                    _ = dependency._identity_dependents.pop(key, None)
+                node._identity_dependencies.clear()
 
     def _identity_hash(self, label: str, preimage: tuple[object, ...]) -> ContentHash:
         """Reuse canonical hash terms across chain reads and unchanged name inputs."""
@@ -250,9 +248,14 @@ class IdentityChainsMixin(ABC):
                 self._identity_name_hashes = {}
             hashes = self._identity_name_hashes
         key = (label, preimage)
-        if key not in hashes:
-            hashes[key] = _hash(label, preimage)
-        return hashes[key]
+        try:
+            cached = hashes.get(key)
+        except TypeError:
+            # Semantic terms can contain values that Python cannot use as dict keys.
+            return _hash(label, preimage)
+        if cached is None:
+            cached = hashes[key] = _hash(label, preimage)
+        return cached
 
     def _identity_pipeline_hash(self, hasher: SemanticHasherProtocol) -> ContentHash:
         """Use the legacy structure, evaluated only when a consumer needs it."""
@@ -276,6 +279,18 @@ class IdentityChainsMixin(ABC):
     def _identity_symmetry(self, inputs: tuple[StreamProtocol, ...]) -> ArgumentGroup:
         """Group inputs according to the producer's argument symmetry."""
         return inputs
+
+    def _identity_input_symmetry(
+        self, inputs: tuple[StreamProtocol, ...]
+    ) -> InputSymmetry | None:
+        """Return positional grouping when it differs from argument order."""
+        return encode_input_symmetry(inputs, self._identity_symmetry)
+
+    def _identity_node_pipeline_hash(
+        self, hasher: SemanticHasherProtocol
+    ) -> ContentHash:
+        """Return the structure term for a leaf's public node hash."""
+        return self._identity_pipeline_hash(hasher)
 
     def _identity_leaf(
         self, walk: IdentityWalkProtocol
@@ -306,6 +321,7 @@ class IdentityChainsMixin(ABC):
                 frozenset((name,))
                 if name is not None and source is None
                 else frozenset(),
+                self._identity_node_pipeline_hash,
             )
 
         inputs = self._identity_inputs()
@@ -333,7 +349,9 @@ class IdentityChainsMixin(ABC):
             )
 
         # Symmetric groups use structural ordering. Occurrences keep repeats.
-        group = self._identity_symmetry(_occurrences(inputs)) if inputs else ()
+        group = self._identity_input_symmetry(inputs) if inputs else None
+        if group is None:
+            group = list[InputSymmetry](range(len(inputs)))
         children = tuple(
             _GroupChains(
                 (upstream.pipeline_hash(walk.hasher).to_hex(),),
@@ -356,11 +374,13 @@ class IdentityChainsMixin(ABC):
 
     def source_chain(self) -> ContentHash | None:
         """Return the source chain, absent if any contributing slot is unbound."""
-        return IdentityWalk(self._identity_hasher).visit(self).sources
+        with self._identity_lock:
+            return IdentityWalk(self._identity_hasher).visit(self).sources
 
     def name_chain(self) -> ContentHash:
         """Return the chain of source-slot names."""
-        return IdentityWalk(self._identity_hasher).visit(self).names
+        with self._identity_lock:
+            return IdentityWalk(self._identity_hasher).visit(self).names
 
     def _chain_content_hash(self) -> ContentHash:
         """Combine structure and sources. This becomes ``content_hash()`` at the switch.
@@ -368,21 +388,24 @@ class IdentityChainsMixin(ABC):
         Raises:
             UnboundSourceError: If any contributing source slot is unbound.
         """
-        walk = IdentityWalk(self._identity_hasher)
-        chains = walk.visit(self)
-        if chains.sources is None:
-            names = ", ".join(repr(name) for name in sorted(chains.unbound_slots))
-            raise UnboundSourceError(
-                f"Content identity is undefined for unbound source slots {names}."
+        with self._identity_lock:
+            walk = IdentityWalk(self._identity_hasher)
+            chains = walk.visit(self)
+            if chains.sources is None:
+                names = ", ".join(repr(name) for name in sorted(chains.unbound_slots))
+                raise UnboundSourceError(
+                    f"Content identity is undefined for unbound source slots {names}."
+                )
+            return self._identity_hash(
+                CONTENT_HASH_LABEL, (chains.pipeline_hash(walk.hasher), chains.sources)
             )
-        return self._identity_hash(
-            CONTENT_HASH_LABEL, (chains.pipeline_hash(walk.hasher), chains.sources)
-        )
 
     def node_hash(self) -> ContentHash:
         """Combine structure and slot names, independently of binding."""
-        walk = IdentityWalk(self._identity_hasher)
-        chains = walk.visit(self)
-        return self._identity_hash(
-            NODE_HASH_LABEL, (chains.pipeline_hash(walk.hasher), chains.names)
-        )
+        with self._identity_lock:
+            walk = IdentityWalk(self._identity_hasher)
+            chains = walk.visit(self)
+            structure = chains.node_pipeline_hash or chains.pipeline_hash
+            return self._identity_hash(
+                NODE_HASH_LABEL, (structure(walk.hasher), chains.names)
+            )

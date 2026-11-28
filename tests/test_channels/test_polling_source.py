@@ -17,7 +17,7 @@ from orcapod.core.sources.polling_source import PollingSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import CursorInvalidatedError
 from orcapod.protocols.core_protocols.sources import DynamicSourceProtocol
-from orcapod.types import Cursor, PollingConfig, Schema
+from orcapod.types import ContentHash, Cursor, PollingConfig, Schema
 
 
 # ===========================================================================
@@ -1832,30 +1832,31 @@ def test_polling_leaf_chains_are_available_before_schema(
     )
 
     def unexpected_poll() -> None:
-        pytest.fail("leaf identities must not poll for a schema")
+        pytest.fail("pending identities must not poll for a schema")
 
     monkeypatch.setattr(source, "_sync_poll_and_commit", unexpected_poll)
     assert source.source_chain() == source.content_hash()
     name_chain = source.name_chain()
+    node_hash = source.node_hash()
+    assert isinstance(node_hash, ContentHash)
     source.label = "new label"
     assert source.name_chain() == name_chain
-    with pytest.raises(ValueError, match="requires a schema"):
-        source.node_hash()
+    assert source.node_hash() == node_hash
     with pytest.raises(ValueError, match="requires a schema"):
         source._chain_content_hash()
 
 
 def test_polling_leaf_chains_stay_stable_when_a_batch_supplies_schema() -> None:
-    """Learning the schema enables combined hashes without changing leaf chains."""
+    """Learning the schema enables content identity while leaf chains stay stable."""
     source = PollingSource(
         FakeDynamicSource(batches=[_batch(1, 10)]),
         tag_columns="id",
         record_id_columns="id",
     )
     before = source.source_chain(), source.name_chain()
-    with pytest.raises(ValueError, match="requires a schema"):
-        source.node_hash()
+    pending_hash = source.node_hash()
+    assert isinstance(pending_hash, ContentHash)
     assert list(source)
     assert (source.source_chain(), source.name_chain()) == before
-    assert source.node_hash()
+    assert source.node_hash() != pending_hash
     assert source._chain_content_hash()

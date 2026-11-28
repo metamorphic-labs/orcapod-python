@@ -19,8 +19,14 @@ from orcapod.types import ContentHash
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from orcapod.protocols.core_protocols import StreamProtocol
-    from orcapod.protocols.hashing_protocols import IdentityChainProtocol
+    from collections.abc import Collection
+
+    from orcapod.protocols.core_protocols import ArgumentGroup, StreamProtocol
+    from orcapod.protocols.hashing_protocols import (
+        IdentityChainProtocol,
+        IdentityChains,
+        IdentityWalkProtocol,
+    )
 
 
 @function_pod(output_keys="total")
@@ -288,8 +294,14 @@ def test_commutative_equal_structure_sorts_the_chains_independently(
     )
     assert _hashes(result) == _hashes(swapped)
     repeat = Join()(left, left)
-    assert repeat.source_chain() != left.source_chain()
-    assert repeat.name_chain() != left.name_chain()
+    expected_sources = SemanticAwarePythonHasher(
+        hasher_id=SOURCE_CHAIN_HASH_LABEL
+    ).hash_object((left.source_chain(), left.source_chain()))
+    expected_names = SemanticAwarePythonHasher(
+        hasher_id=NAME_CHAIN_HASH_LABEL
+    ).hash_object((left.name_chain(), left.name_chain()))
+    assert repeat.source_chain() == expected_sources
+    assert repeat.name_chain() == expected_names
 
     job = PipelineJob(name="tie", database=InMemoryArrowDatabase())
     with job:
@@ -482,3 +494,140 @@ def test_copying_a_slot_under_a_new_name_recomputes_the_name_chain() -> None:
     assert after[0] == before[0]
     assert after[1] != before[1]
     assert _hashes(original) == before
+
+
+def test_custom_operator_symmetry_receives_streams_on_save(tmp_path: Path) -> None:
+    """A custom operator can require concrete stream objects in its callback."""
+    from orcapod.core.nodes.source_node import SourceNodeBase
+
+    class StreamCheckingJoin(Join):
+        def argument_symmetry(
+            self, streams: Collection[StreamProtocol]
+        ) -> ArgumentGroup:
+            assert all(
+                isinstance(stream, (DictSource, SourceNodeBase)) for stream in streams
+            )
+            return super().argument_symmetry(streams)
+
+    left = _source("left", False)
+    right = _source("right", False, right=True)
+    job = PipelineJob(name="custom_symmetry", database=InMemoryArrowDatabase())
+    with job:
+        StreamCheckingJoin()(left, right, label="joined")
+    job.run()
+    path = tmp_path / "job.json"
+    job.save(path)
+    assert path.is_file()
+    assert job.nodes["joined"].node_hash()
+
+
+def test_overlapping_identity_read_cannot_publish_stale_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold reader cannot repopulate its memo with the old binding."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, get_ident
+
+    source = _source("reading", False)
+    rebound = _source("rebound", False)
+    job = PipelineJob(name="overlapping_read", database=InMemoryArrowDatabase())
+    with job:
+        source.select_data_columns(["x"], label="projection")
+    result = job.nodes["projection"]
+    computed, resume, binding = Event(), Event(), Event()
+    main_thread = get_ident()
+    original = result._compute_identity_chains  # pyright: ignore[reportPrivateUsage]  # Pause immediately before memo publication.
+
+    def pause(walk: IdentityWalkProtocol) -> IdentityChains:
+        chains = original(walk)
+        if get_ident() != main_thread:
+            computed.set()
+            assert resume.wait(10)
+        return chains
+
+    def bind() -> None:
+        binding.set()
+        job.bind(sources={"reading": rebound})
+
+    monkeypatch.setattr(result, "_compute_identity_chains", pause)
+    with ThreadPoolExecutor(2) as executor:
+        first = executor.submit(result.source_chain)
+        try:
+            assert computed.wait(5)
+            rebinding = executor.submit(bind)
+            assert binding.wait(5)
+            # A synchronized bind is allowed to wait for the in-flight reader.
+            try:
+                rebinding.result(timeout=1)
+            except TimeoutError:
+                pass
+            else:
+                assert result.source_chain() == rebound.content_hash()
+        finally:
+            resume.set()
+        first.result(timeout=5)
+        rebinding.result(timeout=5)
+    assert result.source_chain() == rebound.content_hash()
+
+
+def test_identity_memo_is_invalidated_before_binding_is_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new binding becomes visible after invalidation of dependent chains."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    source = _source("reading", False)
+    rebound = _source("rebound", False)
+    job = PipelineJob(name="binding_visibility", database=InMemoryArrowDatabase())
+    with job:
+        source.select_data_columns(["x"], label="projection")
+    result = job.nodes["projection"]
+    slot = job.nodes["reading"]
+    assert isinstance(slot, SourceJobNode)
+    assert result.source_chain() == source.content_hash()
+    original = slot._invalidate_identity_chains  # pyright: ignore[reportPrivateUsage]  # Inspect the binding at the invalidation boundary.
+    invalidating, resume = Event(), Event()
+
+    def pause() -> None:
+        invalidating.set()
+        assert resume.wait(5)
+        original()
+
+    monkeypatch.setattr(slot, "_invalidate_identity_chains", pause)
+    with ThreadPoolExecutor(1) as executor:
+        bind = executor.submit(job.bind, sources={"reading": rebound})
+        try:
+            assert invalidating.wait(5)
+            assert slot.bound_source is source
+        finally:
+            resume.set()
+        bind.result(timeout=5)
+    assert slot.bound_source is rebound
+    assert result.source_chain() == rebound.content_hash()
+
+
+def test_identity_terms_accept_canonical_semantic_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terms accepted by semantic hashing can include dictionaries and lists."""
+    source = _source("reading", False)
+    result = source.select_data_columns(["x"])
+    source_term, name_term = {"mode": "x"}, ["variant"]
+    monkeypatch.setattr(result, "_identity_terms", lambda: (source_term, name_term))
+    for label, upstream, term, chain in (
+        (
+            SOURCE_CHAIN_HASH_LABEL,
+            source.source_chain(),
+            source_term,
+            result.source_chain,
+        ),
+        (NAME_CHAIN_HASH_LABEL, source.name_chain(), name_term, result.name_chain),
+    ):
+        expected = SemanticAwarePythonHasher(hasher_id=label).hash_object(
+            ("term", upstream, term)
+        )
+        assert chain() == expected
+        assert chain() == expected

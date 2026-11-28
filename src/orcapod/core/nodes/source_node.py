@@ -1761,11 +1761,12 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             SourceSpecMismatchError: If *value* does not fit the declared schema.
         """
         form = None if value is None else self._declared_form_for(value)
-        self._bound_source = value
-        self._declared_form = form
-        self._invalidate_content_hash_cache()
-        self._invalidate_pipeline_hash_cache()
-        self._invalidate_identity_chains()
+        with self._identity_lock:
+            self._invalidate_identity_chains()
+            self._bound_source = value
+            self._declared_form = form
+            self._invalidate_content_hash_cache()
+            self._invalidate_pipeline_hash_cache()
 
     @property
     def last_modified(self) -> datetime | None:
