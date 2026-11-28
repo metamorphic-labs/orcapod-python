@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
 
 from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
+from orcapod.databases._sql_store import STORE_PATH_CATALOG
+from orcapod.errors import OrcapodDatabaseError
+from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
+from orcapod.types import ColumnInfo
 
 
 @pytest.fixture
@@ -18,7 +24,366 @@ def db() -> Iterator[ConnectorArrowDatabase]:
     connector.close()
 
 
+def _check_sql_path_rejects_hidden_separator(
+    db: ConnectorArrowDatabase, *, scoped: bool
+) -> None:
+    class HiddenSeparator(str):
+        def __contains__(self, item: object) -> bool:
+            return False
+
+    db.add_record(("a", "b"), b"id", pa.table({"value": [10]}), flush=True)
+    if scoped:
+        with pytest.raises(ValueError, match="invalid character"):
+            db.at(HiddenSeparator("a/b"))
+    else:
+        with pytest.raises(ValueError, match="invalid character"):
+            db.add_record(
+                (HiddenSeparator("a/b"),), b"id", pa.table({"value": [99]}), flush=True
+            )
+    rows = db.get_all_records(("a", "b"))
+    assert rows is not None and rows.to_pylist() == [{"value": 10}]
+
+
+def _check_sql_listing_normalizes_subclass_prefix(
+    db: ConnectorArrowDatabase, *, flush: bool
+) -> None:
+    class OddString(str):
+        def __eq__(self, other: object) -> bool:
+            return self is other
+
+        __hash__ = str.__hash__
+
+        def __str__(self) -> str:
+            return "different"
+
+    scope = db.at(OddString("same"))
+    scope.add_record(("child",), b"id", pa.table({"value": [1]}), flush=flush)
+
+    assert scope.list_table_paths() == [("child",)]
+    assert db.list_table_paths((OddString("same"),)) == [("same", "child")]
+
+
+@pytest.mark.parametrize("path", [("a/b",), ("",), ("a", "b\0c")])
+def test_sql_schema_read_refuses_an_invalid_path_as_the_other_reads_do(
+    db: ConnectorArrowDatabase, path: tuple[str, ...]
+) -> None:
+    """An invalid path names no table, so no read may say that a table exists.
+
+    Every read of a SQL store refuses such a path with the same ``ValueError``;
+    ``get_table_schema`` used to report it as a stored table it could not read.
+    """
+    db.add_record(("a", "b"), b"id", pa.table({"value": [10]}), flush=True)
+
+    with pytest.raises(ValueError, match="Path component") as schema_error:
+        db.get_table_schema(path)
+    with pytest.raises(ValueError, match="Path component") as exists_error:
+        db.table_exists(path)
+    with pytest.raises(ValueError, match="Path component") as records_error:
+        db.get_all_records(path)
+
+    assert not isinstance(schema_error.value, OrcapodDatabaseError)
+    assert "exists" not in str(schema_error.value)
+    assert str(schema_error.value) == str(exists_error.value)
+    assert str(schema_error.value) == str(records_error.value)
+    stored = db.get_table_schema(("a", "b"))
+    assert stored is not None and stored.field("value").type == pa.int64()
+    assert db.get_table_schema(("missing",)) is None
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_sql_path_rejects_hidden_separator(
+    db: ConnectorArrowDatabase, scoped: bool
+) -> None:
+    _check_sql_path_rejects_hidden_separator(db, scoped=scoped)
+
+
+@pytest.mark.parametrize("flush", [False, True])
+def test_sql_listing_normalizes_subclass_prefix(
+    db: ConnectorArrowDatabase, flush: bool
+) -> None:
+    _check_sql_listing_normalizes_subclass_prefix(db, flush=flush)
+
+
 class TestConnectorArrowDatabaseWithSQLite:
+    def test_long_paths_with_the_same_sanitized_name_store_separate_rows(
+        self, db: ConnectorArrowDatabase
+    ) -> None:
+        common = "shared_prefix_" * 12
+        first = ("job", common + ":a", "pdb_v2")
+        second = ("job", common + "-a", "pdb_v2")
+        db.add_record(first, b"one", pa.table({"value": [1]}), flush=True)
+        db.add_record(second, b"one", pa.table({"value": [2]}), flush=True)
+
+        first_rows = db.get_all_records(first)
+        second_rows = db.get_all_records(second)
+        assert first_rows is not None and first_rows.to_pylist() == [{"value": 1}]
+        assert second_rows is not None and second_rows.to_pylist() == [{"value": 2}]
+
+    def test_paths_with_a_forced_digest_collision_cannot_share_a_table(
+        self, db: ConnectorArrowDatabase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from orcapod.databases import store_table_names
+
+        monkeypatch.setattr(
+            store_table_names, "store_table_digest", lambda path: "a" * 64
+        )
+        first = ("name:part",)
+        second = ("name-part",)
+        db.add_record(first, b"one", pa.table({"value": [1]}))
+        with pytest.raises(OrcapodDatabaseError, match="already belongs"):
+            db.add_record(second, b"one", pa.table({"value": [2]}))
+        db.flush_batch(first)
+        with pytest.raises(OrcapodDatabaseError, match="already belongs"):
+            db.get_all_records(second)
+        with pytest.raises(OrcapodDatabaseError, match="already belongs"):
+            db.add_record(second, b"one", pa.table({"value": [2]}))
+        assert db.list_table_paths() == [first]
+        records = db.get_all_records(first)
+        assert records is not None and records.to_pylist() == [{"value": 1}]
+
+    def test_str_subclass_path_reopens_as_ordinary_string(
+        self, db: ConnectorArrowDatabase
+    ) -> None:
+        class OddString(str):
+            def __eq__(self, other: object) -> bool:
+                return self is other
+
+            __hash__ = str.__hash__
+
+        path = (OddString("same"),)
+        db.add_record(("same",), b"id", pa.table({"value": [1]}), flush=True)
+
+        rows = db.get_all_records(path)
+        assert rows is not None and rows.to_pylist() == [{"value": 1}]
+
+    def test_iter_batches_reads_quoted_table_name_metadata(self) -> None:
+        with SQLiteConnector() as connector:
+            conn = connector._require_open()
+            _ = conn.execute(
+                'CREATE TABLE main."order""items" (value INTEGER NOT NULL)'
+            )
+            _ = conn.execute('INSERT INTO main."order""items" VALUES (7)')
+
+            batches = list(
+                connector.iter_batches('SELECT value FROM main."order""items"')
+            )
+
+        assert len(batches) == 1
+        assert batches[0].schema.field("value").type == pa.int64()
+        assert batches[0].column(0).to_pylist() == [7]
+
+    def test_pending_collision_check_uses_indexed_table_names(
+        self, db: ConnectorArrowDatabase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from orcapod.databases import connector_arrow_database
+
+        assert db._sql_store is not None  # pyright: ignore[reportPrivateUsage]
+        original = connector_arrow_database.store_table_name
+        calls = 0
+
+        def counted(
+            path: tuple[str, ...], *, hint_length: int, digest_length: int
+        ) -> str:
+            nonlocal calls
+            calls += 1
+            return original(path, hint_length=hint_length, digest_length=digest_length)
+
+        monkeypatch.setattr(connector_arrow_database, "store_table_name", counted)
+        for index in range(30):
+            db.add_record(
+                (f"path-{index}",),
+                str(index).encode(),
+                pa.table({"v": [index]}),
+            )
+
+        assert calls < 250
+
+    def test_failed_dependency_removes_pending_owner_index_entry(
+        self, db: ConnectorArrowDatabase
+    ) -> None:
+        parent_path = ("parent",)
+        child_path = ("child",)
+        attempt = db._pending_commits.attempt(  # pyright: ignore[reportPrivateUsage]
+            db._get_record_key(parent_path)  # pyright: ignore[reportPrivateUsage]
+        )
+        with db.guard_record(child_path, b"child", attempt):
+            db.add_record(child_path, b"child", pa.table({"value": [1]}))
+        assert db.list_table_paths() == [child_path]
+
+        db.fail_pending_result(parent_path)
+
+        assert db.list_table_paths() == []
+
+    def test_pending_path_is_refused_if_another_writer_claims_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from orcapod.databases import store_table_names
+
+        monkeypatch.setattr(
+            store_table_names, "store_table_digest", lambda path: "a" * 64
+        )
+        location = tmp_path / "store.db"
+        with SQLiteConnector(location) as first, SQLiteConnector(location) as second:
+            _check_pending_collision(first, second)
+
+    @pytest.mark.parametrize(
+        "operation", ["list", "read", "pending_point", "queue", "flush"]
+    )
+    def test_unsupported_catalog_layout_is_refused(self, operation: str) -> None:
+        path = ("versioned",)
+        one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
+        with SQLiteConnector() as connector:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(path, b"id", one, flush=True)
+            if operation in ("flush", "pending_point"):
+                db.add_record(path, b"id", two)
+            conn = connector._require_open()
+            _ = conn.execute("PRAGMA ignore_check_constraints=ON")
+            _ = conn.execute(
+                f'UPDATE main."{STORE_PATH_CATALOG}" SET layout_version = 2'
+            )
+            with pytest.raises(
+                OrcapodDatabaseError, match="unsupported catalog layout version 2"
+            ):
+                _check_catalog_operation(db, path, two, operation)
+            name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+            assert tuple(
+                conn.execute(f'SELECT value FROM main."{name}"').fetchone()
+            ) == (1,)
+
+    def test_missing_record_table_ignores_unsupported_catalog_version(self) -> None:
+        path = ("orphan",)
+        with SQLiteConnector() as connector:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+            conn = connector._require_open()
+            name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+            _ = conn.execute("PRAGMA ignore_check_constraints=ON")
+            _ = conn.execute(
+                f'UPDATE main."{STORE_PATH_CATALOG}" SET layout_version = 2'
+            )
+            _ = conn.execute(f'DROP TABLE main."{name}"')
+
+            assert db.get_all_records(path) is None
+            assert db.list_table_paths() == []
+
+    @pytest.mark.parametrize("write", [False, True])
+    def test_store_uses_main_when_a_temp_table_shadows_its_name(
+        self, write: bool
+    ) -> None:
+        path = ("shadow",)
+        one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
+        with SQLiteConnector() as connector:
+            store = ConnectorArrowDatabase(connector)
+            store.add_record(path, b"id", one, flush=True)
+            name = next(n for n in connector.get_table_names() if n.startswith("o1_"))
+            conn = connector._require_open()
+            _ = conn.execute(
+                f'CREATE TEMP TABLE "{name}" ("__record_id" BLOB PRIMARY KEY, value INTEGER)'
+            )
+            _ = conn.execute(f'INSERT INTO temp."{name}" VALUES (?, ?)', (b"id", 99))
+            if write:
+                store.add_record(path, b"id", two, flush=True)
+                assert tuple(
+                    conn.execute(f'SELECT value FROM main."{name}"').fetchone()
+                ) == (2,)
+                assert tuple(
+                    conn.execute(f'SELECT value FROM temp."{name}"').fetchone()
+                ) == (99,)
+            else:
+                records = store.get_all_records(path)
+                assert records is not None and records.equals(one)
+
+    def test_legacy_table_is_ignored_and_preserved(self) -> None:
+        with SQLiteConnector(":memory:") as connector:
+            columns = [
+                ColumnInfo("__record_id", pa.large_binary(), False),
+                ColumnInfo("value", pa.int64(), False),
+            ]
+            connector.create_table_if_not_exists("job__pdb_v2", columns, "__record_id")
+            connector.upsert_records(
+                "job__pdb_v2",
+                pa.table({"__record_id": [b"one"], "value": [1]}),
+                "__record_id",
+            )
+            db = ConnectorArrowDatabase(connector)
+            path = ("job", "pdb_v2")
+            assert not db.table_exists(path)
+            assert db.get_table_schema(path) is None
+            assert db.get_all_records(path) is None
+            assert db.list_table_paths(("job",)) == []
+
+            db.add_record(path, b"one", pa.table({"value": [2]}), flush=True)
+            assert db.list_table_paths(("job",)) == [path]
+            old = pa.Table.from_batches(
+                list(connector.iter_batches('SELECT "value" FROM "job__pdb_v2"'))
+            )
+            assert old.to_pylist() == [{"value": 1}]
+
+    def test_unregistered_physical_name_is_not_claimed(self) -> None:
+        from orcapod.databases.store_table_names import store_table_name
+
+        with SQLiteConnector(":memory:") as connector:
+            path = ("unregistered",)
+            name = store_table_name(path, hint_length=27, digest_length=32)
+            connector.create_table_if_not_exists(
+                name,
+                [ColumnInfo("__record_id", pa.large_binary(), False)],
+                "__record_id",
+            )
+            db = ConnectorArrowDatabase(connector)
+            assert not db.table_exists(path)
+            assert db.list_table_paths() == []
+            with pytest.raises(OrcapodDatabaseError, match="no stored path"):
+                db.add_record(path, b"one", pa.table({"value": [1]}), flush=True)
+            assert connector.get_table_names() == [name]
+
+    def test_registration_and_table_creation_roll_back_on_write_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with SQLiteConnector(":memory:") as connector:
+            db = ConnectorArrowDatabase(connector)
+
+            def fail_write(*args: object, **kwargs: object) -> None:
+                raise RuntimeError("simulated write failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(connector, "upsert_records", fail_write)
+                with pytest.raises(RuntimeError, match="simulated write failure"):
+                    db.add_record(
+                        ("new",), b"one", pa.table({"value": [1]}), flush=True
+                    )
+            assert connector.get_table_names() == []
+            db.add_record(("new",), b"one", pa.table({"value": [1]}), flush=True)
+            assert db.list_table_paths() == [("new",)]
+
+    def test_unknown_catalog_entries_are_ignored(self, tmp_path: Path) -> None:
+        location = tmp_path / "store.db"
+        path = ("job", "pdb_v2")
+        with SQLiteConnector(location) as connector:
+            ConnectorArrowDatabase(connector).add_record(
+                path, b"one", pa.table({"value": [1]}), flush=True
+            )
+        with sqlite3.connect(location) as conn:
+            row = conn.execute(
+                f'SELECT layout_version, table_name FROM "{STORE_PATH_CATALOG}"'
+            ).fetchone()
+            assert row is not None
+            version, name = row
+            assert version == 1
+            _ = conn.execute(
+                f'INSERT INTO "{STORE_PATH_CATALOG}" '
+                "(layout_version, table_name, entry_kind, entry_name, entry_value) "
+                "VALUES (?, ?, 'future', 'short_name', 'an opaque value')",
+                (version, name),
+            )
+        with SQLiteConnector(location) as connector:
+            db = ConnectorArrowDatabase(connector)
+            assert db.list_table_paths(("job",)) == [path]
+            rows = db.get_all_records(path)
+            assert rows is not None and rows.to_pylist() == [{"value": 1}]
+            db.add_record(path, b"two", pa.table({"value": [2]}), flush=True)
+
     def test_add_and_get_record(self, db: ConnectorArrowDatabase) -> None:
         # add_record stamps all rows with the same __record_id, so within-batch
         # deduplication keeps only the last row (same behaviour as InMemoryArrowDatabase).
@@ -116,3 +481,62 @@ class TestConnectorArrowDatabaseWithSQLite:
         result = db.get_records_by_ids(("fn", "test"), ["r1", "r3"])
         assert result is not None
         assert result.num_rows == 2
+
+
+def _check_pending_collision(
+    first: DBConnectorProtocol, second: DBConnectorProtocol
+) -> None:
+    queued = ConnectorArrowDatabase(first)
+    winner = ConnectorArrowDatabase(second)
+    pending, committed = ("name:part",), ("name-part",)
+    one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
+    queued.add_record(pending, b"id", two)
+    winner.add_record(committed, b"id", one, flush=True)
+    for check in (
+        queued.list_table_paths,
+        lambda: queued.get_record_by_id(pending, b"id"),
+        lambda: queued.flush_batch(pending),
+    ):
+        with pytest.raises(OrcapodDatabaseError, match="name-part.*name:part"):
+            check()
+    rows = winner.get_all_records(committed)
+    assert rows is not None and rows.equals(one)
+
+
+def _check_catalog_operation(
+    db: ConnectorArrowDatabase, path: tuple[str, ...], table: pa.Table, operation: str
+) -> None:
+    """Run one named catalog operation shared by the SQLite and PostgreSQL tests.
+
+    Args:
+        db: The connector-backed database under test.
+        path: The path passed to the selected operation.
+        table: The record table used by queue operations.
+        operation: One of ``list``, ``read``, ``pending_point``, ``queue``, or ``flush``.
+
+    Raises:
+        ValueError: If ``operation`` is not one of the supported values.
+    """
+    if operation == "list":
+        db.list_table_paths()
+    elif operation == "read":
+        db.get_all_records(path)
+    elif operation == "pending_point":
+        db.get_record_by_id(path, b"id")
+    elif operation == "queue":
+        db.add_record(path, b"id", table)
+    elif operation == "flush":
+        db.flush_batch(path)
+    else:
+        raise ValueError(f"Unknown catalog operation: {operation!r}")
+
+
+def test_catalog_operation_helper_rejects_unknown_operation() -> None:
+    with SQLiteConnector(":memory:") as connector:
+        with pytest.raises(ValueError, match="Unknown catalog operation"):
+            _check_catalog_operation(
+                ConnectorArrowDatabase(connector),
+                ("path",),
+                pa.table({"value": [1]}),
+                "flsuh",
+            )
