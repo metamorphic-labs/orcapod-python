@@ -1732,7 +1732,7 @@ class TestSortSystemTagValues:
             }
         )
 
-        result = sort_system_tag_values(table)
+        result = sort_system_tag_values(table, tied_positions=((0, 1),))
 
         # After sorting by (source_id, record_id), position :0 should have the smaller tuple
         # Row 0: ("zzz_source", "row_0") vs ("aaa_source", "row_1") → sorted: aaa first
@@ -1747,30 +1747,40 @@ class TestSortSystemTagValues:
         assert result.column(sid_1).to_pylist()[1] == "zzz_source"
         assert result.column(rid_1).to_pylist()[1] == "row_1"
 
-    def test_does_not_sort_different_provenance_paths(self):
-        """Columns with different provenance paths should NOT have their values sorted."""
+    def test_sorts_each_provenance_path_independently(self):
+        """A hash tie sorts each matching provenance path separately."""
         from orcapod.system_constants import constants
         from orcapod.utils.arrow_utils import sort_system_tag_values
 
-        # Two different provenance paths (different pipeline hashes)
-        sid_a, rid_a = self._make_paired_cols(constants, "abc::ph_AAA", "0")
-        sid_b, rid_b = self._make_paired_cols(constants, "abc::ph_BBB", "0")
+        fields = [
+            name
+            for path in ("abc::a", "abc::b")
+            for position in range(2)
+            for name in self._make_paired_cols(constants, path, position)
+        ]
+        old_values = ("z", "a0", "y", "a1", "a", "b0", "b", "b1")
+        expected = ("y", "a1", "z", "a0", "a", "b0", "b", "b1")
+        table = pa.Table.from_pylist([dict(zip(fields, old_values, strict=True))])
 
-        table = pa.table(
-            {
-                "id": [1],
-                sid_a: pa.array(["zzz"], type=pa.large_string()),
-                rid_a: pa.array(["row_0"], type=pa.large_string()),
-                sid_b: pa.array(["aaa"], type=pa.large_string()),
-                rid_b: pa.array(["row_1"], type=pa.large_string()),
-            }
-        )
+        result = sort_system_tag_values(table, tied_positions=((0, 1),))
+        assert result.to_pylist() == [dict(zip(fields, expected, strict=True))]
 
-        result = sort_system_tag_values(table)
+    def test_sorts_distinct_hash_ties_with_the_same_printed_path_separately(self):
+        """An ID pair can move only among positions with its full pipeline hash."""
+        from orcapod.system_constants import constants
+        from orcapod.utils.arrow_utils import sort_system_tag_values
 
-        # Values should be untouched since provenance paths differ
-        assert result.column(sid_a).to_pylist() == ["zzz"]
-        assert result.column(sid_b).to_pylist() == ["aaa"]
+        fields = [
+            name
+            for position in range(5)
+            for name in self._make_paired_cols(constants, "a", position)
+        ]
+        old_values = ("z", "0", "y", "1", "x", "2", "b", "3", "a", "4")
+        expected = ("y", "1", "z", "0", "x", "2", "a", "4", "b", "3")
+        table = pa.Table.from_pylist([dict(zip(fields, old_values, strict=True))])
+
+        result = sort_system_tag_values(table, tied_positions=((0, 1), (3, 4)))
+        assert result.to_pylist() == [dict(zip(fields, expected, strict=True))]
 
     def test_no_op_for_single_position_groups(self):
         """Groups with only one position should be left untouched."""
@@ -1787,7 +1797,7 @@ class TestSortSystemTagValues:
             }
         )
 
-        result = sort_system_tag_values(table)
+        result = sort_system_tag_values(table, tied_positions=((0, 1),))
         assert result.column(sid).to_pylist() == ["hello", "world"]
         assert result.column(rid).to_pylist() == ["row_0", "row_1"]
 
@@ -1810,7 +1820,7 @@ class TestSortSystemTagValues:
             }
         )
 
-        result = sort_system_tag_values(table)
+        result = sort_system_tag_values(table, tied_positions=((0, 1),))
         assert result.column("id").to_pylist() == [1, 2]
         assert result.column("data").to_pylist() == ["foo", "bar"]
 
@@ -1834,7 +1844,7 @@ class TestSortSystemTagValues:
             }
         )
 
-        result = sort_system_tag_values(table)
+        result = sort_system_tag_values(table, tied_positions=((0, 1, 2),))
 
         # Row 0: tuples are (cherry,r0), (apple,r1), (banana,r2) → sorted: (apple,r1), (banana,r2), (cherry,r0)
         assert result.column(sid_0).to_pylist()[0] == "apple"

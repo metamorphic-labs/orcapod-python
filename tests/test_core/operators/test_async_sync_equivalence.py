@@ -1259,6 +1259,123 @@ def test_tied_join_keeps_custom_system_tags_with_their_operand(
         )
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_tied_join_keeps_record_id_when_only_one_input_declares_it(
+    reverse: bool,
+) -> None:
+    source_id, record_id = "_tag_source_id", "_tag_record_id"
+    sources = [
+        pa.table({"k": [1], source_id: ["same"]}),
+        pa.table({"k": [1], source_id: ["same"], record_id: ["real"]}),
+    ]
+    inputs = [
+        ArrowTableStream(table, tag_columns=["k"], data_tags=["k"]) for table in sources
+    ]
+    assert inputs[0].pipeline_hash() == inputs[1].pipeline_hash()
+    operands = inputs[::-1] if reverse else inputs
+    columns = {"system_tags": True}
+    join = Join()
+    stream = join(*operands)
+    table = stream.as_table(columns=columns)
+    prediction, _ = join.output_schema(*operands, columns=columns)
+    suffix = inputs[0].pipeline_hash().to_hex()
+    record_name = f"{record_id}::{suffix}:0"
+    expected = {
+        f"{source_id}::{suffix}:0": "same",
+        record_name: "real",
+        f"{source_id}::{suffix}:1": "same",
+    }
+    results = [table]
+    for rows in (list(stream.iter_data()), async_rows(join, *operands)):
+        [(tag, _)] = rows
+        results.append(tag.as_table(columns=columns))
+    kernel = StreamingJoin(join, operands)
+    results.append(
+        pa.Table.from_batches(
+            [
+                result
+                for index, operand in enumerate(operands)
+                for batch in operand.as_table(columns=TRANSPORT_COLUMNS).to_batches()
+                for result in kernel.push(index, batch)
+            ]
+        )
+    )
+    for result in results:
+        assert [
+            name for name in result.column_names if name.startswith("_tag_")
+        ] == list(expected)
+        assert {
+            name: result[name][0].as_py()
+            for name in result.column_names
+            if name.startswith("_tag_")
+        } == expected
+        assert result.select(list(expected)).schema.equals(
+            table.select(list(expected)).schema, check_metadata=True
+        )
+    assert [name for name in prediction if name.startswith("_tag_")] == list(expected)
+    assert (
+        kernel.zero_row_result.as_table(columns=columns)
+        .select(list(expected))
+        .schema.equals(table.select(list(expected)).schema, check_metadata=True)
+    )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_distinct_join_inputs_keep_id_pairs_when_short_hashes_collide(
+    reverse: bool,
+) -> None:
+    source_id, record_id, custom = "_tag_source_id", "_tag_record_id", "_tag_rev"
+    left, right = [
+        ArrowTableStream(
+            pa.table(
+                {
+                    "k": [1],
+                    data: [1],
+                    source_id: [owner],
+                    record_id: [f"{owner}-record"],
+                    custom: [f"{owner}-revision"],
+                }
+            ),
+            tag_columns=["k"],
+        )
+        for data, owner in (("left_data", "left"), ("right_data_5", "right"))
+    ]
+    left_hash, right_hash = (
+        left.pipeline_hash().to_hex(),
+        right.pipeline_hash().to_hex(),
+    )
+    assert left_hash[0] == right_hash[0]
+    assert right_hash < left_hash
+    operands = (right, left) if reverse else (left, right)
+    join = Join(config=OrcapodConfig(hashing=HashingConfig(system_tag_n_char=1)))
+    columns = {"system_tags": True}
+    suffix = left_hash[0]
+    expected = {
+        f"{field}::{suffix}:{index}": value
+        for index, owner in enumerate(("right", "left"))
+        for field, value in (
+            (source_id, owner),
+            (record_id, f"{owner}-record"),
+            (custom, f"{owner}-revision"),
+        )
+    }
+    stream = join(*operands)
+    [(tag, _)] = async_rows(join, *operands)
+    kernel = StreamingJoin(join, operands)
+    batches = [
+        result
+        for index, operand in enumerate(operands)
+        for batch in operand.as_table(columns=TRANSPORT_COLUMNS).to_batches()
+        for result in kernel.push(index, batch)
+    ]
+    for result in (
+        stream.as_table(columns=columns),
+        tag.as_table(columns=columns),
+        pa.Table.from_batches(batches),
+    ):
+        assert result.select(list(expected)).to_pylist() == [expected]
+
+
 def test_distinct_join_inputs_keep_custom_tags_when_short_hashes_collide(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
