@@ -7,6 +7,7 @@ import contextlib
 import sqlite3
 from re import escape
 from collections.abc import Collection, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -15,6 +16,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from orcapod import PipelineJob
 from orcapod.contexts.stored import with_data_context
@@ -248,9 +250,10 @@ def _late_reserved_rows(reverse: bool) -> list[dict[str, int]]:
 
 @pytest.mark.parametrize("iterable", [list, iter], ids=["sequence", "iterator"])
 def test_dataframe_source_checks_fields_beyond_polars_inference(iterable) -> None:
-    with pytest.raises(
-        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
-    ):
+    message = "'_foo'.*drop them first"
+    if iterable is list:
+        message = "'_foo'.*'_source_x'.*drop them first"
+    with pytest.raises(InputValidationError, match=message):
         DataFrameSource(
             iterable(_late_reserved_rows(False)),
             tag_columns=TAGS,
@@ -271,6 +274,163 @@ def test_dataframe_source_preserves_inference_for_single_pass_rows() -> None:
     source = DataFrameSource(rows(), tag_columns=TAGS, tag_only_columns=True)
     assert source.as_table().equals(expected.as_table())
     assert source.source_id == expected.source_id
+
+
+def test_dataframe_source_stops_after_the_first_invalid_iterator_row() -> None:
+    def rows() -> Iterator[dict[str, int]]:
+        yield {"k": 1, "x": 2, "_foo": 3, "_source_x": 4}
+        pytest.fail("reserved fields must stop iteration")
+
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        DataFrameSource(rows(), tag_columns=["k"])
+
+
+@dataclass
+class _FrameRow:
+    k: int
+    x: int
+
+
+@dataclass
+class _ReservedFrameRow:
+    k: int
+    _foo: int
+
+
+@dataclass
+class _ExtendedFrameRow(_FrameRow):
+    _foo: int
+
+
+@dataclass
+class _RenamedFrameRow:
+    k: int
+    y: int
+
+
+@dataclass
+class _ReorderedFrameRow:
+    x: int
+    k: int
+
+
+@dataclass
+class _TypedFrameRow:
+    k: int
+    x: float
+
+
+class _TypedFrameModel(BaseModel):
+    k: int
+    x: list[int]
+
+
+class _FrameModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    k: int
+    x: int
+
+
+FRAME_ROW_CASES = [
+    pytest.param(
+        [None]
+        + [{"k": i, "x": i + 2} for i in range(101)]
+        + [{"k": 101, "x": 102, "_foo": 12345}],
+        "'_foo'.*drop them first",
+        id="leading-null",
+    ),
+    pytest.param(
+        [_FrameRow(i, i + 2) for i in range(101)] + [_ReservedFrameRow(101, 12345)],
+        "'_foo'.*drop them first",
+        id="dataclass-replacement",
+    ),
+    pytest.param(
+        [_FrameRow(i, i + 2) for i in range(101)]
+        + [_ExtendedFrameRow(101, 102, 12345)],
+        "'_foo'.*drop them first",
+        id="dataclass-extension",
+    ),
+    pytest.param(
+        [_FrameModel(k=i, x=i + 2) for i in range(101)]
+        + [_FrameModel.model_validate({"k": 101, "x": 102, "_foo": 12345})],
+        "'_foo'.*drop them first",
+        id="pydantic-extra",
+    ),
+    pytest.param(
+        [_FrameRow(i, i + 2) for i in range(101)] + [_RenamedFrameRow(101, 12345)],
+        r"row 101.*field names.*'x'.*'y'",
+        id="different-legal-fields",
+    ),
+    pytest.param(
+        [_FrameRow(1, 2), _ReorderedFrameRow(4, 3)],
+        r"row 1.*layout.*'k'.*'x'",
+        id="reordered-typed-fields",
+    ),
+    pytest.param(
+        [_FrameModel.model_validate({"k": 1, "x": 2, "extra": 3})],
+        r"row 0.*extra.*'extra'",
+        id="legal-model-extra",
+    ),
+    pytest.param(
+        [(1, 2), (3, 4)],
+        r"row 0.*named fields",
+        id="unnamed-rows",
+    ),
+]
+
+
+@pytest.mark.parametrize("rows, message", FRAME_ROW_CASES)
+@pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
+def test_dataframe_source_checks_named_row_shapes(
+    rows: list[Any], message: str, use_iterator: bool
+) -> None:
+    with pytest.raises(InputValidationError, match=message):
+        DataFrameSource(iter(rows) if use_iterator else rows)
+
+
+@pytest.mark.parametrize(
+    ("rows", "arrow_type"),
+    [
+        ([_TypedFrameRow(1, 2)], pa.float64()),
+        ([_TypedFrameModel(k=1, x=[])], pa.large_list(pa.int64())),
+    ],
+    ids=["dataclass-float", "pydantic-empty-list"],
+)
+@pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
+def test_homogeneous_typed_rows_keep_schema_and_identity(
+    rows: list[Any], arrow_type: pa.DataType, use_iterator: bool
+) -> None:
+    expected = DataFrameSource(pl.DataFrame(rows), tag_columns=["k"])
+    source = DataFrameSource(iter(rows) if use_iterator else rows, tag_columns=["k"])
+    assert source.as_table().schema.field("x").type == arrow_type
+    assert source.as_table().equals(expected.as_table())
+    assert source.source_id == expected.source_id
+    assert source.content_hash() == expected.content_hash()
+    assert source.pipeline_hash() == expected.pipeline_hash()
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [None, {"k": 1, "x": 2}, None, {"x": 4, "k": 3}],
+        [None, _FrameRow(1, 2), None, _FrameRow(3, 4)],
+    ],
+    ids=["mapping", "dataclass"],
+)
+@pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
+def test_frame_rows_keep_null_positions_and_match_mapping_fields_by_name(
+    rows: list[Any], use_iterator: bool
+) -> None:
+    source = DataFrameSource(iter(rows) if use_iterator else rows, tag_columns=["k"])
+    assert source.as_table().to_pylist() == [
+        {"k": None, "x": None},
+        {"k": 1, "x": 2},
+        {"k": None, "x": None},
+        {"k": 3, "x": 4},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -519,7 +679,7 @@ class _Poll:
     """Minimal impl for testing schema validation before the first fetch."""
 
     def __init__(
-        self, schema: pa.Schema | None, batch: pl.DataFrame | list[dict[str, int]]
+        self, schema: pa.Schema | None, batch: pl.DataFrame | list[Any]
     ) -> None:
         self._schema = schema
         self._batch = batch
@@ -542,7 +702,7 @@ class _Poll:
 
     async def fetch(
         self, cursor: Cursor[int] | None = None
-    ) -> tuple[Cursor[int], pl.DataFrame | list[dict[str, int]]]:
+    ) -> tuple[Cursor[int], pl.DataFrame | list[Any]]:
         """Return the prepared batch on the initial fetch."""
         return Cursor(value=0), self._batch
 
@@ -552,6 +712,26 @@ class _Poll:
 
     async def close(self) -> None:
         """There is no connection to close."""
+
+
+@pytest.mark.parametrize("rows, message", FRAME_ROW_CASES)
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_polling_checks_named_row_shapes(
+    rows: list[Any], message: str, use_async: bool
+) -> None:
+    source = PollingSource(
+        _Poll(None, rows), ["k"], source_id="poll", record_id_columns="k"
+    )
+
+    async def read_first() -> None:
+        async with contextlib.aclosing(source.async_iter_data()) as records:
+            await anext(records, None)
+
+    with pytest.raises(InputValidationError, match=message):
+        if use_async:
+            asyncio.run(read_first())
+        else:
+            source.as_table()
 
 
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])

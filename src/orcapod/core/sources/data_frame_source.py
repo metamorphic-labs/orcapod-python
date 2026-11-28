@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence, Sized
-from itertools import chain
-from typing import TYPE_CHECKING, Any, ClassVar
+from dataclasses import fields, is_dataclass
+from itertools import chain, repeat
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import polars as pl
 import pyarrow as pa
+from pydantic import BaseModel
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
@@ -15,7 +17,6 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
     require_custom_system_tags,
     require_source_column_names,
-    require_source_row_names,
     require_supported_nullable_types,
 )
 from orcapod.errors import InputValidationError
@@ -28,66 +29,168 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _FrameRow(NamedTuple):
+    """A row and its layout before Polars infers any columns."""
+
+    value: Any
+    names: tuple[str, ...]
+    row_type: type
+    extras: tuple[str, ...] = ()
+
+
+def _describe_frame_row(value: Any, index: int) -> _FrameRow | None:
+    """Read top-level field names while preserving typed row values."""
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        names = tuple(value)
+        if not all(isinstance(name, str) for name in names):
+            raise InputValidationError(f"Source row {index} needs string field names.")
+        return _FrameRow(value if isinstance(value, dict) else dict(value), names, dict)
+    if isinstance(value, BaseModel):
+        extras = tuple(value.model_extra or ())
+        return _FrameRow(
+            value, (*type(value).model_fields, *extras), type(value), extras
+        )
+    if is_dataclass(value) and not isinstance(value, type):
+        return _FrameRow(
+            value, tuple(field.name for field in fields(value)), type(value)
+        )
+    raise InputValidationError(
+        f"Source row {index} ({type(value).__name__}) needs named fields. "
+        "Use a mapping, dataclass or Pydantic model."
+    )
+
+
 def _checked_frame_rows(
-    rows: Iterator[Any], system_tag_columns: Collection[str]
-) -> Iterator[Any]:
-    """Inspect mapping rows at their original pace and stop on a reserved name."""
-    try:
-        first = next(rows)
-    except StopIteration:
-        return
-    if not isinstance(first, Mapping):
-        yield from chain((first,), rows)
-        return
-    for row in chain((first,), rows):
-        if isinstance(row, Mapping):
+    rows: Iterable[_FrameRow | None], system_tag_columns: Collection[str]
+) -> Iterator[_FrameRow | None]:
+    """Check every named layout before yielding the row to Polars."""
+    first: _FrameRow | None = None
+    expected: set[str] = set()
+    for index, row in enumerate(rows):
+        if row is not None:
             try:
-                require_source_column_names(row.keys(), system_tag_columns)
-            except InputValidationError:
-                # Gather the remaining names for the diagnostic before inference
-                # can drop the offending row's fields.
-                try:
-                    require_source_row_names(
-                        (
-                            item
-                            for item in chain((row,), rows)
-                            if isinstance(item, Mapping)
-                        ),
-                        system_tag_columns,
-                    )
-                except InputValidationError as error:
-                    raise error from None
+                require_source_column_names(row.names, system_tag_columns)
+            except InputValidationError as exc:
+                raise InputValidationError(f"Source row {index}. {exc}") from exc
+            if row.extras:
+                raise InputValidationError(
+                    f"Source row {index} has extra model fields {list(row.extras)!r}. "
+                    "Declare these fields on the model or use a mapping."
+                )
+            names = set(row.names)
+            if first is None:
+                first, expected = row, names
+            if names != expected:
+                raise InputValidationError(
+                    f"Source row {index} has different field names. "
+                    f"Missing {sorted(expected - names)!r}, extra {sorted(names - expected)!r}."
+                )
+            if row.row_type is not first.row_type or (
+                row.row_type is not dict and row.names != first.names
+            ):
+                raise InputValidationError(
+                    f"Source row {index} has a different layout "
+                    f"({row.row_type.__name__} fields {row.names!r}). "
+                    f"Use the same row layout ({first.row_type.__name__} fields "
+                    f"{first.names!r}) or use mappings throughout."
+                )
         yield row
+
+
+def _frame_from_checked_rows(
+    rows: Iterator[_FrameRow | None], *, materialized: bool
+) -> pl.DataFrame:
+    """Keep Polars' typed conversion for a single verified layout."""
+    leading_nulls = 0
+    for first in rows:
+        if first is not None:
+            break
+        leading_nulls += 1
+    else:
+        return pl.DataFrame([None] * leading_nulls)
+
+    all_rows = chain(repeat(None, leading_nulls), (first,), rows)
+    if first.row_type is dict:
+        values = (row.value if row is not None else None for row in all_rows)
+        return pl.DataFrame(list(values) if materialized else values)
+
+    null_positions: set[int] = set()
+
+    def typed_values() -> Iterator[Any]:
+        for index, row in enumerate(all_rows):
+            if row is None:
+                null_positions.add(index)
+            else:
+                yield row.value
+
+    typed = typed_values()
+    frame = pl.DataFrame(list(typed) if materialized else typed)
+    if tuple(frame.columns) != first.names:
+        raise InputValidationError(
+            f"Source row {leading_nulls} declares fields {first.names!r}, "
+            f"but Polars returned {frame.columns!r}. Use mappings for these rows."
+        )
+    if null_positions:
+        indices = iter(range(frame.height))
+        positions = [
+            None if index in null_positions else next(indices)
+            for index in range(frame.height + len(null_positions))
+        ]
+        frame = frame.select(
+            pl.all().gather(pl.Series(positions, dtype=pl.get_index_type()))
+        )
+    return frame
 
 
 def source_dataframe(
     data: FrameInitTypes, system_tag_columns: Collection[str] = ()
 ) -> pl.DataFrame:
-    """Check mapping names before Polars infers a schema from a sample of rows.
+    """Validate named row layouts before Polars can project or relabel fields.
 
     Args:
         data: Raw data accepted by the Polars DataFrame constructor.
         system_tag_columns: Columns nominated as custom system tags.
 
     Returns:
-        The original input converted with Polars' normal inference.
+        The validated input converted with Polars' normal inference.
     """
     if isinstance(data, Mapping):
         require_source_column_names(data.keys(), system_tag_columns)
+        return pl.DataFrame(data)
     elif isinstance(data, Sequence):
-        if data and isinstance(data[0], Mapping):
-            require_source_row_names(data, system_tag_columns)
+        if all(isinstance(column, pl.Series) for column in data):
+            return pl.DataFrame(data)
+        rows = [_describe_frame_row(row, index) for index, row in enumerate(data)]
+        require_source_column_names(
+            {name for row in rows if row is not None for name in row.names},
+            system_tag_columns,
+        )
+        return _frame_from_checked_rows(
+            _checked_frame_rows(rows, system_tag_columns), materialized=True
+        )
     elif (
         isinstance(data, Iterable)
         and not isinstance(data, Sized)
         and not hasattr(data, "__arrow_c_stream__")
     ):
-        data = _checked_frame_rows(iter(data), system_tag_columns)
+        return _frame_from_checked_rows(
+            _checked_frame_rows(
+                (_describe_frame_row(row, index) for index, row in enumerate(data)),
+                system_tag_columns,
+            ),
+            materialized=False,
+        )
     return pl.DataFrame(data)
 
 
 class DataFrameSource(RootSource):
     """A source backed by a Polars DataFrame (or any Polars-compatible data).
+
+    Python rows must be mappings with the same keys, or dataclass or Pydantic
+    rows of one class with the same declared fields. Declare Pydantic extras as
+    fields or put them in mappings. A ``None`` row keeps its position as a null row.
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
