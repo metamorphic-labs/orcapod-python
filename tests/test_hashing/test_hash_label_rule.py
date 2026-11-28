@@ -189,8 +189,8 @@ class TestLabelFormat:
 
     def test_directory_algorithm_cannot_be_reassigned_to_md5(self) -> None:
         hasher = directory_hashers.BasicDirectoryHasher(file_hasher=FileHasher())
-        with pytest.raises(ValueError, match="sha256.*'md5'"):
-            hasher.algorithm = "md5"
+        with pytest.raises(AttributeError):
+            object.__setattr__(hasher, "algorithm", "md5")
         assert hasher.algorithm == "sha256"
 
 

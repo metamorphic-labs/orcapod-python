@@ -137,6 +137,7 @@ class SemanticHasherProtocol(Protocol):
         ...
 
 
+@runtime_checkable
 class FileContentHasherProtocol(Protocol):
     """Protocol for file-related hashing."""
 
@@ -151,6 +152,7 @@ class FileContentHasherProtocol(Protocol):
     def hash_file(self, file_path: PathLike) -> ContentHash: ...
 
 
+@runtime_checkable
 class DirectoryHasherProtocol(Protocol):
     """Protocol for directory tree hashing."""
 

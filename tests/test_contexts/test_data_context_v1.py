@@ -456,3 +456,59 @@ def test_a_context_refuses_an_arrow_hasher_without_hash_schema() -> None:
         semantic_hasher=default.semantic_hasher,
     )
     assert rebuilt.arrow_hasher is default.arrow_hasher
+
+
+class FixedLabelFileHasher(CustomFileHasher):
+    """A custom hasher whose declaration hides its constructor argument."""
+
+    def __init__(self, algorithm: str) -> None:
+        self.algorithm = algorithm
+        super().__init__("sha256")
+
+
+def test_context_refuses_an_md5_setting_with_a_sha256_declaration(
+    tmp_path: Path,
+) -> None:
+    """Validate the explicit setting before building the component."""
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    spec = _manifest("v1")
+    spec["file_hasher"] = {
+        "_class": f"{__name__}.FixedLabelFileHasher",
+        "_config": {"algorithm": "md5"},
+    }
+    _ = (tmp_path / "v1.json").write_text(json.dumps(spec))
+    with pytest.raises(
+        ContextValidationError, match="Unsupported file hash algorithm 'md5'"
+    ):
+        _ = JSONDataContextRegistry(contexts_dir=tmp_path).get_context()
+
+
+class RawDirectoryHandler(CustomDirectoryHasher):
+    """A directory backend that also implements the generic handler interface."""
+
+    def handle(self, obj: orcapod.Directory, hasher: object) -> ContentHash:
+        return self.hash_directory(obj)
+
+
+def test_directory_registration_cannot_bypass_verification_with_handle(
+    tmp_path: Path,
+) -> None:
+    """The generic handler method cannot bypass directory hash verification."""
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    _ = shutil.copyfile(MANIFEST_DIR / "v1.json", tmp_path / "v1.json")
+    registrations = json.loads((CONTEXTS_DIR / "logical_types.json").read_text())
+    for pair in registrations["value_handlers"]:
+        if pair[0]["_type"] == "orcapod.logical_types.directory_type.Directory":
+            pair[1] = {
+                "_class": f"{__name__}.RawDirectoryHandler",
+                "_config": {"report_algorithm": True},
+            }
+            break
+    registration_path = tmp_path / "schemas" / "registration.json"
+    _ = registration_path.write_text(json.dumps(registrations))
+    context = JSONDataContextRegistry(
+        contexts_dir=tmp_path, logical_types_file=registration_path
+    ).get_context()
+
+    with pytest.raises(ValueError, match="directory_v1.*sha256.*'md5'"):
+        _ = context.semantic_hasher.hash_object(orcapod.Directory(tmp_path))

@@ -167,3 +167,27 @@ def test_shared_file_cache_encoding_is_in_the_inventory() -> None:
         "hashing/file_hashers.py:parse_stored_file_hash",
         "hashing/file_hashers.py:serialize_storable_file_hash",
     } <= sites
+
+
+def test_in_memory_cache_write_is_in_the_inventory() -> None:
+    """The repeated-write hash comparison also appears in the stored value table."""
+    stored_values = (
+        REFERENCE.read_text(encoding="utf-8")
+        .split("### Stored values (labelled)", 1)[1]
+        .split("\n### ", 1)[0]
+    )
+    site = "hashing/hash_cachers.py:InMemoryHashCacher.put"
+    assert site in _documented_sites()
+    assert site in SITE.findall(stored_values)
+
+
+def test_directory_migration_names_the_required_algorithm_declaration() -> None:
+    """Existing SHA-256 directory backend authors can find the migration step."""
+    fragment = (PROJECT_ROOT / "changelog.d" / "ITL-1155.md").read_text(
+        encoding="utf-8"
+    )
+    migration = fragment.split("### Breaking changes and migration", 1)[1].split(
+        "\n### ", 1
+    )[0]
+    assert "DirectoryHasherProtocol" in migration
+    assert '`algorithm = "sha256"`' in migration

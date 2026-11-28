@@ -80,6 +80,36 @@ def _read_json_file(path: Path) -> Any:
             raise ContextValidationError(f"{path}: {error}") from error
 
 
+def _validate_path_hasher_spec(spec: Any, kind: str, ref_lut: dict[str, Any]) -> Any:
+    """Require SHA-256 for algorithm settings in file and directory components."""
+    from orcapod.hashing.directory_hashers import require_directory_hash_algorithm
+    from orcapod.hashing.hash_utils import (
+        SHA256_ALGORITHM,
+        require_file_hash_algorithm,
+    )
+
+    if not isinstance(spec, dict) or "_class" not in spec:
+        return spec
+    config = spec.get("_config")
+    if not isinstance(config, dict):
+        return spec
+
+    config = dict(config)
+    if "algorithm" in config:
+        algorithm = parse_objectspec(config["algorithm"], ref_lut=ref_lut)
+        if kind == "directory_hasher":
+            require_directory_hash_algorithm(algorithm)
+        else:
+            require_file_hash_algorithm(algorithm)
+        config["algorithm"] = SHA256_ALGORITHM
+    for dependency in ("file_hasher", "directory_hasher", "cacher"):
+        if dependency in config:
+            config[dependency] = _validate_path_hasher_spec(
+                config[dependency], dependency, ref_lut
+            )
+    return {**spec, "_config": config}
+
+
 class JSONDataContextRegistry:
     """
     Registry that loads data contexts from JSON files with validation.
@@ -415,10 +445,9 @@ class JSONDataContextRegistry:
         later components in the same file.
         """
         from orcapod.hashing.directory_hashers import require_directory_hash_algorithm
-        from orcapod.hashing.hash_utils import (
-            SHA256_ALGORITHM,
-            require_file_hash_algorithm,
-        )
+        from orcapod.hashing.hash_utils import require_file_hash_algorithm
+        from orcapod.logical_types.directory_type import Directory
+        from orcapod.logical_types.file_type import File
 
         try:
             context_key = spec["context_key"]
@@ -466,16 +495,8 @@ class JSONDataContextRegistry:
                     continue
                 if isinstance(value, dict) and "_class" in value:
                     logger.debug(f"Creating {key} for context {version}")
-                    if key == "directory_hasher":
-                        config = value.get("_config", {})
-                        if isinstance(config, dict) and "algorithm" in config:
-                            require_directory_hash_algorithm(
-                                parse_objectspec(config["algorithm"], ref_lut=ref_lut)
-                            )
-                            value = {
-                                **value,
-                                "_config": {**config, "algorithm": SHA256_ALGORITHM},
-                            }
+                    if key in ("file_hasher", "directory_hasher"):
+                        value = _validate_path_hasher_spec(value, key, ref_lut)
                     component = parse_objectspec(value, ref_lut=ref_lut)
                     if key == "file_hasher":
                         require_file_hash_algorithm(
@@ -483,7 +504,7 @@ class JSONDataContextRegistry:
                         )
                     elif key == "directory_hasher":
                         require_directory_hash_algorithm(
-                            getattr(component, "algorithm", SHA256_ALGORITHM)
+                            getattr(component, "algorithm", None)
                         )
                     ref_lut[key] = component
 
@@ -494,6 +515,23 @@ class JSONDataContextRegistry:
                 for pair_spec in registration["value_handlers"]:
                     # As for the handlers of the context file: a pair whose type or
                     # handler is optional and not installed is skipped.
+                    if isinstance(pair_spec, list) and len(pair_spec) == 2:
+                        type_spec, handler_spec = pair_spec
+                        if isinstance(type_spec, dict) and "_type" in type_spec:
+                            value_type = parse_objectspec(type_spec, ref_lut=ref_lut)
+                            if isinstance(value_type, type) and issubclass(
+                                value_type, File
+                            ):
+                                handler_spec = _validate_path_hasher_spec(
+                                    handler_spec, "file_hasher", ref_lut
+                                )
+                            elif isinstance(value_type, type) and issubclass(
+                                value_type, Directory
+                            ):
+                                handler_spec = _validate_path_hasher_spec(
+                                    handler_spec, "directory_hasher", ref_lut
+                                )
+                        pair_spec = [type_spec, handler_spec]
                     pair = parse_objectspec(pair_spec, ref_lut=ref_lut)
                     if pair and len(pair) == 2 and all(x is not None for x in pair):
                         handler_registry.register(pair[0], pair[1])

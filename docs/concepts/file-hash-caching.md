@@ -13,10 +13,11 @@ If you have not used `op.File` and `op.Directory` yet, read
 `FileHasher` is the base hasher. When you call `hash_file(path)` on it, it
 reads the file's bytes from disk and returns their SHA-256 content hash, with
 the label `sha256`. It does this every time, with no memory of previous
-results. `sha256` is the only file hash algorithm: `FileHasher(algorithm=...)`
-and `hash_file(..., algorithm=...)` refuse any other name with a `ValueError`
-that names the algorithm given. Loading a data context whose file hasher names
-another algorithm raises `ContextValidationError` with the same detail.
+results. The standalone `hash_file(path)` function also computes SHA-256 and
+takes only the path and an optional buffer size. `FileHasher(algorithm=...)`
+accepts only `"sha256"` and raises `ValueError` for other names. Loading a data
+context whose file hasher names another algorithm raises
+`ContextValidationError` with the same detail.
 
 `HashCacher` is a protocol for any object that maps a `FileHashKey` to a
 `ContentHash`. The key is a four-field struct:

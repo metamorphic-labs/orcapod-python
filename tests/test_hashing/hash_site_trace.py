@@ -259,6 +259,9 @@ def run_scenario() -> None:
     warnings.filterwarnings("ignore")
     import orcapod as op
     from orcapod.contexts import get_default_context
+    from orcapod.hashing.file_hashers import FileHashKey
+    from orcapod.hashing.hash_cachers import InMemoryHashCacher
+    from upath import UPath
     from tests.test_hashing.golden import cases
 
     _ = cases.compute_all()
@@ -267,6 +270,13 @@ def run_scenario() -> None:
         root = _Path(tmp)
         (root / "a.txt").write_text("alpha")
         _ = hasher.hash_object([op.Directory(root), op.File(root / "a.txt")])
+        file_path = UPath(root / "a.txt")
+        stat = file_path.stat()
+        value = hasher.hash_object(op.File(file_path))
+        key = FileHashKey(file_path, stat.st_mtime_ns, stat.st_size, value.method)
+        cache = InMemoryHashCacher()
+        cache.put(key, value)
+        cache.put(key, value)
 
 
 def pytest_configure(config: pytest.Config) -> None:

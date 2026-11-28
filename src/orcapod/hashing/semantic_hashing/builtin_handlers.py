@@ -30,12 +30,9 @@ from uuid import UUID
 
 from typing_extensions import override
 
-from orcapod.hashing.directory_hashers import (
-    canonical_directory_hash,
-    require_directory_hash_algorithm,
-)
-from orcapod.hashing.file_hashers import canonical_file_hash
-from orcapod.hashing.hash_utils import SHA256_ALGORITHM, require_file_hash_algorithm
+from orcapod.hashing.directory_hashers import verified_directory_hash
+from orcapod.hashing.file_hashers import verified_file_hash
+from orcapod.hashing.hash_utils import require_file_hash_algorithm
 from orcapod.hashing.pandas_value_hash import (
     PANDAS_DATAFRAME_HASH_LABEL,
     PANDAS_DATAFRAME_OPTIONS,
@@ -517,10 +514,7 @@ class FileHandler:
             raise TypeError(f"FileHandler: expected an orcapod.File, got {type(obj)!r}")
         wrapped = getattr(obj, "__wrapped__")
         logger.debug("FileHandler: hashing file content at %s", wrapped)
-        file_hasher = self.file_hasher
-        require_file_hash_algorithm(file_hasher.hash_algorithm)
-        result = file_hasher.hash_file(wrapped)
-        return canonical_file_hash(SHA256_ALGORITHM, result)
+        return verified_file_hash(self.file_hasher, wrapped)
 
 
 class DirectoryHandler:
@@ -552,10 +546,7 @@ class DirectoryHandler:
         wrapped = getattr(obj, "__wrapped__")
         ignore = getattr(obj, "_ignore", None)
         logger.debug("DirectoryHandler: hashing directory content at %s", wrapped)
-        directory_hasher = self.directory_hasher
-        require_directory_hash_algorithm(getattr(directory_hasher, "algorithm", None))
-        result = directory_hasher.hash_directory(wrapped, ignore=ignore)
-        return canonical_directory_hash(result)
+        return verified_directory_hash(self.directory_hasher, wrapped, ignore)
 
 
 class NumpyArrayHandler(IgnoreListHandler):

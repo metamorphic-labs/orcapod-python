@@ -458,7 +458,12 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         # Convert storage value → Python object and hash it.
         python_obj = self._type_converter.storage_to_python(storage_value, python_type)
         handler = self._python_hasher.type_handler_registry.get_handler(python_obj)
-        if isinstance(handler, IgnoreListHandler):
+        from orcapod.logical_types.directory_type import Directory
+        from orcapod.logical_types.file_type import File
+
+        if isinstance(handler, IgnoreListHandler) and not isinstance(
+            python_obj, (File, Directory)
+        ):
             # A value type with an ignore list (ITL-981): the cell is hashed under
             # the list of its own column, read from the column's extension
             # metadata, never under the list the data context configures.

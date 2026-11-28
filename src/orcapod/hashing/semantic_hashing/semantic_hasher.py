@@ -217,7 +217,7 @@ class SemanticAwarePythonHasher:
                 type(obj).__name__,
                 type(handler).__name__,
             )
-            result = handler.handle(obj, self)
+            result = self._handle_registered(obj, handler)
             if isinstance(result, Encoded):
                 # The only route to a trusted tagged object: a handler's own result.
                 return self._hash_to_content_hash(
@@ -250,6 +250,35 @@ class SemanticAwarePythonHasher:
         # Fallback for unhandled types.
         fallback = self._handle_unknown(obj)
         return self._hash_to_content_hash(fallback)
+
+    def _handle_registered(
+        self, obj: Any, handler: hp.PythonTypeHandlerProtocol
+    ) -> Any:
+        """Dispatch File and Directory values through their fixed hash procedures."""
+        from orcapod.hashing.semantic_hashing.builtin_handlers import (
+            DirectoryHandler,
+            FileHandler,
+        )
+        from orcapod.logical_types.directory_type import Directory
+        from orcapod.logical_types.file_type import File
+
+        if isinstance(obj, File):
+            if not isinstance(handler, FileHandler):
+                if not isinstance(handler, hp.FileContentHasherProtocol):
+                    raise TypeError("A File handler must supply a file content hasher")
+                handler = FileHandler(handler)
+            return FileHandler.handle(handler, obj, self)
+
+        if isinstance(obj, Directory):
+            if not isinstance(handler, DirectoryHandler):
+                if not isinstance(handler, hp.DirectoryHasherProtocol):
+                    raise TypeError(
+                        "A Directory handler must supply a directory tree hasher"
+                    )
+                handler = DirectoryHandler(handler)
+            return DirectoryHandler.handle(handler, obj, self)
+
+        return handler.handle(obj, self)
 
     # ------------------------------------------------------------------
     # Private: structural expansion

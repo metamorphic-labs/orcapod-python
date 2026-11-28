@@ -92,30 +92,14 @@ def cacher(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Cacher]:
 def test_hash_file_is_the_sha256_of_the_content(data_file: Path) -> None:
     expected = ContentHash("sha256", hashlib.sha256(data_file.read_bytes()).digest())
     assert hash_file(data_file) == expected
-    assert hash_file(data_file, algorithm="sha256") == expected
     assert FileHasher().hash_file(data_file) == expected
     assert FileHasher(algorithm="sha256").hash_file(data_file) == expected
     assert FileHasher().hash_algorithm == "sha256"
 
 
-@pytest.mark.parametrize("algorithm", REFUSED_ALGORITHMS)
-def test_hash_file_refuses_every_other_algorithm(
-    data_file: Path, algorithm: str
-) -> None:
-    with pytest.raises(ValueError) as raised:
-        hash_file(data_file, algorithm=algorithm)
-    assert str(raised.value) == (
-        f"Unsupported file hash algorithm {algorithm!r}: "
-        "sha256 is the only file hash algorithm"
-    )
-
-
-def test_hash_file_refuses_the_algorithm_before_looking_at_the_file(
-    tmp_path: Path,
-) -> None:
-    """A refused algorithm is an argument error, whatever the path holds."""
-    with pytest.raises(ValueError, match=_refusal("md5")):
-        hash_file(tmp_path / "missing.bin", algorithm="md5")
+def test_hash_file_has_no_algorithm_argument() -> None:
+    """The standalone hasher always uses SHA-256."""
+    assert "algorithm" not in inspect.signature(hash_file).parameters
 
 
 @pytest.mark.parametrize("algorithm", REFUSED_ALGORITHMS)
@@ -126,12 +110,13 @@ def test_file_hasher_refuses_every_other_algorithm_when_built(algorithm: str) ->
     assert "sha256 is the only file hash algorithm" in str(raised.value)
 
 
-def test_file_hasher_whose_algorithm_was_changed_still_refuses(data_file: Path) -> None:
-    """Changing the attribute after construction does not get around the rule."""
+@pytest.mark.parametrize("attribute", ["algorithm", "hash_algorithm"])
+def test_file_hasher_algorithm_is_read_only(data_file: Path, attribute: str) -> None:
+    """Both public SHA-256 properties refuse reassignment."""
     hasher = FileHasher()
-    hasher.algorithm = "md5"
-    with pytest.raises(ValueError, match=_refusal("md5")):
-        hasher.hash_file(data_file)
+    with pytest.raises(AttributeError):
+        object.__setattr__(hasher, attribute, "md5")
+    assert hasher.hash_file(data_file) == hash_file(data_file)
 
 
 def test_path_text_never_enters_a_file_hash(tmp_path: Path) -> None:

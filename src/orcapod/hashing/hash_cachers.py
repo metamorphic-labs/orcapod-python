@@ -118,7 +118,7 @@ class InMemoryHashCacher:
                 (checked before the write guards), or if a write finds a different
                 hash under the same key.
         """
-        value = canonical_file_hash(key.algorithm, value)
+        value = canonical_file_hash(value, stored_label=key.algorithm)
         if self._read_only:
             return
         if (

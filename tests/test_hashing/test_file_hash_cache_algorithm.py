@@ -191,10 +191,7 @@ class _CountingHasher:
     def __init__(self) -> None:
         self.inner: FileHasher = FileHasher()
         self.reads: int = 0
-
-    @property
-    def hash_algorithm(self) -> str:
-        return self.inner.hash_algorithm
+        self.hash_algorithm: str = self.inner.hash_algorithm
 
     def hash_file(self, file_path: PathLike) -> ContentHash:
         self.reads += 1
@@ -311,12 +308,12 @@ def test_uncached_consumers_refuse_a_changed_label_before_hashing(
     inner = _CountingHasher()
     if consumer == "file":
         file_handler = FileHandler(inner)
-        inner.inner.algorithm = "md5"
+        inner.hash_algorithm = "md5"
         with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
             _ = file_handler.handle(File(data_file), get_default_semantic_hasher())
     else:
         directory_hasher = BasicDirectoryHasher(inner)
-        inner.inner.algorithm = "md5"
+        inner.hash_algorithm = "md5"
         with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
             _ = directory_hasher.hash_directory(data_file.parent)
     assert inner.reads == 0
@@ -341,7 +338,7 @@ def test_cached_file_hasher_rechecks_the_file_algorithm_after_miss(
     class ChangingCacher(_LegacyCacher):
         @override
         def get(self, key: FileHashKey) -> ContentHash | None:
-            inner.inner.algorithm = "md5"
+            inner.hash_algorithm = "md5"
             return None
 
     cache = ChangingCacher()
@@ -379,7 +376,7 @@ def test_directory_rechecks_the_file_algorithm_after_ignore_filter(
 
     def change_algorithm(path: UPath) -> bool:
         assert path.name == data_file.name
-        inner.inner.algorithm = "md5"
+        inner.hash_algorithm = "md5"
         return False
 
     with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
@@ -854,3 +851,56 @@ def test_uncached_consumers_refuse_an_unsupported_file_hasher(
     with pytest.raises(ValueError, match="Unsupported file hash algorithm"):
         _ = consumer(inner)
     assert inner.calls == 0
+
+
+@pytest.mark.parametrize("hit", [True, False], ids=["hit", "miss"])
+def test_cache_lookup_cannot_switch_to_an_unsupported_algorithm(
+    data_file: Path, hit: bool
+) -> None:
+    """Refuse changed custom hasher or cacher declarations after lookup."""
+    inner = _MisencodingFileHasher()
+    expected = FileHasher().hash_file(data_file)
+
+    class SwitchingCacher(_LegacyCacher):
+        algorithm = "sha256"
+
+        @override
+        def get(self, key: FileHashKey) -> ContentHash | None:
+            if hit:
+                inner.hash_algorithm = "md5"
+                return expected
+            self.algorithm = "md5"
+            return None
+
+    cache = SwitchingCacher()
+    hasher = CachedFileHasher(inner, cache)
+    with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
+        _ = hasher.hash_file(data_file)
+    assert not cache.entries
+
+
+@pytest.mark.parametrize("consumer", ["cache", "file", "directory"])
+def test_rejects_a_sha256_shaped_custom_file_digest(
+    data_file: Path, consumer: str
+) -> None:
+    """Only a digest matching SHA-256 of the file's bytes is accepted."""
+
+    class WrongDigest:
+        hash_algorithm = "sha256"
+
+        def hash_file(self, file_path: PathLike) -> ContentHash:
+            return ContentHash("sha256", b"\x00" * 32)
+
+    custom = WrongDigest()
+    with pytest.raises(ValueError, match="does not match SHA-256"):
+        if consumer == "cache":
+            _ = CachedFileHasher(custom, _LegacyCacher()).hash_file(data_file)
+        elif consumer == "file":
+            from orcapod.contexts import get_default_semantic_hasher
+            from orcapod.logical_types.file_type import File
+
+            _ = FileHandler(custom).handle(
+                File(data_file), get_default_semantic_hasher()
+            )
+        else:
+            _ = BasicDirectoryHasher(custom).hash_directory(data_file.parent)

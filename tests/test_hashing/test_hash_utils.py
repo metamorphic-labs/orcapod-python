@@ -182,29 +182,6 @@ class TestHashFile:
         with pytest.raises(FileNotFoundError):
             hash_file(tmp_path / "does_not_exist.bin")
 
-    def test_invalid_algorithm_raises_value_error(self, tmp_path):
-        """An algorithm other than sha256 raises ValueError naming it (ITL-1155)."""
-        from orcapod.hashing.hash_utils import hash_file
-        import pytest
-
-        f = tmp_path / "f.bin"
-        f.write_bytes(b"hello")
-        with pytest.raises(ValueError, match="'bogus_algo_xyz'.*sha256 is the only"):
-            hash_file(f, algorithm="bogus_algo_xyz")
-
-    def test_hash_path_algorithm_is_gone(self, tmp_path):
-        """hash_path hashed the path string, not the content: refused (ITL-1155)."""
-        from orcapod.hashing.hash_utils import hash_file
-        import pytest
-
-        f = tmp_path / "f.bin"
-        f.write_bytes(b"content A")
-        with pytest.raises(ValueError, match="'hash_path'.*sha256 is the only"):
-            hash_file(f, algorithm="hash_path")
-        before = hash_file(f)
-        f.write_bytes(b"content B")
-        assert hash_file(f) != before
-
 
 class TestIsInString:
     def test_position_outside_string_returns_false(self):

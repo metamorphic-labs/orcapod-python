@@ -121,7 +121,7 @@ def _to_path(file_path: PathLike) -> Path | UPath:
 
 
 SHA256_ALGORITHM = "sha256"
-_SHA256_DIGEST_SIZE = 32
+SHA256_DIGEST_SIZE = 32
 
 
 def require_file_hash_algorithm(algorithm: object) -> None:
@@ -148,34 +148,13 @@ def require_file_hash_algorithm(algorithm: object) -> None:
         )
 
 
-def file_hash_digest_size(algorithm: str) -> int:
-    """Return the digest length in bytes of a ``hash_file`` hash made with ``algorithm``.
-
-    Args:
-        algorithm: The file hash algorithm (its hashes' label): ``"sha256"``.
-
-    Returns:
-        The exact length of every digest ``hash_file`` returns.
-
-    Raises:
-        ValueError: If ``algorithm`` is not ``"sha256"``, the only file hash
-            algorithm.
-    """
-    require_file_hash_algorithm(algorithm)
-    return _SHA256_DIGEST_SIZE
-
-
-def hash_file(
-    file_path: PathLike, algorithm: str = SHA256_ALGORITHM, buffer_size: int = 65536
-) -> ContentHash:
+def hash_file(file_path: PathLike, *, buffer_size: int = 65536) -> ContentHash:
     """Calculate the SHA-256 hash of a file's content.
 
     Supports both local ``pathlib.Path`` and remote ``UPath`` objects.
 
     Args:
         file_path: Path to the file to hash.
-        algorithm: The hash algorithm. ``"sha256"`` is the only file hash
-            algorithm; anything else is refused.
         buffer_size: Size of chunks to read from the file at a time.
 
     Returns:
@@ -183,11 +162,8 @@ def hash_file(
         hash bytes.
 
     Raises:
-        ValueError: If ``algorithm`` is not ``"sha256"``; the message names the
-            algorithm given. Raised before the file is looked at.
         FileNotFoundError: If ``file_path`` is not a file.
     """
-    require_file_hash_algorithm(algorithm)
     path = _to_path(file_path)
 
     if not path.is_file():
