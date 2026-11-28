@@ -139,11 +139,6 @@ class Index(UnaryOperator):
         projection = self._resolve_projection(stream)
         self._projections[stream.pipeline_hash()] = projection
 
-    def _projection_for(self, stream: StreamProtocol) -> ProjectionType:
-        """Read the type for this stream, resolving it if validation was bypassed."""
-        projection = self._projections.get(stream.pipeline_hash())
-        return self._resolve_projection(stream) if projection is None else projection
-
     def _resolve_projection(self, stream: StreamProtocol) -> ProjectionType:
         """Validate input schema and resolve output element type.
 
@@ -244,7 +239,7 @@ class Index(UnaryOperator):
         tag_schema, data_schema = stream.output_schema(
             columns=columns, all_info=all_info
         )
-        projection = self._projection_for(stream)
+        projection = self._resolve_projection(stream)
         assert projection.python_type is not None
         data_dict = dict(data_schema)
 
@@ -286,6 +281,12 @@ class Index(UnaryOperator):
             ValueError: If the extracted element is ``None`` but the predicted
                 output type is not Optional.
         """
+        column_type = arrow_utils.column_arrow_type(data.arrow_schema(), self.column)
+        if projection.python_type is None and isinstance(column_type, pa.ExtensionType):
+            raise ValueError(
+                "Index requires validation for direct async execution on logical "
+                "columns. Call validate_inputs(stream) for the current input."
+            )
         col_val = data[self.column]
         length = len(col_val)
         effective_i = self.i if self.i >= 0 else length + self.i
@@ -328,10 +329,7 @@ class Index(UnaryOperator):
 
         element_field = pa.field(
             self.out or self.column,
-            self._element_arrow_type(
-                arrow_utils.column_arrow_type(data.arrow_schema(), self.column),
-                projection,
-            ),
+            self._element_arrow_type(column_type, projection),
             nullable=nullable,
         )
         if self.out is None:
@@ -381,7 +379,7 @@ class Index(UnaryOperator):
             ValueError: If an extracted element is ``None`` but the predicted
                 output type is not Optional.
         """
-        projection = self._projection_for(stream)
+        projection = self._resolve_projection(stream)
         out_rows = []
         for tag, data in stream.iter_data():
             result = self._process_one(tag, data, projection)
@@ -455,21 +453,30 @@ class Index(UnaryOperator):
 
         Each packet is processed independently via ``_process_one`` and
         forwarded immediately to the output channel — no buffering required.
+        For direct row-channel calls on a logical column, call
+        ``validate_inputs(stream)`` on the current input first.
 
         Args:
             inputs: Single-element sequence of readable channels.
             output: Channel to send transformed packets to.
-            input_pipeline_hashes: The input hash used to find its validated type.
+            input_pipeline_hashes: One pipeline hash for the input.
+
+        Raises:
+            ValueError: If the hash count is wrong or a direct call needs a
+                logical projection type that has not been validated.
         """
         try:
             output = WithoutMetaWriter(output)
-            projection = self._projections.get(input_pipeline_hashes[0])
-            if projection is None:
-                stream: StreamProtocol | None = getattr(inputs[0], "stream", None)
+            if len(input_pipeline_hashes) != 1:
+                raise ValueError(
+                    "Index requires exactly one entry in input_pipeline_hashes."
+                )
+            stream: StreamProtocol | None = getattr(inputs[0], "stream", None)
+            if stream is not None:
+                projection = self._resolve_projection(stream)
+            else:
                 projection = (
-                    ProjectionType()
-                    if stream is None
-                    else self._resolve_projection(stream)
+                    self._projections.get(input_pipeline_hashes[0]) or ProjectionType()
                 )
             async for tag, data in inputs[0]:
                 result = self._process_one(tag, data, projection)

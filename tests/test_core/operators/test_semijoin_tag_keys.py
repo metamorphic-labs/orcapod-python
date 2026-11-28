@@ -195,14 +195,16 @@ async def _async_rows(
 def test_async_rows_equal_sync_rows(
     make_right: Callable[[], ArrowTableSource], kept: list[int], ignored: Ignored
 ) -> None:
-    """The async path keys on the same columns; called without validation it warns once."""
+    """The async path keys on the same columns and validation warns once."""
     left, right = left_source(), make_right()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SemiJoinIgnoredColumnWarning)
         expected = sync_rows(SemiJoin(), left, right)
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
-        actual = asyncio.run(_async_rows(SemiJoin(), left, right))
+        op = SemiJoin()
+        op.validate_inputs(left, right)
+        actual = asyncio.run(_async_rows(op, left, right))
     found = [w for w in record if issubclass(w.category, SemiJoinIgnoredColumnWarning)]
     assert len(found) == (1 if ignored else 0)
     assert len(expected) == len(kept)
@@ -272,7 +274,7 @@ def test_filter_without_the_warning() -> None:
     assert left_ids(result) == [2]
 
 
-@pytest.mark.parametrize("path", ["sync", "async_validated", "async_unvalidated"])
+@pytest.mark.parametrize("path", ["sync", "async"])
 def test_shared_meta_column_is_neither_a_key_nor_warned_about(path: str) -> None:
     """A meta (``__``) column of the same name on both inputs is not a user column
     (ITL-1080): no match key, no ``SemiJoinIgnoredColumnWarning``, not in the output."""
@@ -287,8 +289,7 @@ def test_shared_meta_column_is_neither_a_key_nor_warned_about(path: str) -> None
             ids = left_ids(result)
             meta = [n for n in result.as_table(all_info=True).column_names if "__" in n]
         else:
-            if path == "async_validated":
-                _ = op(left, right)
+            op.validate_inputs(left, right)
             rows = asyncio.run(_async_rows(op, left, right))
             ids = [tag.as_dict()["id"] for tag, _ in rows]
             meta = [
@@ -388,22 +389,34 @@ async def test_direct_empty_right_uses_its_own_validation() -> None:
 
 
 @pytest.mark.parametrize("validate_other", [False, True])
+@pytest.mark.parametrize("empty_right", [False, True])
 @pytest.mark.asyncio
-async def test_direct_empty_right_requires_validation_for_this_pair(
-    validate_other: bool,
+async def test_direct_async_requires_validation_for_this_pair(
+    validate_other: bool, empty_right: bool
 ) -> None:
-    """An empty row channel cannot tell a direct call which tags are shared."""
+    """Direct row channels require validation of the exact ordered input pair."""
     left, other, right = _shared_operator_inputs(False, False)
-    empty = right.polars_filter(u=0)
+    actual_right = right.polars_filter(u=0) if empty_right else right
     op = SemiJoin()
     if validate_other:
-        _ = op(other, empty)
+        op.validate_inputs(other, actual_right)
     with pytest.raises(
         InputValidationError,
-        match="SemiJoin cannot tell its match keys: the right input has no rows "
-        "and the inputs were not validated",
+        match=r"SemiJoin .*validate_inputs\(left, right\)",
     ):
-        _ = await _async_rows(op, left, empty)
+        _ = await _async_rows(op, left, actual_right)
+
+
+@pytest.mark.asyncio
+async def test_direct_unknown_pair_refuses_before_emitting_a_warning() -> None:
+    """An unrelated validation cannot turn the refusal into an ignored-name warning."""
+    left = left_source()
+    op = SemiJoin()
+    op.validate_inputs(left, right_tags_only())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
+        with pytest.raises(InputValidationError, match="validate_inputs"):
+            _ = await _async_rows(op, left, right_same_tag_other_y())
 
 
 @pytest.mark.asyncio

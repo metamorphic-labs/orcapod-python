@@ -297,8 +297,8 @@ class SemiJoin(BinaryOperator):
         Checks that the match keys (the shared tag columns) have compatible
         types; data columns are not keys and are not checked.
 
-        Remembers the common keys for direct row-channel execution of this pair
-        when the right input has no rows.
+        Remembers the ordered pair for direct row-channel execution and its common
+        keys for runs where the right input has no rows.
 
         Raises:
             InputValidationError: If a match key's types differ beyond
@@ -342,8 +342,9 @@ class SemiJoin(BinaryOperator):
         appear in the right-side index, emit immediately. Left rows keep their
         arrival order.
 
-        With an empty right input, use the job's input descriptions or the
-        validated keys for these input pipeline hashes.
+        A direct call must first validate its exact inputs with
+        ``validate_inputs(left, right)``. With an empty right input, the match keys
+        come from the job's current descriptions or from that validation.
 
         Key types are checked (``require_shared_arrow_type``) on the first row
         of each input, since channels carry no schema. When either input is
@@ -356,31 +357,29 @@ class SemiJoin(BinaryOperator):
             input_pipeline_hashes: Pipeline hashes of the left and right inputs.
 
         Raises:
-            InputValidationError: If the right input has no rows and neither
-                input descriptions nor validation for this pair are available.
+            InputValidationError: If a direct call supplies an unvalidated pair.
         """
         left_rows: _LeftRows | None = None
         try:
             output = WithoutMetaWriter(output)
+            left_stream: StreamProtocol | None = getattr(inputs[0], "stream", None)
+            right_stream: StreamProtocol | None = getattr(inputs[1], "stream", None)
             validated_keys = self._validated_keys.get(tuple(input_pipeline_hashes))
+            if (left_stream is None or right_stream is None) and validated_keys is None:
+                raise InputValidationError(
+                    "SemiJoin requires validation of the current input pair. "
+                    "Call validate_inputs(left, right) before direct async execution."
+                )
             # Phase 1: Build right-side lookup, reading the left input meanwhile
             right_rows, left_rows = await _collect_right_reading_left(
                 inputs[0], inputs[1]
             )
 
             if not right_rows:
-                left_stream: StreamProtocol | None = getattr(inputs[0], "stream", None)
-                right_stream: StreamProtocol | None = getattr(inputs[1], "stream", None)
+                common = validated_keys
                 if left_stream is not None and right_stream is not None:
                     common = self._match_keys(
                         left_stream.keys()[0], right_stream.keys()[0]
-                    )
-                elif validated_keys is not None:
-                    common = validated_keys
-                else:
-                    raise InputValidationError(
-                        "SemiJoin cannot tell its match keys: the right input has no "
-                        "rows and the inputs were not validated"
                     )
                 if common:
                     # Drain left channel (discard) — result is empty
@@ -404,8 +403,8 @@ class SemiJoin(BinaryOperator):
                     # First left row — determine common keys (the shared tag
                     # columns, ITL-1088) and build index
                     common_keys = self._match_keys(tuple(tag.keys()), right_tag_keys)
-                    # Validation warns about shared non-key names; when it did not
-                    # run (a direct call), warn here, once, from the first rows.
+                    # A job can reach execution without validating these inputs.
+                    # Warn about shared non-key names from the first rows.
                     if validated_keys is None:
                         ignored = self._ignored_shared_names(
                             tag.keys(),

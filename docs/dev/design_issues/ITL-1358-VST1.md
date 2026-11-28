@@ -16,7 +16,9 @@ type of the stream validated last (ITL-858 inventory, section 1.2). Found again 
 writing the ITL-1347 spec (`docs/dev/specs/itl-1347-job-table-transport.md`, difference e6).
 
 **Fix:** Async `SemiJoin` reads the job inputs' tag descriptions when the right input is
-empty. Direct row-channel calls use the keys validated for their own pair of pipeline
-hashes and raise if that pair was never validated. `Index` and `Pick` keep projected
-types and lookup information keyed by the input pipeline hash. Regression tests reuse
-each operator across inputs with different tags or projected types.
+empty. Every direct row-channel call requires validation for its ordered pair of
+pipeline hashes. `Index` and `Pick` resolve types from the current stream description
+whenever one is available, including after upstream rewiring. Direct row-channel
+calls use validation keyed by the input pipeline hash and report how to validate
+when a logical projection needs a fallback. Regression tests reuse each operator
+across inputs with different tags or projected types.

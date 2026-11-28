@@ -194,6 +194,8 @@ async def run_binary(
     op, left: ArrowTableStream, right: ArrowTableStream
 ) -> list[tuple]:
     """Run a binary operator async and collect results."""
+    if isinstance(op, SemiJoin):
+        op.validate_inputs(left, right)
     left_ch = Channel(buffer_size=1024)
     right_ch = Channel(buffer_size=1024)
     output_ch = Channel(buffer_size=1024)
@@ -958,6 +960,7 @@ class TestSemiJoinBuildProbe:
     @pytest.mark.asyncio
     async def test_empty_left_returns_empty(self):
         """Empty left input produces empty output regardless of right."""
+        left = make_left_stream()
         right_table = pa.table(
             {
                 "id": pa.array([1, 2], type=pa.int64()),
@@ -974,10 +977,11 @@ class TestSemiJoinBuildProbe:
         await feed(right, right_ch)
 
         op = SemiJoin()
+        op.validate_inputs(left, right)
         await op.async_execute(
             [left_ch.reader, right_ch.reader],
             output_ch.writer,
-            input_pipeline_hashes=[root_hash("id", "value"), right.pipeline_hash()],
+            input_pipeline_hashes=hashes(left, right),
         )
         results = await output_ch.reader.collect()
         assert results == []
@@ -1142,8 +1146,10 @@ class TestSemiJoinRightEndsWhileLeftOpen:
         await left_ch.writer.send(left_rows[0])
         await feed(right, right_ch)
 
+        op = SemiJoin()
+        op.validate_inputs(left, right)
         task = asyncio.create_task(
-            SemiJoin().async_execute(
+            op.async_execute(
                 [left_ch.reader, right_ch.reader],
                 output_ch.writer,
                 input_pipeline_hashes=hashes(left, right),
@@ -1164,16 +1170,19 @@ class TestSemiJoinRightEndsWhileLeftOpen:
         left_ch, output_ch = Channel[_Row](4), Channel[_Row](4)
         left_reader = _SignallingReader(left_ch, signal_on_call=2)
         await left_ch.writer.send(next(iter(left.iter_data())))
+        right = _id_stream([3], "b")
+        op = SemiJoin()
+        op.validate_inputs(left, right)
 
         # The right input fails once the second left receive waits on the open,
         # empty left channel. ``asyncio.timeout``, unlike ``asyncio.wait_for`` on
         # 3.11, adds no task.
         with pytest.raises(RuntimeError, match="right input failed"):
             async with asyncio.timeout(_HANG_GUARD_SECONDS):
-                await SemiJoin().async_execute(
+                await op.async_execute(
                     [left_reader, _FailingChannel(after=left_reader.waiting)],
                     output_ch.writer,
-                    input_pipeline_hashes=hashes(left, left),
+                    input_pipeline_hashes=hashes(left, right),
                 )
         assert await output_ch.reader.collect() == []  # the output is closed
         # Nothing is left reading the left input.
@@ -1197,8 +1206,10 @@ class TestSemiJoinRightEndsWhileLeftOpen:
         for row in right.iter_data():
             await right_ch.writer.send(row)  # the right input stays open for now
 
+        op = SemiJoin()
+        op.validate_inputs(left, right)
         task = asyncio.create_task(
-            SemiJoin().async_execute(
+            op.async_execute(
                 [left_reader, right_ch.reader],
                 output_ch.writer,
                 input_pipeline_hashes=hashes(left, right),
@@ -1960,6 +1971,7 @@ class TestStreamingPipelineIntegration:
         right = make_right_stream()  # id=[2,3,4]
 
         semi_op = SemiJoin()
+        semi_op.validate_inputs(left, right)
         batch_op = Batch(batch_size=2)
 
         ch_l = Channel(buffer_size=16)

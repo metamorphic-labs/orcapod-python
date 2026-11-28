@@ -33,6 +33,7 @@ from typing import Any, TypeAlias
 import pyarrow as pa
 
 from orcapod.channels import Channel
+from orcapod.core.operators import SemiJoin
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource
 from orcapod.protocols.core_protocols import (
@@ -307,6 +308,8 @@ def presentation(stream: StreamProtocol) -> tuple[tuple[str, ...], tuple[str, ..
 async def _run_async(
     op: StaticOutputOperatorPod, sources: Sequence[StreamProtocol]
 ) -> list[Row]:
+    if isinstance(op, SemiJoin):
+        op.validate_inputs(*sources)
     channels: list[Channel[Row]] = [Channel(buffer_size=64) for _ in sources]
     output: Channel[Row] = Channel(buffer_size=64)
     for stream, channel in zip(sources, channels):

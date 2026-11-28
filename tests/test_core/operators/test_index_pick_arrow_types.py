@@ -25,7 +25,7 @@ import pyarrow as pa
 import polars as pl
 import pytest
 
-from orcapod import contexts
+from orcapod import PipelineJob, contexts
 from orcapod.channels import Channel
 from orcapod.contexts import DataContext, get_default_type_converter
 from orcapod.core.operators import (
@@ -39,8 +39,10 @@ from orcapod.core.operators import (
     SelectTagColumns,
 )
 from orcapod.core.operators.base import UnaryOperator
-from orcapod.core.sources import ArrowTableSource
+from orcapod.core.nodes.operator_node import OperatorJobNode
+from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams import ArrowTableStream
+from orcapod.databases import InMemoryArrowDatabase
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.registry import (
     make_arrow_extension_type,
@@ -48,7 +50,7 @@ from orcapod.logical_types.registry import (
 )
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
-from orcapod.types import DataType
+from orcapod.types import DataType, DataValue
 from orcapod.utils.arrow_utils import normalize_schema_to_large_types
 
 TAG = "tg"
@@ -477,7 +479,9 @@ async def _run_async(op: UnaryOperator, source: StreamProtocol) -> list[Row]:
     return await _execute_rows(op, source)
 
 
-async def _execute_rows(op: UnaryOperator, source: StreamProtocol) -> list[Row]:
+async def _execute_rows(
+    op: UnaryOperator, source: StreamProtocol, *, with_hash: bool = True
+) -> list[Row]:
     """Send the source's rows without validating the operator again."""
     input_ch: Channel[Row] = Channel(buffer_size=16)
     output_ch: Channel[Row] = Channel(buffer_size=16)
@@ -487,7 +491,7 @@ async def _execute_rows(op: UnaryOperator, source: StreamProtocol) -> list[Row]:
     await op.async_execute(
         [input_ch.reader],
         output_ch.writer,
-        input_pipeline_hashes=[source.pipeline_hash()],
+        input_pipeline_hashes=[source.pipeline_hash()] if with_hash else [],
     )
     return await output_ch.reader.collect()
 
@@ -506,6 +510,7 @@ async def _execute_rows(op: UnaryOperator, source: StreamProtocol) -> list[Row]:
     ],
     ids=["index", "pick"],
 )
+@pytest.mark.parametrize("validate_first", [False, True])
 @pytest.mark.asyncio
 async def test_reused_projection_on_plain_columns(
     op: UnaryOperator,
@@ -513,6 +518,7 @@ async def test_reused_projection_on_plain_columns(
     strings: list[Any],
     int_type: DataType,
     str_type: DataType,
+    validate_first: bool,
 ) -> None:
     """Plain list and dict columns keep their own Arrow element or value type."""
     converter = get_default_type_converter()
@@ -526,21 +532,27 @@ async def test_reused_projection_on_plain_columns(
             [{"c": value} for value in strings], python_schema={"c": str_type}
         ).column("c")
     )
-    _ = op(first)
+    if validate_first:
+        _ = op(first)
     _ = op(second)
     rows = await _execute_rows(op, first)
     assert [data["c"] for _, data in rows] == [1, 2]
     assert [data.arrow_schema().field("c").type for _, data in rows] == [pa.int64()] * 2
 
 
+@pytest.mark.parametrize("logical_first", [False, True])
 @pytest.mark.asyncio
-async def test_reused_index_on_logical_list() -> None:
-    """A logical list keeps its Path element type after validating a plain list."""
+async def test_reused_index_on_logical_list(logical_first: bool) -> None:
+    """A logical list keeps its Path element type in either validation order."""
     logical = _list_path_source()
     plain = _source(lp=pa.array([[7], [9]], pa.large_list(pa.int64())))
     op = Index("lp", 0)
-    _ = op(logical)
-    _ = op(plain)
+    for source in (logical, plain) if logical_first else (plain, logical):
+        _ = op(source)
+    assert [data["lp"] for _, data in op.unary_static_process(logical).iter_data()] == [
+        Path("/a"),
+        Path("/c"),
+    ]
     rows = await _execute_rows(op, logical)
     assert [data["lp"] for _, data in rows] == [Path("/a"), Path("/c")]
     expected = _input_types(logical)["p"]
@@ -601,14 +613,16 @@ def _keyed_value_source() -> ArrowTableStream:
     assert isinstance(converter, UniversalTypeConverter)
     converter.register_logical_type(_KeyedValueType())
     table = converter.python_dicts_to_arrow_table(
-        [{"c": _KeyedValue(1)}, {"c": _KeyedValue(2)}], python_schema={"c": _KeyedValue}
+        [{"id": 1, "c": _KeyedValue(1)}, {"id": 2, "c": _KeyedValue(2)}],
+        python_schema={"id": int, "c": _KeyedValue},
     )
-    return ArrowTableStream(table, tag_columns=(), data_context=context)
+    return ArrowTableStream(table, tag_columns=("id",), data_context=context)
 
 
+@pytest.mark.parametrize("logical_first", [False, True])
 @pytest.mark.asyncio
-async def test_reused_pick_on_logical_mapping() -> None:
-    """A logical mapping keeps its value type and keyed access after a dict."""
+async def test_reused_pick_on_logical_mapping(logical_first: bool) -> None:
+    """A logical mapping preserves keyed projection in either validation order."""
     logical = _keyed_value_source()
     plain = _source(
         c=pa.array(
@@ -617,11 +631,113 @@ async def test_reused_pick_on_logical_mapping() -> None:
         )
     )
     op = Pick("c", "k")
-    _ = op(logical)
-    _ = op(plain)
+    for source in (logical, plain) if logical_first else (plain, logical):
+        _ = op(source)
+    assert [data["c"] for _, data in op.unary_static_process(logical).iter_data()] == [
+        1,
+        2,
+    ]
     rows = await _execute_rows(op, logical)
     assert [data["c"] for _, data in rows] == [1, 2]
     assert [data.arrow_schema().field("c").type for _, data in rows] == [pa.int64()] * 2
+
+
+@pytest.mark.parametrize(
+    (
+        "op",
+        "old_value",
+        "old_type",
+        "current_value",
+        "current_type",
+        "expected",
+        "expected_type",
+    ),
+    [
+        (Index("c", 0), [3], list[int], [Path("/a")], list[Path], Path("/a"), Path),
+        (
+            Pick("c", "k"),
+            {"k": 3},
+            dict[str, int],
+            {"k": "a"},
+            dict[str, str],
+            "a",
+            str,
+        ),
+    ],
+    ids=["index", "pick"],
+)
+@pytest.mark.asyncio
+async def test_rewired_projection_uses_current_input(
+    op: UnaryOperator,
+    old_value: DataValue,
+    old_type: DataType,
+    current_value: DataValue,
+    current_type: DataType,
+    expected: object,
+    expected_type: type,
+) -> None:
+    """Schema prediction and both job paths follow a rewired upstream description."""
+    original = DictSource(
+        [{"c": old_value, "x": 1}], data_schema={"c": old_type, "x": int}
+    )
+    current = DictSource(
+        [{"c": current_value, "x": 1}], data_schema={"c": current_type, "x": int}
+    )
+    job = PipelineJob(name="rewired", database=InMemoryArrowDatabase())
+    with job:
+        filtered = original.polars_filter(x=1, label="upstream")
+        _ = op(filtered, label="projection")
+    upstream, node = job.nodes["upstream"], job.nodes["projection"]
+    assert isinstance(upstream, OperatorJobNode)
+    assert isinstance(node, OperatorJobNode)
+    _ = upstream.pipeline_hash()
+    upstream.upstreams = (current,)
+    assert op.output_schema(upstream)[1]["c"] is expected_type
+    filtered_current = current.polars_filter(x=1)
+    assert [data["c"] for _, data in node.execute(filtered_current).iter_data()] == [
+        expected
+    ]
+
+    input_ch: Channel[Row] = Channel(buffer_size=4)
+    output_ch: Channel[Row] = Channel(buffer_size=4)
+    for row in filtered_current.iter_data():
+        await input_ch.writer.send(row)
+    await input_ch.writer.close()
+    await node.async_execute([input_ch.reader], output_ch.writer)
+    assert [data["c"] for _, data in await output_ch.reader.collect()] == [expected]
+
+
+@pytest.mark.parametrize("kind", ["index", "pick"])
+@pytest.mark.asyncio
+async def test_unknown_direct_logical_projection_explains_validation(kind: str) -> None:
+    """The error identifies the validation needed for the current direct input."""
+    if kind == "index":
+        op = Index("c", 0)
+        source = DictSource([{"c": [Path("/a")]}], data_schema={"c": list[Path]})
+    else:
+        op = Pick("c", "k")
+        source = _keyed_value_source()
+    other = ArrowTableStream(
+        source.as_table().append_column(
+            "extra", pa.array([1] * source.as_table().num_rows)
+        ),
+        tag_columns=source.keys()[0],
+        data_context=source.data_context,
+    )
+    assert source.pipeline_hash() != other.pipeline_hash()
+    op.validate_inputs(other)
+    with pytest.raises(ValueError, match=r"validate_inputs\(stream\)"):
+        _ = await _execute_rows(op, source)
+    op.validate_inputs(source)
+    assert await _execute_rows(op, source)
+
+
+@pytest.mark.parametrize("case", OP_CASES, ids=[case.label for case in OP_CASES])
+@pytest.mark.asyncio
+async def test_direct_projection_requires_input_pipeline_hash(case: OpCase) -> None:
+    """An invalid hash count is refused with the unary contract's diagnostic."""
+    with pytest.raises(ValueError, match="input_pipeline_hashes"):
+        _ = await _execute_rows(case.make_op(), case.make_source(True), with_hash=False)
 
 
 @OP
@@ -829,7 +945,7 @@ async def test_row_time_code_never_reads_a_context(
     make_source: Callable[[], ArrowTableSource],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After validation, sync and streaming rows use only the types resolved there."""
+    """Sync and streaming rows process without resolving the operator's context."""
     source = make_source()
     op = make_op()
     op.validate_inputs(source)
@@ -879,7 +995,6 @@ def _validate_with_unmappable(
 
     monkeypatch.setattr(converter, "python_type_to_arrow_type", fake)
     op.validate_inputs(source)
-    monkeypatch.undo()
 
 
 def test_unmappable_fallback_is_not_raised_when_not_needed(
@@ -893,15 +1008,17 @@ def test_unmappable_fallback_is_not_raised_when_not_needed(
     assert [data["lst"] for _, data in result.iter_data()] == [7, 9]
 
 
-def test_unmappable_fallback_raises_where_needed(
+@pytest.mark.asyncio
+async def test_unmappable_fallback_raises_where_needed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A logical column whose element type is unmappable raises a clear error at use."""
     source = _list_path_source()
     op = Index("lp", 0)
     _validate_with_unmappable(op, source, Path, monkeypatch)
+    monkeypatch.undo()
     with pytest.raises(ValueError, match=r"Index: .*'lp'.*Path"):
-        _ = op.unary_static_process(source)
+        _ = await _execute_rows(op, source)
 
 
 @pytest.mark.asyncio
@@ -912,5 +1029,6 @@ async def test_unmappable_pick_fallback_raises_where_needed(
     source = _keyed_value_source()
     op = Pick("c", "k")
     _validate_with_unmappable(op, source, int, monkeypatch)
+    monkeypatch.undo()
     with pytest.raises(ValueError, match=r"Pick: .*'c'.*int"):
         _ = await _execute_rows(op, source)
