@@ -228,6 +228,100 @@ class _WrongResultHasher:
         return _hash_of("md5")
 
 
+class _MisencodedFileHash(ContentHash):
+    @override
+    def to_prefixed_digest(self) -> bytes:
+        return b"md5:" + b"\x07" * 16
+
+
+class _MisencodingFileHasher:
+    hash_algorithm: str = "sha256"
+
+    def hash_file(self, file_path: PathLike) -> ContentHash:
+        digest = FileHasher().hash_file(file_path).digest
+        return _MisencodedFileHash(self.hash_algorithm, digest)
+
+
+def test_cached_file_hasher_canonicalizes_custom_results(data_file: Path) -> None:
+    cache = _LegacyCacher()
+    hasher = CachedFileHasher(_MisencodingFileHasher(), cache)
+    expected = FileHasher().hash_file(data_file).to_prefixed_digest()
+
+    assert hasher.hash_file(data_file).to_prefixed_digest() == expected
+    (stored,) = cache.entries.values()
+    assert isinstance(stored, ContentHash)
+    assert stored.to_prefixed_digest() == expected
+
+
+def test_cached_file_hasher_canonicalizes_custom_hits(data_file: Path) -> None:
+    cache = _LegacyCacher()
+    hasher = _CountingHasher()
+    path = UPath(data_file.resolve())
+    stat = path.stat()
+    value = _MisencodingFileHasher().hash_file(data_file)
+    cache.put(FileHashKey(path, stat.st_mtime_ns, stat.st_size, "sha256"), value)
+
+    result = CachedFileHasher(hasher, cache).hash_file(data_file)
+
+    assert (
+        result.to_prefixed_digest()
+        == FileHasher().hash_file(data_file).to_prefixed_digest()
+    )
+    assert hasher.reads == 0
+
+
+def test_file_value_canonicalizes_custom_results(data_file: Path) -> None:
+    from orcapod.contexts import get_default_semantic_hasher
+    from orcapod.logical_types.file_type import File
+
+    handler = FileHandler(_MisencodingFileHasher())
+    result = handler.handle(File(data_file), get_default_semantic_hasher())
+    assert (
+        result.to_prefixed_digest()
+        == FileHasher().hash_file(data_file).to_prefixed_digest()
+    )
+
+
+def test_directory_canonicalizes_custom_file_leaves(data_file: Path) -> None:
+    plain = BasicDirectoryHasher(FileHasher())
+    custom = BasicDirectoryHasher(_MisencodingFileHasher())
+    assert custom.hash_directory(data_file.parent) == plain.hash_directory(
+        data_file.parent
+    )
+
+
+def test_memory_cacher_canonicalizes_custom_values() -> None:
+    key = _key("sha256")
+    expected = _hash_of("sha256")
+    cache = InMemoryHashCacher()
+    cache.put(key, _MisencodedFileHash(expected.method, expected.digest))
+
+    result = cache.get(key)
+    assert result is not None
+    assert result.to_prefixed_digest() == expected.to_prefixed_digest()
+
+
+@pytest.mark.parametrize("consumer", ["file", "directory"])
+def test_uncached_consumers_refuse_a_changed_label_before_hashing(
+    data_file: Path, consumer: str
+) -> None:
+    from orcapod.contexts import get_default_semantic_hasher
+    from orcapod.logical_types.file_type import File
+
+    inner = _CountingHasher()
+    if consumer == "file":
+        file_handler = FileHandler(inner)
+        inner.inner.algorithm = "md5"
+        with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
+            _ = file_handler.handle(File(data_file), get_default_semantic_hasher())
+    else:
+        directory_hasher = BasicDirectoryHasher(inner)
+        inner.inner.algorithm = "md5"
+        with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
+            _ = directory_hasher.hash_directory(data_file.parent)
+    assert inner.reads == 0
+
+
 def test_cached_file_hasher_rejects_an_invalid_computed_hash(data_file: Path) -> None:
     """The wrapper validates the result even if a custom cacher accepts anything."""
     cache = _LegacyCacher()
@@ -266,6 +360,37 @@ def test_cached_file_hasher_refuses_a_custom_cachers_unsupported_label() -> None
     """An explicit cacher algorithm follows the same rule as the inner hasher."""
     with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
         _ = CachedFileHasher(FileHasher(), _LabelledCacher())
+
+
+@pytest.mark.parametrize("changed_component", ["hasher", "cacher"])
+def test_cached_file_hasher_refuses_changed_labels_before_cache_lookup(
+    data_file: Path, changed_component: str
+) -> None:
+    class TrackingCacher(_LabelledCacher):
+        hash_algorithm: str = "sha256"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.lookups: list[str] = []
+
+        @override
+        def get(self, key: FileHashKey) -> ContentHash | None:
+            self.lookups.append(key.algorithm)
+            return _hash_of("md5")
+
+    inner = _WrongResultHasher()
+    cache = TrackingCacher()
+    wrapped = CachedFileHasher(inner, cache)
+    changed = inner if changed_component == "hasher" else cache
+    changed.hash_algorithm = "md5"
+
+    with pytest.raises(ValueError) as raised:
+        _ = wrapped.hash_file(data_file)
+    assert not cache.lookups
+    assert not cache.entries
+    assert str(raised.value) == (
+        "Unsupported file hash algorithm 'md5': sha256 is the only file hash algorithm"
+    )
 
 
 @pytest.mark.parametrize(

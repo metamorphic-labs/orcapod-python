@@ -66,6 +66,41 @@ def test_context_refuses_a_custom_file_hasher_with_an_unsupported_label(
         _ = registry.get_context()
 
 
+class CustomDirectoryHasher:
+    """A custom directory hasher that accepts any algorithm setting."""
+
+    def __init__(self, algorithm: str = "md5", *, report_algorithm: bool) -> None:
+        if report_algorithm:
+            self.algorithm: str = algorithm
+
+    def hash_directory(
+        self, directory_path: PathLike, ignore: object = None
+    ) -> ContentHash:
+        """Stand in for an implementation using the configured algorithm."""
+        return ContentHash("md5", b"\x00" * 16)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{"algorithm": "md5", "report_algorithm": False}, {"report_algorithm": True}],
+    ids=["declared", "advertised"],
+)
+def test_context_refuses_a_custom_directory_hasher_with_an_unsupported_algorithm(
+    tmp_path: Path, config: dict[str, Any]
+) -> None:
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    spec = _manifest("v1")
+    spec["directory_hasher"] = {
+        "_class": f"{__name__}.CustomDirectoryHasher",
+        "_config": config,
+    }
+    _ = (tmp_path / "v1.json").write_text(json.dumps(spec))
+    registry = JSONDataContextRegistry(contexts_dir=tmp_path)
+
+    with pytest.raises(ContextValidationError, match="directory_v1.*sha256.*'md5'"):
+        _ = registry.get_context()
+
+
 def _pins() -> dict[str, dict[str, Any]]:
     """The pin of each manifest, by version: ``{"manifest": ..., "releases": {...}}``,
     with ``"withdrawn": {...}`` when a release was withdrawn.

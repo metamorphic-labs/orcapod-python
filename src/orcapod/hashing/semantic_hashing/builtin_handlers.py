@@ -30,7 +30,7 @@ from uuid import UUID
 
 from typing_extensions import override
 
-from orcapod.hashing.file_hashers import require_file_hash
+from orcapod.hashing.file_hashers import canonical_file_hash
 from orcapod.hashing.hash_utils import SHA256_ALGORITHM, require_file_hash_algorithm
 from orcapod.hashing.pandas_value_hash import (
     PANDAS_DATAFRAME_HASH_LABEL,
@@ -511,11 +511,11 @@ class FileHandler:
 
         if not isinstance(obj, File):
             raise TypeError(f"FileHandler: expected an orcapod.File, got {type(obj)!r}")
+        require_file_hash_algorithm(self.file_hasher.hash_algorithm)
         wrapped = getattr(obj, "__wrapped__")
         logger.debug("FileHandler: hashing file content at %s", wrapped)
         result = self.file_hasher.hash_file(wrapped)
-        _ = require_file_hash(SHA256_ALGORITHM, result.method, result.digest)
-        return result
+        return canonical_file_hash(SHA256_ALGORITHM, result)
 
 
 class DirectoryHandler:

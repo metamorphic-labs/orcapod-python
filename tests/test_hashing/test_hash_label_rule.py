@@ -187,6 +187,12 @@ class TestLabelFormat:
                 file_hasher=FileHasher(), algorithm="md5"
             )
 
+    def test_directory_algorithm_cannot_be_reassigned_to_md5(self) -> None:
+        hasher = directory_hashers.BasicDirectoryHasher(file_hasher=FileHasher())
+        with pytest.raises(ValueError, match="sha256.*'md5'"):
+            hasher.algorithm = "md5"
+        assert hasher.algorithm == "sha256"
+
 
 # ---------------------------------------------------------------------------
 # Rule 1 (ITL-1154): a hash fed into another hash carries its label

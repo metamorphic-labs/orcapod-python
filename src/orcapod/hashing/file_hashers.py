@@ -54,42 +54,41 @@ def stored_hash_format(label: str) -> tuple[bytes, int] | None:
     return label.encode("ascii") + b":", digest_size
 
 
-def require_file_hash(algorithm: str, method: str, digest: bytes) -> int:
-    """Require a file hash of the expected algorithm and return its digest size.
-
-    The value's label must match the expected algorithm, and its digest must be
-    exactly that algorithm's length.
-
-    Args:
-        algorithm: The expected algorithm label.
-        method: The incoming hash's algorithm label.
-        digest: The incoming hash's raw digest.
-
-    Returns:
-        The validated digest size.
-
-    Raises:
-        ValueError: If the labels differ, the label is not ``sha256`` (the only
-            file hash algorithm), or the digest has another length.
-    """
+def _validated_file_digest(algorithm: str, value: ContentHash) -> bytes:
+    """Snapshot the raw digest after checking the hash's label and digest size."""
+    method = value.method
     if str.__eq__(algorithm, method) is not True:
         raise ValueError(f"File hash has label {method!r}, expected {algorithm!r}")
     size = file_hash_digest_size(algorithm)
+    # Validate the same bytes that will be returned, even for a custom hash.
+    raw_digest = value.digest
+    digest = (
+        raw_digest if type(raw_digest) is bytes else memoryview(raw_digest).tobytes()
+    )
     if len(digest) != size:
         raise ValueError(f"A {algorithm!r} digest is {size} bytes, not {len(digest)}")
-    return size
+    return digest
+
+
+def canonical_file_hash(algorithm: str, value: ContentHash) -> ContentHash:
+    """Validate the file hash and ensure it uses canonical SHA-256 serialization."""
+    digest = _validated_file_digest(algorithm, value)
+    if (
+        type(value) is ContentHash
+        and type(value.method) is str
+        and value.digest is digest
+    ):
+        return value
+    return ContentHash(SHA256_ALGORITHM, digest)
 
 
 def serialize_storable_file_hash(
     algorithm: str, value: ContentHash
 ) -> tuple[bytes, int, bytes]:
     """Return the key's prefix and digest size, and the canonical bytes to store."""
-    # Snapshot the raw buffer so validation and serialization use the same bytes,
-    # even if a subclass overrides digest access or bytes operations.
-    digest = memoryview(value.digest).tobytes()
-    digest_size = require_file_hash(algorithm, value.method, digest)
-    prefix = algorithm.encode("ascii") + b":"
-    return prefix, digest_size, prefix + digest
+    digest = _validated_file_digest(algorithm, value)
+    prefix = SHA256_ALGORITHM.encode("ascii") + b":"
+    return prefix, len(digest), prefix + digest
 
 
 def matches_stored_file_hash(blob: object, prefix: bytes, digest_size: int) -> bool:
@@ -185,13 +184,14 @@ class CachedFileHasher:
     ``CacherProtocol[FileHashKey, ContentHash]``. On each call to
     ``hash_file``:
 
-    1. Resolve the path to an absolute ``UPath`` and stat the file.
-    2. Look up ``(path, mtime_ns, size, algorithm)`` in the cacher, using
-       the inner hasher's ``hash_algorithm``. Each algorithm has its own entry.
+    1. Validate the advertised algorithms, resolve the path to an absolute
+       ``UPath``, and stat the file.
+    2. Look up ``(path, mtime_ns, size, algorithm)`` in the cacher using the
+       canonical SHA-256 label.
     3. Accept a hit only if it is a ``ContentHash`` with the expected label and
        digest length.
-    4. On miss: delegate to the inner hasher, validate the result, store it, and
-       return it.
+    4. On miss: delegate to the inner hasher, validate the result, and cache it.
+       Both hits and newly computed results return a canonical ``ContentHash``.
 
     Both ``FileHasher`` and ``CachedFileHasher`` satisfy
     ``FileContentHasherProtocol`` — callers do not need to know which they
@@ -216,11 +216,17 @@ class CachedFileHasher:
         file_hasher: FileContentHasherProtocol,
         cacher: "CacherProtocol[FileHashKey, ContentHash]",
     ) -> None:
-        require_file_hash_algorithm(file_hasher.hash_algorithm)
-        for attribute in ("hash_algorithm", "algorithm"):
-            require_file_hash_algorithm(getattr(cacher, attribute, SHA256_ALGORITHM))
         self.file_hasher = file_hasher
         self.cacher = cacher
+        self._validate_algorithms()
+
+    def _validate_algorithms(self) -> None:
+        """Refuse unsupported labels before hashing or consulting the cache."""
+        require_file_hash_algorithm(self.hash_algorithm)
+        for attribute in ("hash_algorithm", "algorithm"):
+            require_file_hash_algorithm(
+                getattr(self.cacher, attribute, SHA256_ALGORITHM)
+            )
 
     @property
     def hash_algorithm(self) -> str:
@@ -236,21 +242,21 @@ class CachedFileHasher:
         Returns:
             ContentHash of the file's content (from cache or computed).
         """
+        self._validate_algorithms()
         path = file_path if isinstance(file_path, UPath) else UPath(file_path)
         path = path.resolve()
         stat = path.stat()
-        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, self.hash_algorithm)
+        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, SHA256_ALGORITHM)
 
         hit = self.cacher.get(key)
         if isinstance(hit, ContentHash):
             try:
-                _ = require_file_hash(key.algorithm, hit.method, hit.digest)
-            except ValueError:
+                return canonical_file_hash(key.algorithm, hit)
+            except (TypeError, ValueError):
                 pass  # Custom backends can return an incompatible cached hash.
-            else:
-                return hit
 
-        result = self.file_hasher.hash_file(file_path)
-        _ = require_file_hash(key.algorithm, result.method, result.digest)
+        result = canonical_file_hash(
+            key.algorithm, self.file_hasher.hash_file(file_path)
+        )
         self.cacher.put(key, result)
         return result

@@ -17,9 +17,9 @@ from typing import cast
 from orcapod.hashing.file_hashers import (
     FILE_HASH_CACHE_SCHEMA_VERSION,
     FileHashKey,
+    canonical_file_hash,
     matches_stored_file_hash,
     parse_stored_file_hash,
-    require_file_hash,
     serialize_storable_file_hash,
     stored_hash_format,
 )
@@ -118,7 +118,7 @@ class InMemoryHashCacher:
                 (checked before the write guards), or if a write finds a different
                 hash under the same key.
         """
-        _ = require_file_hash(key.algorithm, value.method, value.digest)
+        value = canonical_file_hash(key.algorithm, value)
         if self._read_only:
             return
         if (

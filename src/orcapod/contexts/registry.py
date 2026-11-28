@@ -414,7 +414,11 @@ class JSONDataContextRegistry:
         instantiated automatically and become available as ``_ref`` targets for
         later components in the same file.
         """
-        from orcapod.hashing.hash_utils import require_file_hash_algorithm
+        from orcapod.hashing.directory_hashers import require_directory_hash_algorithm
+        from orcapod.hashing.hash_utils import (
+            SHA256_ALGORITHM,
+            require_file_hash_algorithm,
+        )
 
         try:
             context_key = spec["context_key"]
@@ -462,10 +466,24 @@ class JSONDataContextRegistry:
                     continue
                 if isinstance(value, dict) and "_class" in value:
                     logger.debug(f"Creating {key} for context {version}")
+                    if key == "directory_hasher":
+                        config = value.get("_config", {})
+                        if isinstance(config, dict) and "algorithm" in config:
+                            require_directory_hash_algorithm(
+                                parse_objectspec(config["algorithm"], ref_lut=ref_lut)
+                            )
+                            value = {
+                                **value,
+                                "_config": {**config, "algorithm": SHA256_ALGORITHM},
+                            }
                     component = parse_objectspec(value, ref_lut=ref_lut)
                     if key == "file_hasher":
                         require_file_hash_algorithm(
                             getattr(component, "hash_algorithm", None)
+                        )
+                    elif key == "directory_hasher":
+                        require_directory_hash_algorithm(
+                            getattr(component, "algorithm", SHA256_ALGORITHM)
                         )
                     ref_lut[key] = component
 
