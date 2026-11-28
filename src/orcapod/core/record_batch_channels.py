@@ -22,6 +22,7 @@ import pyarrow.compute as pc
 
 from orcapod.channels import ChannelClosed
 from orcapod.core.operators.static_output_pod import (
+    declared_token_types,
     settle_token_types,
     stream_from_batches,
 )
@@ -150,9 +151,9 @@ class OutputChannel:
         # batch's when the stream cannot say its Arrow types without rows.
         self._schema: pa.Schema | None = None
         self._schema_known = False
-        # Each source-info column's token type as the batches accepted so far declare
-        # it (``settle_token_types``): a later batch must declare the same.
+        # Concrete token types, or the types settled by the populated batches.
         self._token_types: dict[str, pa.DataType] = {}
+        self._has_declared_tokens = False
         # The column order of the channel's batches: the first batch with rows'.
         self._order: list[str] | None = None
         self._changed = asyncio.Event()
@@ -209,6 +210,8 @@ class OutputChannel:
             )
         if not self._schema_known:
             self._schema = _description(self._stream)
+            self._token_types = declared_token_types(self._stream, self._schema)
+            self._has_declared_tokens = bool(self._token_types)
             self._schema_known = True
         schema = self._schema
         if schema is None:
@@ -230,15 +233,18 @@ class OutputChannel:
                 f"A record batch sent as {_named(self._stream)} does not have that "
                 + f"stream's columns: {mismatch}."
             )
-        token_types = settle_token_types(batch, self._token_types)
+        token_types = settle_token_types(
+            batch, self._token_types, check_empty=self._has_declared_tokens
+        )
         self._schema = schema
         self._token_types = token_types
-        fields = [
-            field.with_nullable(schema.field(field.name).nullable)
-            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
-            else field
-            for field in batch.schema
-        ]
+        fields = []
+        for field in batch.schema:
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
+                field = schema.field(field.name)
+            elif field.name.startswith(constants.SOURCE_PREFIX):
+                field = arrow_utils.source_info_field(field.name, field.type)
+            fields.append(field)
         if any(
             field.nullable != sent.nullable
             for field, sent in zip(fields, batch.schema, strict=True)
@@ -442,9 +448,8 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     ``null`` type of the description (anywhere in a column's type) is carried as
     ``large_string`` outside system tags, and only null values are taken there.
     System-tag field metadata must match the description. Source-info fields in
-    the resulting stream are nullable. A bound stream may declare a token type
-    different from the slot's description. Every batch must agree on that type,
-    including nested item metadata.
+    transit are nullable. The channel checks token types separately against the
+    concrete stream, or settles them across batches when no type is declared.
     """
     sent = batch.schema
     if sorted(declared.names) != sorted(sent.names):

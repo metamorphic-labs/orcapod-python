@@ -1180,7 +1180,8 @@ def stream_from_batches(
     applied to. The batches are put under one another in the order given, and the
     table is handed on as a node hands its rows to its successors
     (``_output_stream``): declared system-tag flags are restored, and source-info
-    fields are nullable and keep the types declared by the batches.
+    fields are nullable and keep the stream's declared types. If the stream
+    has no token types yet, the populated batches establish them.
     The result keeps ``stream``'s producer, upstreams, pipeline hash and data context.
     With no batch it is ``stream``'s zero-row input,
     typed by its description and never by rows.
@@ -1198,7 +1199,11 @@ def stream_from_batches(
         declared_schema = typed.schema
     if declared_schema is None and batches:
         declared_schema = batches[0].schema
-    table = concatenate_batches(batches, declared_schema=declared_schema)
+    table = concatenate_batches(
+        batches,
+        declared_schema=declared_schema,
+        declared_tokens=declared_token_types(stream),
+    )
     if table is None:
         if typed is not None or declared_schema is None:
             return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
@@ -1238,8 +1243,33 @@ def _keys_in_delivered_order(
     return ordered_tags, data_tags + plain
 
 
+def declared_token_types(
+    stream: StreamProtocol, schema: pa.Schema | None = None
+) -> dict[str, pa.DataType]:
+    """Return the concrete stream's token types, if known before reading a batch."""
+    from orcapod.core.nodes.source_node import SourceJobNode, SourceNode
+
+    if isinstance(stream, SourceNode):
+        return {}
+    if isinstance(stream, SourceJobNode):
+        bound = stream.bound_source
+        return {} if bound is None else declared_token_types(bound)
+    if not stream.arrow_types_declared:
+        return {}
+    if schema is None:
+        schema = stream.arrow_schema()
+    return {
+        field.name: field.type
+        for field in schema
+        if field.name.startswith(constants.SOURCE_PREFIX)
+    }
+
+
 def settle_token_types(
-    batch: pa.RecordBatch, accepted: Mapping[str, pa.DataType]
+    batch: pa.RecordBatch,
+    accepted: Mapping[str, pa.DataType],
+    *,
+    check_empty: bool = False,
 ) -> dict[str, pa.DataType]:
     """Each source-info column's token type, settled with the batches accepted so far.
 
@@ -1249,11 +1279,12 @@ def settle_token_types(
     strictly (list kind, depth, and each item field's name, nullability and
     metadata), so that the order of the batches never decides the table's type; a
     batch that declares another is refused. A batch with no rows has no token and settles
-    nothing (its column may be of the ``null`` type of a zero-row form).
+    nothing. When the stream declares its type, even empty batches must match.
 
     Args:
         batch: A record batch of a stream's rows.
-        accepted: Each column's token type from the batches accepted so far.
+        accepted: Each column's declared type or its type from accepted batches.
+        check_empty: Check the types of empty batches against the declaration.
 
     Returns:
         The token types with this batch accepted.
@@ -1263,7 +1294,7 @@ def settle_token_types(
             type other than the accepted batches'.
     """
     settled = dict(accepted)
-    if not batch.num_rows:
+    if not batch.num_rows and not check_empty:
         return settled  # no token: nothing to learn
     for field in batch.schema:
         if not field.name.startswith(constants.SOURCE_PREFIX):
@@ -1278,7 +1309,10 @@ def settle_token_types(
 
 
 def concatenate_batches(
-    batches: Sequence[pa.RecordBatch], *, declared_schema: pa.Schema | None = None
+    batches: Sequence[pa.RecordBatch],
+    *,
+    declared_schema: pa.Schema | None = None,
+    declared_tokens: Mapping[str, pa.DataType] | None = None,
 ) -> pa.Table | None:
     """Put a stream's record batches under one another, or ``None`` with no row.
 
@@ -1289,6 +1323,7 @@ def concatenate_batches(
         batches: Record batches of one stream's rows, in order.
         declared_schema: The stream or channel declaration, or the first batch's
             schema when no earlier declaration is available.
+        declared_tokens: Concrete token types the batches must match, when known.
 
     Returns:
         The table, or ``None`` when no batch has a row.
@@ -1299,15 +1334,15 @@ def concatenate_batches(
     """
     from orcapod.utils import arrow_utils
 
+    settled = dict(declared_tokens or {})
+    for batch in batches:
+        settled = settle_token_types(batch, settled, check_empty=bool(declared_tokens))
     rows = [batch for batch in batches if batch.num_rows]
     if not rows:
         return None
 
     if declared_schema is None:
         declared_schema = batches[0].schema
-    settled: dict[str, pa.DataType] = {}
-    for batch in rows:
-        settled = settle_token_types(batch, settled)
     aligned: list[pa.RecordBatch] = []
     for batch in rows:
         columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column

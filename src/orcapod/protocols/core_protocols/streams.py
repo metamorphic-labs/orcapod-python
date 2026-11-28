@@ -188,10 +188,9 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         with the Arrow types, nullability and field metadata of the rows; no context and
         no meta column (ITL-1347). Known without reading, computing or polling a row.
         System-tag fields keep their declared flags and metadata. Source-info fields
-        are always nullable. Their token types are provisional until a complete table
-        has inferred them from its tokens. A list of ``None`` or of empty lists may
-        infer fewer list levels. A ``null`` column keeps the ``null`` type a zero-row
-        table has (rows carry ``large_string``, ITL-1319).
+        are nullable and keep their declared token types, including list layers and
+        nested field declarations. A ``null`` column keeps the ``null`` type a
+        zero-row table has (rows carry ``large_string``, ITL-1319).
 
         Returns:
             The declared Arrow schema.

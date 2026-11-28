@@ -23,7 +23,12 @@ def compute_bmi(weight: float, height: float) -> float:
 Key points:
 
 - **`output_keys`** names the output data column(s). A single string means one output
-  column; a list of strings means the function returns multiple values. A function with
+  column. With two or more keys, Orcapod assigns returned values in key order. The
+  returned container must be an instance of the annotated container, so
+  `-> tuple[int, str]` accepts a tuple or a named tuple. Each position needs a
+  declared type, so `list[int]` cannot declare several outputs. If you supply
+  `output_schema` without a return annotation, return a tuple. A container mismatch
+  raises `OutputContainerTypeError` before any outputs are stored. A function with
   no outputs (it only reads its inputs) is annotated `-> None`, or not annotated, and
   takes no `output_keys`; its pod has no output columns. `-> None` together with
   `output_keys` raises `ValueError` when the pod is created, and a value other than

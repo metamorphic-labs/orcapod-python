@@ -24,10 +24,17 @@ from orcapod.core.operators import Batch, GroupBy, MergeJoin, SelectDataColumns
 from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.utils import schema_utils
 
 STR = pa.large_string()
 INT = pa.int64()
+
+
+def test_stream_arrow_schema_docs_describe_declared_token_types() -> None:
+    docstring = StreamProtocol.arrow_schema.__doc__
+    assert docstring is not None
+    assert "keep their declared token types" in " ".join(docstring.split())
 
 
 def large(kind: pa.DataType) -> pa.DataType:

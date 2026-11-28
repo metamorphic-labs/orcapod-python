@@ -731,3 +731,104 @@ def test_source_fed_job_keeps_its_pipeline_record_keys(
         "6172726f775f76313a0000023c18eebf286c50d33cec2d0b6ff1d2c564d27ddb57b1327d9f12c81b246df83c",
         "6172726f775f76313a000002c70b291e05964b790d5cbd0d505e06a9b4238bb01332370bf4159e2922181065",
     ]
+
+
+@function_pod(output_keys="y")
+def dataframe_nullable_input(x: int | None) -> int:
+    """Return the value, with a sentinel for a missing input."""
+    return x if x is not None else -1
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("source_name", [None, "declared"])
+@pytest.mark.parametrize("data_tag", [False, True])
+def test_arrow_dataframe_job_pins_ids_for_nullable_input(
+    asynchronous: bool,
+    source_name: str | None,
+    data_tag: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The null-free nullable Arrow field participates in stored job identities."""
+    import asyncio
+    from uuid import UUID
+
+    from orcapod.core import row_ids
+    from orcapod.sources import DataFrameSource
+
+    result_id = UUID(int=41)
+    monkeypatch.setattr("orcapod.core.data_function.uuid7", lambda: result_id)
+    table = pa.table({"x": [7]}, schema=pa.schema([pa.field("x", pa.int64())]))
+    source = DataFrameSource(
+        table, source_id=source_name, tag_columns=["x"] if data_tag else []
+    )
+    tag, data = next(source.iter_data())
+    entry = row_ids.entry_id(source.data_context.arrow_hasher, tag, data)
+    store = InMemoryArrowDatabase()
+    job = PipelineJob(name="df", database=store)
+    with job:
+        _ = dataframe_nullable_input.pod(source, label="f")
+    if asynchronous:
+        asyncio.run(job.run_async())
+    else:
+        job.run()
+    store.flush()
+
+    (pipeline_path,) = [p for p in store.list_table_paths() if p[-1] == "pdb_v2"]
+    (result_path,) = [p for p in store.list_table_paths() if p[-1] == "rdb_v1"]
+    records = store.get_all_records(pipeline_path, record_id_column="key")
+    results = store.get_all_records(result_path, record_id_column="key")
+    assert records is not None and results is not None
+    instance, record, key = (
+        records[name][0].as_py()
+        for name in (row_ids.INSTANCE_ID_COL, row_ids.RECORD_ID_COL, "key")
+    )
+    assert key == record
+    assert results["key"].to_pylist() == [result_id.bytes]
+    expected_ids = {
+        (False, False): (
+            "00000229127efd218e1c4d9b1e8059f1bb89a6402189b5af3289a346d3afc088d28924",
+            "0000024377751a82a42ab9ddfa0925e57c971b7277a067b7da53f89ac28330b288dc62",
+            "00000270ae6160cd399cde2ef0751ef670de8350f6daec711dfbd733744d0d027ed630",
+        ),
+        (False, True): (
+            "0000023351fc9a0df93ca8ab202dff6db47d9baaf18a12ff46a80b7939a97afe31adf9",
+            "000002302f9cec6defc62ffb06763a1568739b4885813b1ada445f94f19a446aae12c9",
+            "00000236c42c633c2ebb4c8ff2e7a046c701c249d4311534f553fa90a45392b1d800b5",
+        ),
+        (True, False): (
+            "00000280719058733166e7e3090cabd1b0268ca8a4a411f587537b5527f6765db921fa",
+            "000002ebecd3c8f65f1adaf01e5bdc65d960515b6b434334d5668a73e8036a9ea9091c",
+            "00000215ea315dc569242851a52858d41641c70c600feac2648bdb3c05bc9cbef45dae",
+        ),
+        (True, True): (
+            "0000024b66a701276fafd90f9da4b27e7a7878324384d720885a3a23c090ff5093e43c",
+            "0000029153133eba81a1ee1c2f7f5fef995d8a960a293f9930f4dd914d9cfbc9b64579",
+            "000002ca6e07c11ab0f5ab67b0ac09ad27a2a2200ae0f7e1856c92a1216bc7311bdfa9",
+        ),
+    }
+    wanted_entry, wanted_instance, wanted_record = expected_ids[
+        data_tag, source_name is not None
+    ]
+    assert entry.to_hex() == wanted_entry
+    assert instance == b"arrow_v1:" + bytes.fromhex(wanted_instance)
+    assert record == b"arrow_v1:" + bytes.fromhex(wanted_record)
+    if source_name is None:
+        assert str(source.source_id) == (
+            "data_frame_v1:arrow_v1:00000221a2a3744d58085c92a5fb2d48d36245319a62789c53ef60ed33920872ce60f0"
+        )
+    else:
+        assert str(source.source_id) == "data_frame_v1:declared"
+
+    common = (
+        "dataframe_nullable_input",
+        "beddbfabf860d21b91bd79dd1a1db3da75ee7ba0c51063a5adef429a0366c4c7",
+        "v0",
+        "python.function.v1",
+    )
+    schema = (
+        "schema:162348112645239872f8583c240b28598c8ed3216ad3593cc2e72c2256a8d371"
+        if data_tag
+        else "schema:c176c6181dd962538daa5559149fecd0ef6c858cb8b455154e16cfaf14cb0ea2"
+    )
+    assert pipeline_path == ("df", *common, schema, "pdb_v2")
+    assert result_path == ("df", "_result", *common, "rev1", "rdb_v1")

@@ -89,7 +89,7 @@ class Tag(Datagram):
         if isinstance(data, _pa.RecordBatch):
             data = _pa.Table.from_batches([data])
 
-        extracted_sys_tags: dict[str, DataValue]
+        extracted_sys_tags: dict[str, DataValue] = {}
         system_tag_table = None
 
         if isinstance(data, _pa.Table):
@@ -111,16 +111,9 @@ class Tag(Datagram):
                 system_tag_table = arrow_utils.normalize_table_to_large_types(
                     data.select(sys_tag_cols), keep_null=True
                 )
-                extracted_sys_tags = (
-                    self._data_context.type_converter.arrow_table_to_python_dicts(
-                        system_tag_table
-                    )[0]
-                )
                 self._data_table = self._data_table.drop_columns(sys_tag_cols)  # type: ignore[union-attr]
                 # Invalidate derived caches
                 self._data_arrow_schema = None
-            else:
-                extracted_sys_tags = {}
         else:
             # Dict path: extract system-tag keys before calling super()
             data_only = {
@@ -142,10 +135,44 @@ class Tag(Datagram):
                 **kwargs,
             )
 
-        if system_tag_table is not None and not system_tags:
-            self._set_system_tag_table(system_tag_table, extracted_sys_tags)
-        else:
+        if system_tag_table is None:
             self._set_system_tags({**extracted_sys_tags, **(system_tags or {})})
+            return
+
+        if system_tags:
+            system_tag_table = self._merge_system_tag_table(
+                system_tag_table, system_tags
+            )
+        self._set_system_tag_table(system_tag_table)
+
+    def _merge_system_tag_table(
+        self, table: "pa.Table", tags: Mapping[str, DataValue]
+    ) -> "pa.Table":
+        """Apply Python tags, reusing existing Arrow fields for replacements."""
+        replacements = {name: tags[name] for name in table.column_names if name in tags}
+        additions = {
+            name: value for name, value in tags.items() if name not in replacements
+        }
+        if replacements:
+            schema = arrow_utils.schema_select(table.schema, list(replacements))
+            for field in schema:
+                if not field.nullable and replacements[field.name] is None:
+                    raise ValueError(f"Column {field.name!r} is declared non-nullable")
+            updated = self.converter.python_dicts_to_arrow_table(
+                [replacements], arrow_schema=schema
+            )
+            table = arrow_utils.hstack_tables(
+                table.drop_columns(list(replacements)), updated
+            ).select(table.column_names)
+        if additions:
+            added = self.converter.python_dicts_to_arrow_table(
+                [additions],
+                python_schema=infer_python_schema_from_pylist_data(
+                    [additions], default_type=str
+                ),
+            )
+            table = arrow_utils.hstack_tables(table, added)
+        return table
 
     def _set_system_tags(self, system_tags: dict[str, DataValue]) -> None:
         """Hold ``system_tags`` as this tag's system tags."""
@@ -156,16 +183,12 @@ class Tag(Datagram):
         self._system_tags_table: "pa.Table | None" = None
         self._system_tags_from_arrow = False
 
-    def _set_system_tag_table(
-        self, table: "pa.Table", values: dict[str, DataValue]
-    ) -> None:
+    def _set_system_tag_table(self, table: "pa.Table") -> None:
         """Hold the system-tag fields and values supplied by an Arrow table."""
         self._system_tags_table = table
-        self._system_tags = values
+        self._system_tags = self.converter.arrow_table_to_python_dicts(table)[0]
         self._system_tags_python_schema = Schema(
-            self._data_context.type_converter.arrow_schema_to_python_schema(
-                table.schema
-            )
+            self.converter.arrow_schema_to_python_schema(table.schema)
         )
         self._system_tags_from_arrow = True
 
@@ -202,12 +225,7 @@ class Tag(Datagram):
             if system_tag_row is None:
                 tag._set_system_tags({})
             else:
-                tag._set_system_tag_table(
-                    system_tag_row,
-                    tag._data_context.type_converter.arrow_table_to_python_dicts(
-                        system_tag_row
-                    )[0],
-                )
+                tag._set_system_tag_table(system_tag_row)
             yield tag
 
     # ------------------------------------------------------------------
@@ -418,9 +436,8 @@ class Data(Datagram):
             self._source_info: dict[str, SourceInfoValue] = self._source_info_of_row(
                 si_table
             )
-            # The row's source-info columns: the table's own, with their types; a
-            # token given as a value (``source_info``) is made here, so its column
-            # is typed from that value (ITL-1491).
+            # The row's token columns keep the table's types. A Python value
+            # supplies the type only when the table has no token column for it.
             typed = si_table if si_table.num_rows == 1 else None
         else:
             typed = None
@@ -446,9 +463,8 @@ class Data(Datagram):
             self._source_info = {**contained_source_info, **(source_info or {})}
 
         self._source_info_table: "pa.Table | None" = None
-        # The row's source-info columns as the Arrow table it was read from gave
-        # them, when it was read from one (here, or ``rows_of``); ``None``
-        # otherwise, and after any change of the columns or tokens.
+        # The row's typed token columns, read from Arrow or carried forward by a
+        # row operation. A row built from Python values starts without them.
         self._typed_source_info: "pa.Table | None" = typed
 
     @staticmethod
@@ -465,9 +481,30 @@ class Data(Datagram):
             The table without its source-info columns, and a table with one
             source-info column per data column (null where there is no token).
         """
+        untyped: dict[str, SourceInfoValue] = {}
+        for key, token in source_info.items():
+            name = f"{constants.SOURCE_PREFIX}{key}"
+            index = table.schema.get_field_index(name)
+            if index == -1 or token is None:
+                untyped[key] = token
+            elif (
+                key in table.column_names
+                and key != constants.CONTEXT_KEY
+                and not key.startswith(constants.META_PREFIX)
+            ):
+                field = table.schema.field(index)
+                kind = arrow_utils.normalize_to_large_types(field.type)
+                try:
+                    array = arrow_utils.source_info_replacement(
+                        token, kind, table.num_rows
+                    )
+                except (pa.ArrowInvalid, pa.ArrowTypeError) as error:
+                    error.add_note(f"Replacing source-info column {name!r}")
+                    raise
+                table = table.set_column(index, field.with_type(kind), array)
         data_table, prefixed_tables = arrow_utils.prepare_prefixed_columns(
             table,
-            {constants.SOURCE_PREFIX: source_info},
+            {constants.SOURCE_PREFIX: untyped},
             exclude_columns=[constants.CONTEXT_KEY],
             exclude_prefixes=[constants.META_PREFIX],
         )
@@ -772,8 +809,15 @@ class Data(Datagram):
     ) -> Self:
         """Create a copy with updated source-information entries.
 
-        A token given as a Python value is typed from that value: no Arrow type
-        exists for it. A token whose column type is known (an operator that
+        A Python replacement of a token whose column the row holds as Arrow (a
+        row read from a table) is written under that held type, and one that
+        does not fit it is refused: a list for a string, a string for a list, a
+        wrong depth, a null item where the item field is required, and ``None``
+        for a list type (a list token is never null). ``None`` under a held
+        string type is a ``large_string`` null, in ``as_table`` and in
+        ``source_info_table`` alike. Only a row with no Arrow token column for
+        the name types the token from its value.
+        A token whose column type is known (an operator that
         derives a token from its input's, as ``Index`` does) is given as an
         Arrow scalar of that type, and keeps it (ITL-1491). If both spellings of
         a column name are given, the later keyword wins.
@@ -799,6 +843,17 @@ class Data(Datagram):
                 )
             else:
                 token = value
+                name = f"{constants.SOURCE_PREFIX}{key}"
+                typed = self._typed_source_info
+                if typed is not None and name in typed.column_names:
+                    try:
+                        replacement = arrow_utils.source_info_replacement(
+                            token, typed.schema.field(name).type
+                        )
+                    except (pa.ArrowInvalid, pa.ArrowTypeError) as error:
+                        error.add_note(f"Replacing source-info column {name!r}")
+                        raise
+                    typed_given[key] = pa.chunked_array([replacement])
             current[key] = token
         new_p = self.copy(include_cache=False)
         new_p._source_info = current

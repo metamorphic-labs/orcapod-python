@@ -26,6 +26,7 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
+    require_custom_system_tags,
     require_supported_nullable_types,
     normalize_record_id_columns,
     SourceStreamBuilder,
@@ -252,9 +253,8 @@ class DBTableSource(RootSource):
                 [table.column(i) for i in range(table.num_columns)],
                 schema=db_schema,
             )
-        # No column info available — fall back to inferring nullable flags
-        # from actual data so columns without nulls are not spuriously marked
-        # nullable=True (Arrow's default).
+        # Validate nominated fields before fallback inference for ordinary columns.
+        require_custom_system_tags(table, self._system_tag_columns)
         require_supported_nullable_types(table.schema)
         inferred = table.cast(arrow_utils.infer_schema_nullable(table))
         return inferred if held is None else keep_nullable_columns(inferred, held)
