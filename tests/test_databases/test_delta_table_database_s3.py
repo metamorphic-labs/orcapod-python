@@ -13,11 +13,17 @@ tests ERROR with the reason.
 Run with:  uv run pytest tests/test_databases/test_delta_table_database_s3.py -v
 """
 
+import json
+
+import deltalake
 import pyarrow as pa
 import pytest
+import s3fs
 from upath import UPath
 
 from orcapod.databases import DeltaTableDatabase
+from orcapod.databases import delta_lake_databases
+from orcapod.errors import OrcapodDatabaseReadError
 
 pytestmark = pytest.mark.s3
 
@@ -56,6 +62,150 @@ def test_s3_flush_and_read(s3_base_uri, s3_storage_options):
     result = db.get_all_records(("src",), retrieve_pending=False)
     assert result is not None
     assert result.num_rows == 3
+
+
+@pytest.mark.parametrize(
+    "path", [("table",), ("group", "table")], ids=["top-level", "nested"]
+)
+@pytest.mark.parametrize(
+    "partitions",
+    [None, ["tag1", "tag2"], ["tag2", "tag1"]],
+    ids=["flat", "partitioned", "reordered-partitions"],
+)
+def test_s3_table_with_missing_log_is_refused(
+    s3_base_uri: str,
+    s3_storage_options: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    path: tuple[str, ...],
+    partitions: list[str] | None,
+) -> None:
+    """Cloud reads, metadata and flushes refuse a missing log and preserve the objects."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    uri = "/".join((s3_base_uri,) + path)
+    data = pa.table(
+        {
+            "y": [2],
+            "tag1": ["a"],
+            DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"],
+            "tag2": ["b"],
+            "x": [1],
+        }
+    )
+    if partitions == ["tag2", "tag1"]:
+        data = data.select(
+            ["x", "tag2", DeltaTableDatabase.RECORD_ID_COLUMN, "tag1", "y"]
+        )
+    deltalake.write_deltalake(
+        uri, data, partition_by=partitions, storage_options=s3_storage_options
+    )
+
+    fs = s3fs.S3FileSystem(
+        key=s3_storage_options["AWS_ACCESS_KEY_ID"],
+        secret=s3_storage_options["AWS_SECRET_ACCESS_KEY"],
+        client_kwargs={"endpoint_url": s3_storage_options["AWS_ENDPOINT_URL"]},
+        use_listings_cache=False,
+    )
+    fs.rm(f"{uri}/_delta_log", recursive=True)
+    before = {name: fs.cat_file(name) for name in fs.find(uri)}
+    assert len(before) == 1 and next(iter(before)).endswith(".parquet")
+
+    fresh = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    for operation in (
+        lambda: fresh.get_all_records(path),
+        lambda: fresh.get_table_schema(path),
+        lambda: fresh.table_exists(path),
+        lambda: fresh.add_record(path, b"b", pa.table({"v": [2]}), flush=True),
+    ):
+        with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+            _ = operation()
+        assert info.value.table == uri
+        assert info.value.record_path == path
+    assert {name: fs.cat_file(name) for name in fs.find(uri)} == before
+
+
+def test_s3_non_hive_orphan_is_refused_on_first_read_and_flush(
+    s3_base_uri: str,
+    s3_storage_options: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Delta storage backend finds data at arbitrary depth after a miss."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    path = ("table",)
+    uri = f"{s3_base_uri}/table"
+    writer_with_cached_miss = DeltaTableDatabase(
+        s3_base_uri, storage_options=s3_storage_options
+    )
+    assert writer_with_cached_miss.get_all_records(path) is None
+    writer = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    writer.add_record(path, b"a", pa.table({"x": [1]}), flush=True)
+
+    fs = s3fs.S3FileSystem(
+        key=s3_storage_options["AWS_ACCESS_KEY_ID"],
+        secret=s3_storage_options["AWS_SECRET_ACCESS_KEY"],
+        client_kwargs={"endpoint_url": s3_storage_options["AWS_ENDPOINT_URL"]},
+        use_listings_cache=False,
+    )
+    log = f"{uri}/_delta_log/00000000000000000000.json"
+    actions = [json.loads(line) for line in fs.cat_file(log).splitlines()]
+    for action in actions:
+        if "add" in action:
+            original = action["add"]["path"]
+            moved = f"files/bucket/{original}"
+            fs.mv(f"{uri}/{original}", f"{uri}/{moved}")
+            action["add"]["path"] = moved
+    fs.pipe_file(log, "".join(json.dumps(action) + "\n" for action in actions).encode())
+    fresh = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    assert fresh.list_table_paths() == [path]
+    assert fresh.at(*path, "files").list_table_paths() == []
+    fs.rm(f"{uri}/_delta_log", recursive=True)
+    before = {name: fs.cat_file(name) for name in fs.find(uri)}
+    assert len(before) == 1
+
+    for operation in (
+        lambda: fresh.get_all_records(path),
+        lambda: writer_with_cached_miss.add_record(
+            path, b"b", pa.table({"x": [2]}), flush=True
+        ),
+    ):
+        with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+            operation()
+        assert info.value.record_path == path
+    assert {name: fs.cat_file(name) for name in fs.find(uri)} == before
+
+
+def test_s3_partition_path_accepts_independent_child(
+    s3_base_uri: str,
+    s3_storage_options: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Objects registered in a parent's log are not orphaned at its partition."""
+    monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
+    path = ("parent",)
+    partition = (*path, "tag1=a", "tag2=b")
+    data = pa.table(
+        {
+            DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"],
+            "tag1": ["a"],
+            "tag2": ["b"],
+            "x": [1],
+        }
+    )
+    deltalake.write_deltalake(
+        f"{s3_base_uri}/parent",
+        data,
+        partition_by=["tag1", "tag2"],
+        storage_options=s3_storage_options,
+    )
+    db = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    assert not db.table_exists(partition)
+    assert db.get_all_records(partition) is None
+    assert db.get_table_schema(partition) is None
+    db.add_record(partition, b"b", pa.table({"x": [2]}), flush=True)
+    fresh = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    child_rows = fresh.get_all_records(partition)
+    assert child_rows is not None and child_rows.column("x").to_pylist() == [2]
+    parent_rows = fresh.get_all_records(path)
+    assert parent_rows is not None and parent_rows.column("x").to_pylist() == [1]
 
 
 def test_s3_skip_duplicates(s3_base_uri, s3_storage_options):

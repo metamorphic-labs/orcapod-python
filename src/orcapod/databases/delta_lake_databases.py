@@ -5,14 +5,15 @@ import os
 import random
 import re
 import sys
-import time
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from time import sleep
 from typing import TYPE_CHECKING, Any, Literal, cast
+from urllib.parse import unquote
 
 import polars as pl
 import pyarrow as pa
@@ -85,6 +86,10 @@ logger = logging.getLogger(__name__)
 
 # Directory that marks its parent directory as a Delta table.
 _DELTA_LOG_DIRECTORY = "_delta_log"
+_DELTA_LOG_MARKERS = ("00000000000000000000.json", "_last_checkpoint")
+
+# A first writer can put its Parquet files in place before publishing version zero.
+_MISSING_LOG_RETRY_DELAYS = (0.02, 0.08, 0.2, 0.5)
 
 # How many times a flush tries to commit a table's pending rows when other writers
 # keep committing first; after the last attempt it raises the last conflict
@@ -115,7 +120,7 @@ def _sleep_before_retry(attempt: int) -> None:
     not keep colliding. The wait only spaces attempts: what is committed is decided
     against the table each attempt loads.
     """
-    time.sleep(random.uniform(0, min(0.5, 0.005 * 2**attempt)))
+    sleep(random.uniform(0, min(0.5, 0.005 * 2**attempt)))
 
 
 # deltalake storage option -> where s3fs takes the same setting.
@@ -1929,21 +1934,145 @@ class DeltaTableDatabase:
             return None
 
         try:
-            # Try to load existing table
-            delta_table = deltalake.DeltaTable(
-                table_uri, storage_options=self._storage_options or None
-            )
-            self._delta_table_cache[record_key] = delta_table
-            logger.debug(f"Loaded existing Delta table for {record_key}")
-            return delta_table
-        except deltalake.exceptions.TableNotFoundError:
-            # Table doesn't exist: remembered until the next flush (ITL-1173).
-            self._absent_tables.add(record_key)
-            return None
+            delta_table = self._load_delta_table(table_uri)
         except Exception as e:
             # The table exists but could not be loaded: never report it as absent.
             self._delta_table_cache.pop(record_key, None)
             raise self._read_failed(record_path) from e
+
+        if delta_table is None:
+            # Table doesn't exist: remembered until the next flush (ITL-1173).
+            self._absent_tables.add(record_key)
+        else:
+            self._delta_table_cache[record_key] = delta_table
+            logger.debug(f"Loaded existing Delta table for {record_key}")
+        return delta_table
+
+    def _load_delta_table(self, table_uri: str) -> deltalake.DeltaTable | None:
+        """Open the current Delta log, checking a missing log for existing data.
+
+        Args:
+            table_uri: The table's storage location.
+
+        Returns:
+            The loaded table, or ``None`` when neither a log nor data files exist.
+
+        Raises:
+            FileNotFoundError: If the folder holds data files and the log is missing.
+        """
+        from deltalake.exceptions import TableNotFoundError
+
+        options = self._storage_options or None
+        try:
+            return deltalake.DeltaTable(table_uri, storage_options=options)
+        except TableNotFoundError as missing_log:
+            if not self._has_orphaned_delta_data_files(table_uri):
+                return None
+            for delay in _MISSING_LOG_RETRY_DELAYS:
+                sleep(delay)
+                try:
+                    return deltalake.DeltaTable(table_uri, storage_options=options)
+                except TableNotFoundError:
+                    continue
+            raise FileNotFoundError(
+                f"Found Parquet data files without a readable {_DELTA_LOG_DIRECTORY}"
+            ) from missing_log
+
+    def _has_orphaned_delta_data_files(self, table_uri: str) -> bool:
+        """Check whether the missing table path holds data unclaimed by ancestors."""
+        ancestor_files: set[str] | None = None
+        for path in self._delta_data_paths(table_uri):
+            if ancestor_files is None:
+                ancestor_files = self._ancestor_delta_data_paths(table_uri)
+            if path not in ancestor_files:
+                return True
+        return False
+
+    def _ancestor_delta_data_paths(self, table_uri: str) -> set[str]:
+        """Get files under the candidate path registered in readable ancestor logs."""
+        from deltalake.exceptions import DeltaError
+
+        if self._is_cloud:
+            scheme, separator, location = table_uri.partition("://")
+            uri_prefix = scheme + separator
+            table_path = PurePosixPath(location)
+        else:
+            uri_prefix = ""
+            table_path = Path(table_uri).absolute()
+
+        owned: set[str] = set()
+        for ancestor in table_path.parents:
+            if not ancestor.parts:
+                continue  # A cloud URI must include its bucket or container.
+            if (
+                isinstance(ancestor, Path)
+                and not (ancestor / _DELTA_LOG_DIRECTORY).is_dir()
+            ):
+                continue
+            ancestor_uri = uri_prefix + str(ancestor)
+            prefix = table_path.relative_to(ancestor).as_posix() + "/"
+            try:
+                table = deltalake.DeltaTable(
+                    ancestor_uri, storage_options=self._storage_options or None
+                )
+                actions = table.get_add_actions()
+            except DeltaError:
+                continue  # Only a readable ancestor log can establish ownership.
+            for path in actions.column("path").to_pylist():
+                # Delta encodes AddFile paths, including '%' in Hive partition names.
+                relative_path = unquote(path)
+                if relative_path.startswith(prefix):
+                    owned.add(relative_path[len(prefix) :])
+        return owned
+
+    def _delta_data_paths(self, table_uri: str) -> Iterator[str]:
+        """Yield relative Parquet paths outside logs and published child tables."""
+        if not self._is_cloud:
+            pending = [table_uri]
+            while pending:
+                directory = pending.pop()
+                if directory != table_uri and any(
+                    os.path.isfile(os.path.join(directory, _DELTA_LOG_DIRECTORY, name))
+                    for name in _DELTA_LOG_MARKERS
+                ):
+                    continue
+                try:
+                    with os.scandir(directory) as entries:
+                        for entry in entries:
+                            if entry.name == _DELTA_LOG_DIRECTORY:
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(entry.path)
+                            elif entry.name.endswith(".parquet") and entry.is_file():
+                                yield Path(entry.path).relative_to(table_uri).as_posix()
+                except FileNotFoundError:
+                    continue
+            return
+
+        from deltalake.fs import DeltaStorageHandler
+        from pyarrow.fs import FileSelector, FileType
+
+        handler = DeltaStorageHandler(table_uri, self._storage_options or None)
+        entries = handler.get_file_info_selector(
+            FileSelector("", recursive=True, allow_not_found=True)
+        )
+        paths = [(entry.path.split("/"), entry.type) for entry in entries]
+        # A committed child log marks a separate table even when the store lists files only.
+        child_tables = {
+            tuple(parts[:-2])
+            for parts, kind in paths
+            if kind == FileType.File
+            and len(parts) > 2
+            and parts[-2] == _DELTA_LOG_DIRECTORY
+            and parts[-1] in _DELTA_LOG_MARKERS
+        }
+        for parts, kind in paths:
+            if kind != FileType.File or not parts[-1].endswith(".parquet"):
+                continue
+            if _DELTA_LOG_DIRECTORY not in parts[:-1] and not any(
+                tuple(parts[:depth]) in child_tables for depth in range(1, len(parts))
+            ):
+                yield "/".join(parts)
 
     def _read_failed(self, record_path: tuple[str, ...]) -> OrcapodDatabaseReadError:
         """Build the error for a table at ``record_path`` that exists but cannot be read.
@@ -2099,19 +2228,14 @@ class DeltaTableDatabase:
 
     def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
         """Read the latest Delta schema from the log or the table's first batch."""
-        from deltalake.exceptions import TableNotFoundError
-
         try:
-            table = deltalake.DeltaTable(
-                self._get_table_uri(record_path),
-                storage_options=self._storage_options or None,
-            )
-            return pa.schema(_held_columns(table).values())
-        except TableNotFoundError:
-            pending = self._pending_batches.get(self._get_record_key(record_path))
-            return None if pending is None else pending.schema
+            table = self._load_delta_table(self._get_table_uri(record_path))
+            if table is not None:
+                return pa.schema(_held_columns(table).values())
         except Exception as exc:
             raise self._read_failed(record_path) from exc
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        return None if pending is None else pending.schema
 
     def _ensure_record_id_column(
         self, arrow_data: pa.Table, record_id: str | bytes
@@ -3789,19 +3913,13 @@ class DeltaTableDatabase:
             InputValidationError: If the stored table refuses the rows.
             StoredTableSchemaError: If the table does not satisfy the queued schema guard.
         """
-        from deltalake.exceptions import CommitFailedError, TableNotFoundError
+        from deltalake.exceptions import CommitFailedError
 
         # A column whose type Delta would not give back is written in its integer
         # form with its type recorded (ITL-928).
         combined_table = to_delta_layout(original_table)
-        # Only TableNotFoundError means "absent": a table that exists but cannot be
-        # loaded is never created over (ITL-884).
         try:
-            delta_table = deltalake.DeltaTable(
-                table_uri, storage_options=self._storage_options or None
-            )
-        except TableNotFoundError:
-            delta_table = None
+            delta_table = self._load_delta_table(table_uri)
         except Exception as load_error:
             raise OrcapodDatabaseReadError(
                 table_uri, abs_path_components
