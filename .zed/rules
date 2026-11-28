@@ -1534,9 +1534,11 @@ data. The rules:
   what they read) at capture, at compile, by bind before it binds and at the start of every
   run (refuse_restriction_conflicts), whatever streams lead there: projections, operator
   chains, streams built before the capture. A bind's walk matches the job's own slots by object
-  (Rebinding), never by name. RunSummary keeps one condition and one limit per slot (ITL-1293). Every restriction walk goes through a slot's bound source,
-  a SourceProxy's delegate and a CachedSource's source (_streams_beneath); a
-  DerivedSource is a root. A CachedSource
+  (Rebinding), never by name. RunSummary keeps one condition and one limit per slot (ITL-1293).
+  Capture and restriction checks follow job bindings and the live_source_inputs
+  declared by wrappers. A wrapper over stored results ends this walk. Source
+  registration uses the wrapper itself and its content hash.
+  A CachedSource
   over a restricted source is refused at construction (a cache is kept under the table's
   identity; developer, November 18, 2026), and so is an operator job node that caches (LOG or
   REPLAY) over a restricted source (developer, November 19, 2026: its cache is kept under the

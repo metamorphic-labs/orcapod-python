@@ -100,6 +100,11 @@ stream built from one. Pass the source itself, or use `node.as_source()` to read
 another job's stored results. A schema-only `SourceNode` declares a new unbound
 slot for each job that captures it.
 
+The capture and restriction checks follow wrappers that can read live inputs.
+This includes tag-copy `DerivedSource` over a live source. A `DerivedSource`
+over a job node reads stored results, so the checks stop there. Source object
+registration uses the wrapper itself and its content hash.
+
 Capturing into a loaded job or recompiling it can lose its restored graph
 (ITL-1560). Recompilation preserves the loaded job's public `sources` mapping.
 

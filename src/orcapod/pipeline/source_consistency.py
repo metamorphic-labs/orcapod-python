@@ -34,7 +34,13 @@ def root_source_uses(
     uses: Iterable[SourceUse],
     rebinding: Rebinding = (),
 ) -> Iterable[tuple[str, RootSource]]:
-    """Walk to each source object, using prospective bindings for replaced slots."""
+    """Walk to the source objects registered by the graph.
+
+    A ``RootSource`` supplies the registered object and ends this walk even if it
+    reads live inputs. Registering those inputs too would make a cache conflict
+    with the source whose hash it preserves. Capture safety and restrictions
+    instead follow live reads through sources.
+    """
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
 

@@ -1089,3 +1089,93 @@ def test_schema_declaration_gives_each_job_its_own_binding(
     assert sorted(first.result.as_table()["out"].to_pylist()) == [3, 7]
     assert sorted(second.result.as_table()["out"].to_pylist()) == [13, 17]
     assert sorted(second.reused.as_table()["out"].to_pylist()) == [22, 52]
+
+
+@pytest.mark.parametrize("wrapper", ["cache", "proxy"])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_live_derived_source_refuses_a_wrapped_foreign_slot(
+    wrapper: str, orchestrator: Orchestrator
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.sources.cached_source import CachedSource
+    from orcapod.core.sources.source_proxy import SourceProxy
+    from orcapod.protocols.core_protocols import SourceProtocol
+    from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
+    from orcapod.sources import DerivedSource
+    from orcapod.types import Condition
+
+    class SourceSlot(SourceJobNode):
+        @property
+        def source_id(self) -> str:
+            source = self.bound_source
+            assert isinstance(source, DictSource)
+            return source.source_id
+
+        @property
+        def condition(self) -> Condition:
+            return Condition()
+
+        @property
+        def row_limit(self) -> int | None:
+            return None
+
+        def to_config(
+            self, db_registry: DatabaseRegistryProtocol | None = None
+        ) -> dict[str, Any]:
+            source = self.bound_source
+            assert isinstance(source, DictSource)
+            return source.to_config(db_registry)
+
+        @classmethod
+        def from_config(
+            cls,
+            config: dict[str, Any],
+            db_registry: DatabaseRegistryProtocol | None = None,
+        ) -> SourceProtocol:
+            raise NotImplementedError
+
+    source = _shifted_source("original", 0)
+    foreign = SourceSlot.from_stream(source, name="foreign")
+    assert isinstance(foreign, SourceProtocol)
+    if wrapper == "cache":
+        origin = CachedSource(foreign, InMemoryArrowDatabase())
+    else:
+        proxy = SourceProxy(
+            foreign.source_id,
+            foreign.content_hash().to_string(),
+            foreign.pipeline_hash().to_string(),
+            *foreign.output_schema(),
+        )
+        proxy.bind(foreign)
+        origin = proxy
+    derived = DerivedSource(origin, tags_as_data={"t1": "copied"}, source_id="tag_copy")
+
+    with PipelineJob(database=InMemoryArrowDatabase()) as receiver:
+        total.pod(source, label="kept")
+    with receiver:
+        with pytest.raises(InconsistentSourceError, match="foreign.*not supported yet"):
+            total.pod(derived, label="borrowed")
+
+    assert isinstance(foreign, SourceSlot)
+    foreign.bound_source = _shifted_source("original", 10)
+    receiver.run(orchestrator=orchestrator())
+    assert sorted(receiver.kept.as_table()["out"].to_pylist()) == [3, 7]
+    assert set(receiver.nodes) == {"original", "kept"}
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_live_derived_source_and_its_source_are_both_capturable(
+    orchestrator: Orchestrator,
+) -> None:
+    from orcapod.sources import DerivedSource
+
+    original = _shifted_source("a", 0)
+    derived = DerivedSource(
+        original, tags_as_data={"t1": "copied"}, source_id="tag_copy"
+    )
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        total.pod(original, label="original")
+        product.pod(derived, label="derived")
+    job.run(orchestrator=orchestrator())
+    assert sorted(job.original.as_table()["out"].to_pylist()) == [3, 7]
+    assert sorted(job.derived.as_table()["out"].to_pylist()) == [2, 12]

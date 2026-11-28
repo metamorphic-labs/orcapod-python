@@ -513,6 +513,16 @@ class RootSource(StreamBase):
         """Sources have no upstream dependencies."""
         return ()
 
+    @property
+    def live_source_inputs(self) -> tuple[StreamProtocol, ...] | None:
+        """Identify the inputs read live through this source.
+
+        Wrappers that can read another stream live override this property. They
+        return an empty tuple when disconnected. A source that supplies its
+        own rows or reads stored results returns ``None``, ending the walk.
+        """
+        return None
+
     # -------------------------------------------------------------------------
     # Stream delegation defaults
     # -------------------------------------------------------------------------

@@ -41,7 +41,12 @@ from orcapod.contexts.stored import (
     report_rows_of_other_data_contexts,
     with_data_context,
 )
-from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
+from orcapod.protocols.core_protocols import (
+    DataProtocol,
+    SourceProtocol,
+    StreamProtocol,
+    TagProtocol,
+)
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
@@ -352,6 +357,11 @@ class CachedSource(RootSource):
     def cached_source(self) -> SourceProtocol:
         """The source this cache reads and keeps the rows of."""
         return self._source
+
+    @property
+    def live_source_inputs(self) -> tuple[StreamProtocol, ...]:
+        """A cache can read its wrapped source live."""
+        return (self._source,)
 
     def _live_records(self) -> pa.Table:
         """Read the wrapped source's rows, each with its record hash in front.

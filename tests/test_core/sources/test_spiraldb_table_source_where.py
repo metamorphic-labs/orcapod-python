@@ -1985,8 +1985,8 @@ class TestRestrictionThroughWrappers:
     CodeRabbit (PR 435): a proxy bound to a restricted source has no condition of its
     own and binds by identity, which a restriction leaves unchanged, so the walks must
     look through it. Wrappers checked: ``SourceJobNode`` (bound source),
-    ``SourceProxy`` (delegate), ``CachedSource`` (cached source); a ``DerivedSource``
-    is a root (it reads stored rows, not its origin's sources).
+    ``SourceProxy`` (delegate), ``CachedSource`` (cached source), and
+    ``DerivedSource`` when it reads a source live.
     """
 
     @staticmethod
@@ -1995,6 +1995,26 @@ class TestRestrictionThroughWrappers:
         proxy = _proxy_for(_events())
         proxy.bind(restricted)
         return proxy
+
+    def test_live_derived_sources_expose_their_origins_restrictions(
+        self, project, tmp_path
+    ):
+        from orcapod.sources import DerivedSource
+
+        def derive(subject: str) -> DerivedSource:
+            return DerivedSource(
+                _events().where(subject_id=subject),
+                tags_as_data={"subject_id": "copied"},
+                source_id=f"copy_{subject}",
+            )
+
+        first, second = derive("m1"), derive("m2")
+        with PipelineJob(database=DeltaTableDatabase(tmp_path / "store")) as job:
+            first.map_data({"amplitude": "renamed"}, label="first")
+            with pytest.raises(ValueError, match="two different restrictions"):
+                second.map_data({"amplitude": "renamed"}, label="second")
+
+        assert job.run().conditions == {"copy_m1": Condition.of(subject_id="m1")}
 
     @staticmethod
     def _cached_job(store: DeltaTableDatabase, mode: CacheMode) -> PipelineJob:
