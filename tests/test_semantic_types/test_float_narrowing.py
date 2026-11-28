@@ -202,6 +202,42 @@ def test_list_source_accepts_python_floats_with_one_warning() -> None:
     assert _bits(_column(nested.as_table(), "items")[0]) == expected
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_list_source_reuses_stored_float32_tags_without_warning(reverse: bool) -> None:
+    fields = {"tag32": pa.array([0.1], type=pa.float32()), "tag_id": pa.array([1])}
+    names = list(reversed(fields)) if reverse else list(fields)
+    tag = Tag(pa.table({name: fields[name] for name in names}))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ValueConversionWarning)
+        table = ListSource(
+            "value",
+            [1, 2],
+            tag_function=lambda _value, _index: tag,
+            expected_tag_keys=names,
+            data_schema={"tag32": np.float32, "tag_id": int, "value": int},
+        ).as_table()
+
+    assert table.schema.field("tag32").type == pa.float32()
+    assert _column(table, "tag32") == [float(np.float32(0.1))] * 2
+
+
+def test_list_source_checks_python_floats_after_a_stored_tag() -> None:
+    tag = Tag(pa.table({"tag32": pa.array([0.1], type=pa.float32())}))
+
+    def tags(_value: int, index: int) -> dict[str, float] | Tag:
+        return tag if index == 0 else {"tag32": 0.2}
+
+    with pytest.warns(ValueConversionWarning) as caught:
+        _ = ListSource(
+            "value",
+            [1, 2],
+            tag_function=tags,
+            data_schema={"tag32": np.float32, "value": int},
+        )
+    assert len(caught) == 1
+
+
 def test_datagram_accepts_python_floats_with_one_warning() -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -253,6 +289,19 @@ def test_the_warning_as_an_error_raises_for_every_narrowed_value(
         for _ in range(2):
             with pytest.raises(ValueConversionWarning, match=r"numpy\.float32"):
                 _ = _source(_rows(), ["x"])
+
+
+def test_ignored_conversion_does_not_consume_the_first_warning() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ValueConversionWarning)
+        _ = _source(_rows(), ["x"])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default", ValueConversionWarning)
+        _ = _source(_rows(), ["x"])
+        _ = _source(_rows(), ["y"])
+
+    assert len(_narrowing_warnings(caught)) == 1
 
 
 def test_reentrant_showwarning_reports_narrowing_once(

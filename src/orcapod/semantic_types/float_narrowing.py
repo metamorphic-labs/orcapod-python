@@ -12,9 +12,11 @@ from contextvars import ContextVar
 
 from orcapod.errors import ValueConversionWarning
 from orcapod.utils.warning_utils import (
+    WarningRegistry,
     error_filter_active,
     outside_orcapod_stacklevel,
     warn_at_frame,
+    warning_filter_action,
 )
 
 _MESSAGE = (
@@ -32,6 +34,10 @@ _non_escalating_filters = warnings.filters[:0]
 # None excludes every column, while a set excludes only named columns.
 _float_check_exclusions: ContextVar[frozenset[str] | None] = ContextVar(
     "float_check_exclusions", default=frozenset()
+)
+# Keep provenance by row identity when stored and Python-origin rows share a schema.
+stored_float_columns_by_row: ContextVar[dict[int, frozenset[str]] | None] = ContextVar(
+    "stored_float_columns_by_row", default=None
 )
 
 
@@ -107,10 +113,16 @@ def _warn_narrowing() -> None:
             return
         _issuing = True
         try:
-            # A fresh Python warning registry also keeps the parent's warning
-            # site from suppressing the child's first warning.
-            warn_at_frame(_MESSAGE, ValueConversionWarning, frame, fresh_registry=True)
-            _issued = True
+            # Python records default, once and module emissions in the supplied
+            # registry. An always filter emits without writing a registry key.
+            always = (
+                warning_filter_action(_MESSAGE, ValueConversionWarning, frame)
+                == "always"
+            )
+            registry: WarningRegistry = {}
+            lineno = frame.f_lineno
+            warn_at_frame(_MESSAGE, ValueConversionWarning, frame, registry=registry)
+            _issued = always or (_MESSAGE, ValueConversionWarning, lineno) in registry
         finally:
             _issuing = False
 

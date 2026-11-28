@@ -42,6 +42,7 @@ from orcapod.semantic_types.float_narrowing import (
     checked_float_columns,
     checking_input_floats,
     skip_float_checks,
+    stored_float_columns_by_row,
     warn_on_python_float,
 )
 from orcapod.semantic_types.nested_none import (
@@ -1299,13 +1300,17 @@ class UniversalTypeConverter:
             if checking_input_floats()
             else frozenset()
         )
+        stored_by_row = stored_float_columns_by_row.get()
         converted_data = []
         for record in python_dicts:
+            excluded = checked
+            if stored_by_row and (stored := stored_by_row.get(id(record))):
+                excluded = checked | stored
             converted_record = {}
             for field_name, converter in converters.items():
                 if field_name in record:
                     try:
-                        if field_name in checked:
+                        if field_name in excluded:
                             with skip_float_checks():
                                 converted_record[field_name] = converter(
                                     record[field_name]
