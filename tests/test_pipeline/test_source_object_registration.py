@@ -906,12 +906,23 @@ def test_nested_capture_refusal_leaves_every_job_unchanged(
 
 @pytest.mark.parametrize("foreign_origin", ["standalone", "other_job"])
 @pytest.mark.parametrize(
-    "form", ["direct", "hashed", "select", "function", "join", "invocations"]
+    "form",
+    [
+        "direct",
+        "hashed",
+        "select",
+        "function",
+        "join",
+        "record",
+        "invocations",
+        "isolated",
+    ],
 )
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
 def test_capture_refuses_foreign_source_slots(
     foreign_origin: str, form: str, orchestrator: Orchestrator
 ) -> None:
+    from orcapod.core.function_pod import FunctionPod
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.operators import SelectDataColumns, SemiJoin
     from orcapod.pipeline.base import InvocationGraph
@@ -939,9 +950,19 @@ def test_capture_refuses_foreign_source_slots(
         "function": lambda: total.pod(slot),
         "join": lambda: SemiJoin()(slot, _shifted_source("other", 0)),
     }
-    if form == "invocations":
+    pod = total.pod
+    assert isinstance(pod, FunctionPod)
+    if form == "record":
+        with pytest.raises(InconsistentSourceError, match="not supported yet") as error:
+            receiver.record_function_pod_invocation(pod, slot, label="borrowed")
+    elif form in {"invocations", "isolated"}:
+        invocations = (
+            (FunctionInvocation(pod, (slot,), "borrowed"),)
+            if form == "invocations"
+            else ()
+        )
         graph = InvocationGraph(
-            invocations=(FunctionInvocation(total.pod, (slot,), "borrowed"),),
+            invocations=invocations,
             source_streams={slot.content_hash().to_string(): slot},
         )
         with pytest.raises(InconsistentSourceError, match="not supported yet") as error:
