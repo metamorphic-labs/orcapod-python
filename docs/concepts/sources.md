@@ -485,7 +485,7 @@ applied the same condition. `where` refuses float ranges for now (ITL-1477).
 
 A restriction is not an operator:
 
-- An operator (`Filter`, `SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
+- An operator (`Filter`, `SemiJoin`) is a step of the pipeline. It is a node of the
   graph and part of the pipeline's identity: a pipeline with a filter computes something
   else than one without, and its nodes have other hashes and other stored tables.
 - A restriction is attached to the source. It chooses which of the source's rows flow and

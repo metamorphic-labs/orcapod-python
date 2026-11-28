@@ -152,7 +152,7 @@ are *list-valued tag columns*, the stream came from `batch`; group before batchi
 
 ### `ValueError: Cannot hash the Polars expression '...' for an Orcapod identity`
 
-**Cause.** A `polars_filter` predicate calls a Python function (`map_elements`,
+**Cause.** A `polars_filter` predicate (`polars_filter` is not recommended, see the fix) calls a Python function (`map_elements`,
 `map_batches`) or uses another expression Orcapod cannot identify. The message lists what it
 can. Ordinary comparisons such as `pl.col("x") > 1` work everywhere.
 

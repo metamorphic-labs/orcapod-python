@@ -39,8 +39,8 @@ An operator may add a tag, never data. A tag labels rows; it is not a data value
 [`AddTags`](#addtags) can add tags with constant values while every data column passes through
 unchanged.
 
-The filters are the operators that read data columns: `Filter` and `PolarsFilter` evaluate
-their conditions on values, and `DropNulls` reads only whether a value is present (its
+The filters are the operators that read data columns: `Filter` evaluates its condition on
+values (as does `PolarsFilter`, which is not recommended: see [PolarsFilter](#polarsfilter)), and `DropNulls` reads only whether a value is present (its
 validity), never the value. They decide which rows exist; none synthesizes a value.
 
 No operator carries its inputs' meta columns: the `__`-prefixed columns, such as a cached
@@ -249,7 +249,8 @@ The rules:
   result's table. A stream reports one data context, and so do the rows it yields one by
   one (`iter_data`), as for any stream whose table holds rows of several (ITL-1359). Only the default
   data context ships, so this matters only for a stream built in another one. A known limitation
-  (ITL-1339): some operators (`PolarsFilter` and `MergeJoin`, likely `Join` and
+  (ITL-1339): some operators (`MergeJoin` and `PolarsFilter`, which is not recommended
+  for another reason, see [PolarsFilter](#polarsfilter); likely `Join` and
   `SemiJoin` too) return their rows in the default data context whatever their input's,
   so in another data context the rows of a branch through one of them match nothing
   beside a branch that kept its context.
@@ -900,7 +901,8 @@ print(recorded.filter(col("t") >= 1.0, label="late").drop_nulls(["rate"]).explai
 
 Every source gets one block, in source-name order, and the steps are listed from the source
 upward. A join's unmatched rows are listed too (`rows without a match in 'probes' are
-dropped (Join)`), as are `SemiJoin`, `MergeJoin`, `Rejoin`, `DropNulls`, `PolarsFilter`,
+dropped (Join)`), as are `SemiJoin`, `MergeJoin`, `Rejoin`, `DropNulls`,
+`PolarsFilter` (not recommended: see [PolarsFilter](#polarsfilter)),
 `Batch(drop_partial_batch=True)` and `Pick` or `Index` when a miss drops the row. A derived or
 cached source cannot say what it reads (it reads rows stored earlier): its block says "not
 known for this source kind". The result is an `Explanation` (`orcapod.types`), plain data
@@ -918,7 +920,10 @@ takes such an expression directly, but it is not recommended: see the warning in
     `PolarsFilter` passes every column of its input through Polars, also the columns its
     predicates do not read, and Polars does not hold every Arrow type exactly. The known
     case: a `date64` value that is not at midnight comes back at midnight, with no error
-    (ITL-1296, not fixed). Use [`Filter`](#filter), which passes every value through as it
+    (ITL-1296, not fixed). A `decimal256` column, read by a predicate or not, makes Polars
+    panic: the filter raises `pyo3_runtime.PanicException`, which is a `BaseException` and not
+    an `Exception`, so `except Exception` does not catch it (`except BaseException` does),
+    and no row is returned. Use [`Filter`](#filter), which passes every value through as it
     is. Building a `PolarsFilter` (the class, or `stream.polars_filter(...)`) issues
     `PolarsFilterWarning` (`orcapod.errors`) every time, and loading a saved job issues it
     once for each `PolarsFilter` the job holds. The samples below issue it when they run.
@@ -1219,7 +1224,7 @@ November 19, 2026). Each name maps to the issue that decides its identity or out
 | `MapTags` | its rename rules for data-tags (ITL-1018) |
 | `MapColumns` | its behaviour with data-tags (ITL-1022) |
 | `Pick`, `Index` | the policy for a miss, which changes the output (ITL-439) |
-| `PolarsFilter` | whether the order of its predicates belongs to its identity (ITL-1247) |
+| `PolarsFilter` (not recommended: see [PolarsFilter](#polarsfilter)) | whether the order of its predicates belongs to its identity (ITL-1247) |
 | `TagBy`, `AddTags` | days old, their identities just changed: the review of the tag operators (ITL-1290) |
 | `Filter` | new: a row filter over a condition, provisional until its first use has shown what the canonical form of a condition must hold; its spelling and literal rule await the developer's decision (ITL-1374) |
 | `Rejoin` | new: puts the branches of one stream back together by matching system tags (ITL-1336); its matching rule changed in this release (ITL-1355) |
@@ -1231,7 +1236,10 @@ column selections (`SelectTagColumns`, `SelectDataColumns`, `DropTagColumns`,
 What you get with a provisional operator: the same results as with any other operator, a
 warning, and, should a later release change the operator's identity, a recomputation of its
 steps (and of every step downstream) instead of reuse; nothing stored is lost or wrong.
-Building one, directly, through a stream method such as `group_by` or `polars_filter`, or by
+One provisional operator has a fault of its own, apart from being provisional:
+`PolarsFilter` is not recommended, because it can change the values it passes through (see
+[PolarsFilter](#polarsfilter)).
+Building one, directly, through a stream method such as `group_by` or `filter`, or by
 loading a saved job that holds one, issues `orcapod.errors.ProvisionalHashWarning` once per
 operator per process. It reads, for example, `GroupBy is provisional: its identity is not
 frozen with data context v1 and may change in a later release. ...` and points to this
@@ -1343,7 +1351,9 @@ operators or function pods.
 Every stream also exposes the operators as methods, which reads well when chaining:
 `join`, `semi_join`, `batch`, `group_by`, `select_tag_columns`, `select_data_columns`,
 `drop_tag_columns`, `drop_data_columns`, `select_columns`, `drop_columns`, `map_tags`,
-`map_data`, `map_columns`, `add_tags`, `filter`, `polars_filter`, `drop_nulls`, `pick` and `index`.
+`map_data`, `map_columns`, `add_tags`, `filter`, `drop_nulls`, `pick` and `index`. There is a `polars_filter`
+method too; it is not recommended, because it can change the values it passes through, and it
+warns at every call: see [PolarsFilter](#polarsfilter).
 
 ```python
 adults = subjects.join(measurements).filter(col("age") > 10)

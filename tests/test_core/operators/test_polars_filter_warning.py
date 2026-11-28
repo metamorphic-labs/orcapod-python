@@ -9,6 +9,9 @@ the once-per-process ``ProvisionalHashWarning``; ``Filter`` is the operator to u
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import warnings
 from pathlib import Path
 
@@ -16,6 +19,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
+import orcapod
 from orcapod import PipelineJob
 from orcapod.core.operators import Filter, PolarsFilter
 from orcapod.core.sources import ArrowTableSource
@@ -244,3 +248,61 @@ def test_an_error_filter_refuses_the_load(tmp_path: Path, rebuildable: bool) -> 
         warnings.simplefilter("error", PolarsFilterWarning)
         with pytest.raises(PolarsFilterWarning):
             _ = PipelineJob.load(path, database=DeltaTableDatabase(tmp_path / "store"))
+
+
+# ── the decimal256 fault, as it is described ────────────────────────────────
+
+_DECIMAL256_SCRIPT = """
+import decimal, warnings
+import polars as pl
+import pyarrow as pa
+from orcapod.core.sources import ArrowTableSource
+
+warnings.simplefilter("ignore")
+table = pa.table(
+    {
+        "session": pa.array(["s1", "s2"], pa.large_string()),
+        "unit": pa.array([1, 2], pa.int64()),
+        "rate": pa.array([1.0, 2.0], pa.float64()),
+        "wide": pa.array(
+            [decimal.Decimal("1.1"), decimal.Decimal("2.2")], pa.decimal256(76, 40)
+        ),
+    }
+)
+source = ArrowTableSource(
+    table, tag_columns=["session", "unit"], tag_only_columns=True, source_id="wide"
+)
+try:
+    try:
+        source.polars_filter(pl.col("rate") > 0.0, unit=1).as_table()
+    except Exception:
+        print("caught as Exception")
+    else:
+        print("no error")
+except BaseException as error:
+    print("caught as BaseException:", type(error).__module__, type(error).__name__)
+print("the process goes on")
+"""
+
+
+def test_a_decimal256_column_raises_a_panic_exception() -> None:
+    """What the warning and the documentation say of ``decimal256`` (review of PR 625):
+    Polars panics, the filter raises ``pyo3_runtime.PanicException``, which ``except
+    Exception`` does not catch and ``except BaseException`` does, and the process goes
+    on. Run in a subprocess: a panic is not something to provoke in the test process."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(orcapod.__file__).resolve().parents[1])
+    result = subprocess.run(
+        [sys.executable, "-c", _DECIMAL256_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "caught as BaseException: pyo3_runtime PanicException",
+        "the process goes on",
+    ]
+    assert "Int256" in result.stderr

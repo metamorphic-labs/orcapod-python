@@ -9,7 +9,10 @@ below a microsecond, a float32 signaling NaN, ``-0.0``, ``decimal128`` and
 ``decimal256`` at full precision, logical types, strings and binaries of both widths,
 lists and structs of them), each as a plain tag, as data and as a data-tag, in two
 arrangements of the table, on the sync path, the row channel path and in a job run by
-either orchestrator.
+either orchestrator. On every path the rows handed out one by one are compared too, the
+tag half and the data half each on its own: a data-tag is a column of both. The last
+tests change the filter (one column carried through Polars) and require the comparison
+of every path to fail.
 
 A dictionary-encoded column is not here: no stream holds one (ITL-1264).
 """
@@ -21,8 +24,13 @@ import datetime as dt
 import decimal
 import struct
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
+
+from typing_extensions import override
+
+import polars as pl
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -31,7 +39,11 @@ import pytest
 from orcapod import PipelineJob, col
 from orcapod.channels import Channel
 from orcapod.contexts import get_default_type_converter
+from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators import Filter
+from orcapod.core.operators import filter as filter_module
+from orcapod.core.operators.filter_mask import filter_table
+from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
@@ -65,6 +77,22 @@ def _logical(values: list[Any], python_type: Any) -> pa.Array[Any]:
     )
 
 
+def _full_precision_decimals(precision: int, scale: int) -> list[decimal.Decimal]:
+    """One decimal per row with exactly ``precision`` significant digits, ``scale`` of
+    them after the point, the second one negative.
+
+    Each is written as a string: arithmetic on a ``Decimal`` (``scaleb``, a product)
+    rounds to the context's 28 digits before Arrow sees the value.
+    """
+    values: list[decimal.Decimal] = []
+    for n in range(N_ROWS):
+        digits = "".join(str((n + 1 + i * 7) % 9 + 1) for i in range(precision))
+        sign = "-" if n == 1 else ""
+        whole, fraction = digits[: precision - scale], digits[precision - scale :]
+        values.append(decimal.Decimal(f"{sign}{whole}.{fraction}"))
+    return values
+
+
 def _probed_columns(prefix: str) -> dict[str, pa.Array[Any]]:
     """One column of every probed type, named ``<prefix><kind>``."""
     dates = pa.array([1, 86_400_001, 2, 172_800_003], pa.int64()).cast(pa.date64())
@@ -82,12 +110,10 @@ def _probed_columns(prefix: str) -> dict[str, pa.Array[Any]]:
         f"{prefix}f32": floats32,
         f"{prefix}f64": pa.array([-0.0, 0.0, float("nan"), 1.5], pa.float64()),
         f"{prefix}dec128": pa.array(
-            [decimal.Decimal(f"{n}{n + 1:037d}").scaleb(-20) for n in range(N_ROWS)],
-            pa.decimal128(38, 20),
+            _full_precision_decimals(38, 20), pa.decimal128(38, 20)
         ),
         f"{prefix}dec256": pa.array(
-            [decimal.Decimal(f"{n}.{n + 1:040d}") for n in range(N_ROWS)],
-            pa.decimal256(76, 40),
+            _full_precision_decimals(76, 40), pa.decimal256(76, 40)
         ),
         f"{prefix}path": _logical([Path(f"/x/{n}") for n in range(N_ROWS)], Path),
         f"{prefix}uuid": _logical(
@@ -238,23 +264,65 @@ def _table_differences(
 # ── the paths ───────────────────────────────────────────────────────────────
 
 
-def _rows_table(rows: list[Row]) -> pa.Table:
-    """Rows of the channel path as one table: tags with system tags, then data with
-    source info (a data-tag once, from the tag)."""
-    tables: list[pa.Table] = []
-    for tag, data in rows:
-        tag_table = tag.as_table(columns={"system_tags": True})
-        data_table = data.as_table(columns={"source": True})
-        data_table = data_table.drop_columns(
-            [n for n in data_table.column_names if n in tag_table.column_names]
+def _row_tables(rows: list[Row]) -> tuple[pa.Table, pa.Table]:
+    """Rows as two tables, as a channel carries them: the tags with their system tags,
+    and the data with its source info.
+
+    The two are kept apart: a data-tag is a column of both, and its data half is a
+    value of its own, which a table holding the column once would not show.
+    """
+    tags = pa.concat_tables(
+        [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
+    )
+    data = pa.concat_tables(
+        [data.as_table(columns={"source": True}) for _, data in rows]
+    )
+    return tags, data
+
+
+def _half_differences(
+    actual: pa.Table, expected: pa.Table, given: pa.Table, kept: list[int], half: str
+) -> list[str]:
+    """What differs between one half (tags or data) of the rows a filter passes on and
+    the kept rows of its input: against the input's own rows, and against the table
+    the source was given (in the large variants)."""
+    found: list[str] = []
+    if actual.column_names != expected.column_names:
+        found.append(
+            f"{half} columns {actual.column_names} are not {expected.column_names}"
         )
-        tables.append(
-            pa.Table.from_arrays(
-                [*tag_table.columns, *data_table.columns],
-                schema=pa.schema([*tag_table.schema, *data_table.schema]),
+    if actual.schema != expected.schema:
+        found.append(f"{half} schemas differ")
+    for name in expected.column_names:
+        if name in actual.column_names:
+            found += _differences(
+                actual.column(name), expected.column(name).take(kept), f"{half} {name}"
             )
+    for name in given.column_names:
+        if name not in actual.column_names:
+            continue
+        column = given.column(name).combine_chunks()
+        large = column.cast(
+            arrow_utils.normalize_to_large_types(column.type, keep_null=True)
         )
-    return pa.concat_tables(tables)
+        found += _differences(
+            actual.column(name), large.take(kept), f"{half} given {name}"
+        )
+    return found
+
+
+def _row_differences(
+    rows: list[Row], input_rows: list[Row], given: pa.Table, kept: list[int]
+) -> list[str]:
+    """What differs between the rows a filter passes on and the kept rows of its input,
+    the tag half and the data half each on its own (both halves of a data-tag)."""
+    if len(rows) != len(kept):
+        return [f"{len(rows)} rows, expected {len(kept)}"]
+    tags, data = _row_tables(rows)
+    input_tags, input_data = _row_tables(input_rows)
+    return _half_differences(tags, input_tags, given, kept, "tag") + _half_differences(
+        data, input_data, given, kept, "data"
+    )
 
 
 async def _through_channels(op: Filter, source: StreamProtocol) -> list[Row]:
@@ -276,53 +344,145 @@ ROLES = ("tag", "data_tag")
 FILTERS = ("reads_another_column", "reads_every_column")
 
 
-@pytest.mark.parametrize("which", FILTERS)
-@pytest.mark.parametrize("role", ROLES)
-@pytest.mark.parametrize("arrangement", ARRANGEMENTS)
-def test_sync_path_keeps_every_value(arrangement: str, role: str, which: str) -> None:
+def _sync_differences(arrangement: str, role: str, which: str) -> list[str]:
+    """What the sync path changes: its table, and the rows it hands out one by one."""
     source, given = _source(arrangement, role)
-    out = _filters(given)[which](source).as_table(columns=EVERYTHING)
-    assert out.num_rows == len(KEPT)
+    stream = _filters(given)[which](source)
+    out = stream.as_table(columns=EVERYTHING)
     expected = source.as_table(columns=EVERYTHING)
-    assert _table_differences(out, expected, given, KEPT) == []
+    return _table_differences(out, expected, given, KEPT) + _row_differences(
+        list(stream.iter_data()), list(source.iter_data()), given, KEPT
+    )
 
 
-@pytest.mark.parametrize("which", FILTERS)
-@pytest.mark.parametrize("role", ROLES)
-@pytest.mark.parametrize("arrangement", ARRANGEMENTS)
-def test_channel_path_keeps_every_value(
-    arrangement: str, role: str, which: str
-) -> None:
-    """The rows ``async_execute`` passes on are the input's rows, in the form the
-    channel carries them, and hold the values of the table the source was given."""
+def _channel_differences(arrangement: str, role: str, which: str) -> list[str]:
+    """What the row channel path (``async_execute``) changes, in either half of a row."""
     source, given = _source(arrangement, role)
     rows = asyncio.run(_through_channels(_filters(given)[which], source))
-    assert len(rows) == len(KEPT)
-    out = _rows_table(rows)
-    expected = _rows_table(list(source.iter_data()))
-    assert _table_differences(out, expected, given, KEPT) == []
+    return _row_differences(rows, list(source.iter_data()), given, KEPT)
 
 
-@pytest.mark.parametrize("orchestrator", [None, AsyncPipelineOrchestrator])
-@pytest.mark.parametrize("which", FILTERS)
-@pytest.mark.parametrize("role", ROLES)
-@pytest.mark.parametrize("arrangement", ARRANGEMENTS)
-def test_job_keeps_every_value(
+def _job_differences(
     arrangement: str, role: str, which: str, orchestrator: type | None
-) -> None:
+) -> list[str]:
+    """What a job run changes: the node's table, and the rows it hands out."""
     source, given = _source(arrangement, role)
     job = PipelineJob(name="exact", database=InMemoryArrowDatabase())
     with job:
         _ = _filters(given)[which](source, label="kept")
     _ = job.run(orchestrator=orchestrator() if orchestrator else None)
-    out = job.nodes["kept"].as_table(columns=EVERYTHING)
-    assert out.num_rows == len(KEPT)
+    node = job.nodes["kept"]
+    out = node.as_table(columns=EVERYTHING)
     expected = source.as_table(columns=EVERYTHING)
     # A job node lays its columns out in row order (tags, system tags, data, source
     # info), not the source table's: the same columns, compared by name.
-    assert sorted(out.column_names) == sorted(expected.column_names)
+    if sorted(out.column_names) != sorted(expected.column_names):
+        return [f"columns {out.column_names} are not {expected.column_names}"]
     out = out.select(expected.column_names)
-    assert _table_differences(out, expected, given, KEPT) == []
+    return _table_differences(out, expected, given, KEPT) + _row_differences(
+        list(node.iter_data()), list(source.iter_data()), given, KEPT
+    )
+
+
+PATHS: dict[str, Callable[[str, str, str], list[str]]] = {
+    "sync": _sync_differences,
+    "channel": _channel_differences,
+    "job_sync": lambda a, r, w: _job_differences(a, r, w, None),
+    "job_async": lambda a, r, w: _job_differences(a, r, w, AsyncPipelineOrchestrator),
+}
+
+
+@pytest.mark.parametrize("which", FILTERS)
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("arrangement", ARRANGEMENTS)
+@pytest.mark.parametrize("path", list(PATHS))
+def test_every_path_keeps_every_value(
+    path: str, arrangement: str, role: str, which: str
+) -> None:
+    """On every path the rows are the input's rows: the table, and each half (tags,
+    data) of the rows handed out one by one, hold the values of the table the source
+    was given."""
+    assert PATHS[path](arrangement, role, which) == []
+
+
+# ── the comparison catches what it is for ───────────────────────────────────
+
+
+def _through_polars(table: pa.Table, name: str) -> pa.Table:
+    """``table`` with the column ``name`` carried through Polars and cast back, as
+    ``PolarsFilter`` carries every column: a ``date64`` off midnight moves to midnight."""
+    field = table.schema.field(name)
+    converted = pl.from_arrow(table.select([name])).to_arrow().column(name)  # pyright: ignore[reportAttributeAccessIssue]  # a frame: a table was given
+    return table.set_column(
+        table.column_names.index(name), field, converted.cast(field.type)
+    )
+
+
+class _DataHalfThroughPolars(WithoutMetaWriter):
+    """The channel writer of ``Filter``, changed to carry the data half of the data-tag
+    ``t_date64`` through Polars; the tag half is passed on as it is."""
+
+    @override
+    async def send(self, item: Row) -> None:
+        tag, data = item
+        table = data.as_table(columns={"source": True})
+        if "t_date64" in table.column_names:
+            data = Data(_through_polars(table, "t_date64"))
+        await super().send((tag, data))
+
+
+@pytest.mark.parametrize("which", FILTERS)
+@pytest.mark.parametrize("arrangement", ARRANGEMENTS)
+def test_a_change_of_only_the_data_half_of_a_data_tag_is_caught(
+    monkeypatch: pytest.MonkeyPatch, arrangement: str, which: str
+) -> None:
+    """A filter whose channel path changed only the data half of a data-tag (the tag
+    half intact) fails the channel comparison (review of PR 625, P2)."""
+    monkeypatch.setattr(filter_module, "WithoutMetaWriter", _DataHalfThroughPolars)
+    found = _channel_differences(arrangement, "data_tag", which)
+    assert found
+    assert all(line.startswith("data ") and "t_date64" in line for line in found)
+
+
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("arrangement", ARRANGEMENTS)
+@pytest.mark.parametrize("path", list(PATHS))
+def test_a_column_carried_through_polars_is_caught_on_every_path(
+    monkeypatch: pytest.MonkeyPatch, path: str, arrangement: str, role: str
+) -> None:
+    """A filter that carried one column through Polars, on its table path and on its
+    channel path, fails the comparison of every path."""
+
+    def table_through_polars(table: pa.Table, condition: Condition) -> pa.Table:
+        return _through_polars(filter_table(table, condition), "t_date64")
+
+    class TagHalfThroughPolars(WithoutMetaWriter):
+        @override
+        async def send(self, item: Row) -> None:
+            tag, data = item
+            changed = _through_polars(
+                tag.as_table(columns={"system_tags": True}), "t_date64"
+            )
+            await super().send((Tag(changed), data))
+
+    monkeypatch.setattr(filter_module, "filter_table", table_through_polars)
+    monkeypatch.setattr(filter_module, "WithoutMetaWriter", TagHalfThroughPolars)
+    found = PATHS[path](arrangement, role, "reads_another_column")
+    assert any("t_date64" in line for line in found)
+
+
+def test_the_decimal_fixtures_fill_their_precision() -> None:
+    """Every decimal of the fixture has as many significant digits as its type
+    declares (38 and 76), and as many after the point as its scale (20 and 40)."""
+    columns = _probed_columns("")
+    for name, precision, scale in (("dec128", 38, 20), ("dec256", 76, 40)):
+        values = cast("list[decimal.Decimal]", columns[name].to_pylist())
+        assert len(set(values)) == N_ROWS
+        assert any(value < 0 for value in values)
+        for value in values:
+            _, digits, exponent = value.as_tuple()
+            assert len(digits) == precision and digits[0] != 0 and digits[-1] != 0
+            assert exponent == -scale
 
 
 @pytest.mark.parametrize(
@@ -338,13 +498,19 @@ def test_job_keeps_every_value(
     ],
     ids=str,
 )
+@pytest.mark.parametrize("role", ROLES)
 @pytest.mark.parametrize("arrangement", ARRANGEMENTS)
 def test_a_condition_on_a_value_keeps_every_value(
-    arrangement: str, condition: Condition, kept: list[int]
+    arrangement: str, role: str, condition: Condition, kept: list[int]
 ) -> None:
     """A condition that compares a probed column's values (a ``-0.0``, a signaling NaN,
-    a ``date64`` off midnight) changes none of them."""
-    source, given = _source(arrangement, "tag")
-    out = Filter(condition)(source).as_table(columns=EVERYTHING)
+    a ``date64`` off midnight) changes none of them, on the sync and the channel path."""
+    source, given = _source(arrangement, role)
+    stream = Filter(condition)(source)
+    out = stream.as_table(columns=EVERYTHING)
     expected = source.as_table(columns=EVERYTHING)
     assert _table_differences(out, expected, given, kept) == []
+    input_rows = list(source.iter_data())
+    assert _row_differences(list(stream.iter_data()), input_rows, given, kept) == []
+    through = asyncio.run(_through_channels(Filter(condition), source))
+    assert _row_differences(through, input_rows, given, kept) == []

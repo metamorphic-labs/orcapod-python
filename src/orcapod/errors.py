@@ -936,7 +936,10 @@ class PolarsFilterWarning(UserWarning):
     ``PolarsFilter`` passes every column of its input through Polars, also the columns
     its predicates do not read, and Polars does not hold every Arrow type exactly. The
     known case: a ``date64`` value that is not at midnight comes back at midnight, with
-    no error (ITL-1296). ``PolarsFilter`` is not recommended. ``Filter``
+    no error (ITL-1296). A ``decimal256`` column, read by a predicate or not, makes
+    Polars panic: the filter raises ``pyo3_runtime.PanicException``, a
+    ``BaseException`` that ``except Exception`` does not catch, and returns no row.
+    ``PolarsFilter`` is not recommended. ``Filter``
     (``stream.filter(...)``) is the operator to use: it chooses rows with an Arrow mask
     and passes every value through as it is.
 
