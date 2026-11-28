@@ -15,8 +15,8 @@ reads the file's bytes from disk and returns their SHA-256 content hash, with
 the label `sha256`. It does this every time, with no memory of previous
 results. `sha256` is the only file hash algorithm: `FileHasher(algorithm=...)`
 and `hash_file(..., algorithm=...)` refuse any other name with a `ValueError`
-that names the algorithm given, and so does a data context file whose file
-hasher names another algorithm, when the context is loaded.
+that names the algorithm given. Loading a data context whose file hasher names
+another algorithm raises `ContextValidationError` with the same detail.
 
 `HashCacher` is a protocol for any object that maps a `FileHashKey` to a
 `ContentHash`. The key is a four-field struct:

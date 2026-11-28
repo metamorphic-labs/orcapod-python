@@ -27,7 +27,7 @@ from upath import UPath
 import orcapod as op
 from orcapod.cli import app
 from orcapod.contexts import get_default_context
-from orcapod.contexts.core import ContextResolutionError
+from orcapod.contexts.core import ContextValidationError
 from orcapod.contexts.registry import JSONDataContextRegistry
 from orcapod.hashing.cache_population import populate_hash_cache
 from orcapod.hashing.file_hashers import CachedFileHasher, FileHasher, FileHashKey
@@ -325,7 +325,7 @@ def test_data_context_file_naming_another_algorithm_is_refused(
     registry = JSONDataContextRegistry(
         contexts_dir=_manifests_naming(tmp_path, {"algorithm": algorithm})
     )
-    with pytest.raises(ContextResolutionError) as raised:
+    with pytest.raises(ContextValidationError) as raised:
         registry.get_context()
     assert (
         f"Unsupported file hash algorithm {algorithm!r}: "
@@ -417,12 +417,14 @@ def test_file_columns_hash_as_sha256_in_every_arrangement(
     ]
 
     want = [("s1", 1, 550, 350), ("s1", 2, 550, 350), ("s2", 1, 550, 350)]
-    assert _rows_of(file_sizes(source).as_table()) == want
+    assert _rows_of(file_sizes.pod(source).as_table()) == want
 
     for run_async in (False, True):
-        job = op.PipelineJob(name="sizes", database=op.databases.InMemoryArrowDatabase())
+        job = op.PipelineJob(
+            name="sizes", database=op.databases.InMemoryArrowDatabase()
+        )
         with job:
-            file_sizes(source, label="sizes")
+            file_sizes.pod(source, label="sizes")
         if run_async:
             asyncio.run(job.run_async())
         else:

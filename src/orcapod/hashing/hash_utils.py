@@ -138,7 +138,10 @@ def require_file_hash_algorithm(algorithm: object) -> None:
         ValueError: If ``algorithm`` is not exactly ``"sha256"``; the message names
             the algorithm given.
     """
-    if not isinstance(algorithm, str) or str.__eq__(algorithm, SHA256_ALGORITHM) is not True:
+    if (
+        not isinstance(algorithm, str)
+        or str.__eq__(algorithm, SHA256_ALGORITHM) is not True
+    ):
         raise ValueError(
             f"Unsupported file hash algorithm {algorithm!r}: "
             f"{SHA256_ALGORITHM} is the only file hash algorithm"
