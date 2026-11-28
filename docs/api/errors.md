@@ -40,6 +40,8 @@ These exceptions and warnings report problems identifying, binding, or reading s
 
 ::: orcapod.errors.RowIdentifierError
 
+::: orcapod.errors.RepeatedDictKeyError
+
 ::: orcapod.errors.SourceTooLargeError
 
 ::: orcapod.errors.UnboundSourceError

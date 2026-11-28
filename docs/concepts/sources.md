@@ -210,6 +210,59 @@ categorical column) is not a dictionary column: it is a library value, stored an
 (see [Arrays and other library values](arrays.md)), and is accepted. Supporting
 dictionary-encoded columns themselves is future work (ITL-1277).
 
+### A list of key/value structs is a dict
+
+A `dict[K, V]` column is stored as a list of structs with the two fields `key` and `value`,
+and Orcapod reads every Arrow column of that shape (a list, large list or fixed-size list of
+`struct<key, value>`, the fields in either order) as a `dict[K, V]`: nothing else marks a dict,
+so a list of key/value structs **is** a dict. A dict holds each key once. An Arrow table built
+outside Orcapod can hold a cell with one key twice; read as a Python `dict` it would lose an
+entry. So a source refuses such a column when it is built, with `RepeatedDictKeyError` (an
+`InputValidationError`) naming the column and the key, at any depth (a dict in a list, as a
+dict value, in a struct); a polling source checks each batch. Two keys are the same key
+exactly when a Python `dict` would keep one of them: `0.0` and `-0.0` are one key, two nulls
+are one key, and two NaN keys are two keys. A stream built from an Arrow table of your own
+(`ArrowTableStream`) is not scanned when it is built: its table keeps what you gave, and
+reading such a cell as a `dict` (`as_dict()`, a function taking the column) raises the same
+error. Remove the repeated entries first, or, if the column is meant as a list of pairs, give
+the struct's fields other names.
+
+```python
+import pyarrow as pa
+
+from orcapod.errors import RepeatedDictKeyError
+from orcapod.sources import ArrowTableSource
+
+counts_type = pa.large_list(
+    pa.struct([("key", pa.large_string()), ("value", pa.int64())])
+)
+counts = pa.table(
+    {
+        "session": ["s1", "s2"],
+        "counts": pa.array(
+            [
+                [{"key": "left", "value": 3}, {"key": "right", "value": 5}],
+                [{"key": "left", "value": 1}, {"key": "left", "value": 4}],
+            ],
+            counts_type,
+        ),
+    }
+)
+try:
+    ArrowTableSource(counts, tag_columns=["session"], tag_only_columns=True)
+except RepeatedDictKeyError as exc:
+    print(exc.column, exc.key)
+# counts left
+
+source = ArrowTableSource(
+    counts.slice(0, 1), tag_columns=["session"], tag_only_columns=True
+)
+print(source.output_schema()[1])
+# Schema({'counts': dict[str, int] | None})
+print([data.as_dict() for _, data in source.iter_data()])
+# [{'counts': {'left': 3, 'right': 5}}]
+```
+
 ### A CSV file's types: `schema=`
 
 A CSV file holds text only, so `CSVSource` infers each column's type from the file, and

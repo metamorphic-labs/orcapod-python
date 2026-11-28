@@ -18,6 +18,55 @@ class RowIdentifierError(InputValidationError, ValueError):
     """
 
 
+class RepeatedDictKeyError(InputValidationError, ValueError):
+    """A stored dict holds one key more than once (ITL-907).
+
+    To Orcapod a list of key/value structs is a ``dict[K, V]``, and a dict holds each
+    key once. A table built outside Orcapod can hold a cell with a repeated key;
+    reading it as a Python ``dict`` would silently drop an entry. A source refuses
+    such a column when it is built, and the read of such a cell as a ``dict`` raises.
+    Two keys are repeated when the Python ``dict`` would keep only one of them
+    (``0.0`` and ``-0.0``, two nulls; two NaN keys are two keys).
+
+    Attributes:
+        key: The repeated key, as the Python value it is read as.
+        column: The column holding the dict, when the raiser knows it.
+    """
+
+    key: Any
+    column: str | None
+
+    def __init__(self, key: Any, column: str | None = None) -> None:
+        """Build the error.
+
+        Args:
+            key: The repeated key, as the Python value it is read as.
+            column: The column holding the dict, or ``None`` when not known.
+        """
+        self.key = key
+        self.column = column
+        where = "" if column is None else f"Column {column!r}: "
+        super().__init__(
+            f"{where}a stored dict holds the key {key!r} more than once. To Orcapod "
+            f"a list of key/value structs is a dict (dict[K, V]) and a dict holds "
+            f"each key once: read as a dict it would lose an entry. Remove the "
+            f"repeated entries before the table is given to Orcapod, or, if the "
+            f"column is meant as a list of pairs, rename the struct's fields "
+            f"(anything but exactly 'key' and 'value')."
+        )
+
+    def in_column(self, column: str) -> "RepeatedDictKeyError":
+        """Return the same refusal naming the column the dict is in.
+
+        Args:
+            column: The column the caller knows the dict was read from.
+
+        Returns:
+            A new error with the same key and ``column``.
+        """
+        return type(self)(self.key, column)
+
+
 class SchemaInconsistencyError(InputValidationError):
     """Raised when a data batch has a schema that is incompatible with the expected schema.
 

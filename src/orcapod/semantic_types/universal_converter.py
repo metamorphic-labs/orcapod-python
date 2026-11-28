@@ -30,6 +30,7 @@ from orcapod.errors import (
     InstantOutOfRangeError,
     NaiveDatetimeError,
     NotADatetimeError,
+    RepeatedDictKeyError,
     SubMicrosecondDatetimeError,
     UnsupportedValueError,
 )
@@ -1425,6 +1426,9 @@ class UniversalTypeConverter:
                         python_dict[field_name] = converters[field_name](value)
                     except NestedNoneNotRestorableError as exc:
                         raise with_context(f"Column {field_name!r}", exc) from exc
+                    except RepeatedDictKeyError as exc:
+                        # The dict's own conversion cannot say which column it was in.
+                        raise exc.in_column(field_name) from exc
                 else:
                     python_dict[field_name] = None
             python_dicts.append(python_dict)
@@ -1701,18 +1705,14 @@ class UniversalTypeConverter:
         ):
             element_type = arrow_type.value_type
 
-            # Check if this is a dict representation: list<struct<key, value>>
-            if pa.types.is_struct(element_type):
-                field_names = [field.name for field in element_type]
-                if set(field_names) == {"key", "value"}:
-                    # This is a dict
-                    key_field = next(f for f in element_type if f.name == "key")
-                    value_field = next(f for f in element_type if f.name == "value")
+            # A dict representation: list<struct<key, value>>
+            entry_fields = self.dict_entry_fields(arrow_type)
+            if entry_fields is not None:
+                key_field, value_field = entry_fields
+                key_python_type = self.arrow_type_to_python_type(key_field.type)
+                value_python_type = self.arrow_type_to_python_type(value_field.type)
 
-                    key_python_type = self.arrow_type_to_python_type(key_field.type)
-                    value_python_type = self.arrow_type_to_python_type(value_field.type)
-
-                    return dict[key_python_type, value_python_type]
+                return dict[key_python_type, value_python_type]
 
             # Regular list
             element_python_type = self.arrow_type_to_python_type(element_type)
@@ -2028,31 +2028,31 @@ class UniversalTypeConverter:
         ):
             element_type = arrow_type.value_type
 
-            # Check if this is a dict representation
-            if pa.types.is_struct(element_type):
-                field_names = [field.name for field in element_type]
-                if set(field_names) == {"key", "value"}:
-                    # Dict representation
-                    key_field = next(f for f in element_type if f.name == "key")
-                    value_field = next(f for f in element_type if f.name == "value")
+            # A dict representation
+            entry_fields = self.dict_entry_fields(arrow_type)
+            if entry_fields is not None:
+                key_field, value_field = entry_fields
+                key_converter = self.get_arrow_to_python_converter(key_field.type)
+                value_converter = self._nested_value_converter(value_field.type)
 
-                    key_converter = self.get_arrow_to_python_converter(key_field.type)
-                    value_converter = self._nested_value_converter(value_field.type)
+                def convert_entries(value: Any) -> dict[Any, Any]:
+                    if not value:
+                        return {}
+                    converted = {}
+                    for item in value:
+                        # A null entry is not a key/value pair: never drop it.
+                        if item is None:
+                            raise unrestorable_none_error(element_type)
+                        key = key_converter(item["key"])
+                        # A dict holds a key once: a stored repeat is never read as
+                        # a dict that lost an entry (ITL-907). The caller names the
+                        # column.
+                        if key in converted:
+                            raise RepeatedDictKeyError(key)
+                        converted[key] = value_converter(item["value"])
+                    return converted
 
-                    def convert_entries(value: Any) -> dict[Any, Any]:
-                        if not value:
-                            return {}
-                        converted = {}
-                        for item in value:
-                            # A null entry is not a key/value pair: never drop it.
-                            if item is None:
-                                raise unrestorable_none_error(element_type)
-                            converted[key_converter(item["key"])] = value_converter(
-                                item["value"]
-                            )
-                        return converted
-
-                    return convert_entries
+                return convert_entries
 
             # Regular list
             element_converter = self._nested_value_converter(element_type)
@@ -2107,6 +2107,61 @@ class UniversalTypeConverter:
         else:
             # Default passthrough
             return lambda value: value
+
+    def dict_entry_fields(
+        self, arrow_type: pa.DataType
+    ) -> tuple[pa.Field[Any], pa.Field[Any]] | None:
+        """Return the key and value fields of a dict type, or ``None`` for any other type.
+
+        The one definition of which Arrow type Orcapod reads as a ``dict[K, V]``: a
+        list, large list or fixed-size list whose element is a struct with exactly the
+        two fields ``key`` and ``value``, in either order. No marker tells such a list
+        from a dict: a list of key/value structs IS a dict (ITL-907). An Arrow map is
+        not one (no ``dict`` is stored as a map).
+
+        Args:
+            arrow_type: An Arrow type, not looked into: a type that only holds a dict
+                type (a list of dicts) gives ``None``.
+
+        Returns:
+            ``(key field, value field)`` for a dict type, else ``None``.
+        """
+        if not (
+            pa.types.is_list(arrow_type)
+            or pa.types.is_large_list(arrow_type)
+            or pa.types.is_fixed_size_list(arrow_type)
+        ):
+            return None
+        element_type = arrow_type.value_type
+        if not pa.types.is_struct(element_type):
+            return None
+        if {field.name for field in element_type} != {"key", "value"}:
+            return None
+        key_field = next(f for f in element_type if f.name == "key")
+        value_field = next(f for f in element_type if f.name == "value")
+        return key_field, value_field
+
+    def reads_storage_as_values(self, arrow_type: pa.BaseExtensionType) -> bool:
+        """Return whether a logical type's stored value is read part by part.
+
+        True for a user class (its storage struct's fields) and a native container
+        (``list[T]`` / ``set[T]`` of a logical type: its elements), whose parts this
+        converter reads by their own Arrow types, so a dict type inside the storage
+        is read as a dict. Any other logical type decodes its storage its own way.
+
+        Args:
+            arrow_type: The Arrow extension type of a column.
+
+        Returns:
+            True when a dict type inside the storage type is read as a dict.
+        """
+        from orcapod.logical_types.list_logical_type_factory import ListLogicalType
+        from orcapod.logical_types.user_class_logical_type import UserClassLogicalType
+
+        logical_type = self.get_logical_type_by_arrow_extension_name(
+            arrow_type.extension_name
+        )
+        return isinstance(logical_type, (UserClassLogicalType, ListLogicalType))
 
     def _is_user_class_extension(self, extension_name: str) -> bool:
         """Whether *extension_name* is the logical type of a user class (ITL-1144).
