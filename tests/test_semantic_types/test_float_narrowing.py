@@ -895,11 +895,14 @@ def test_materialized_update_calls_the_context_table_converter() -> None:
 
 
 def test_materialized_data_as_datagram_does_not_warn_on_stored_float32() -> None:
-    row = Data({"x": cast(DataValue, np.float32(0.1))}, python_schema={"x": np.float32})
+    row = Data(
+        {"x": cast(DataValue, cast(object, np.float32(0.1)))},
+        python_schema={"x": np.float32},
+    )
     _ = row.as_table()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ValueConversionWarning)
-        updated = row.update(x=cast(DataValue, np.float32(0.2)))
+        updated = row.update(x=cast(DataValue, cast(object, np.float32(0.2))))
         result = updated.as_datagram().as_table()
     assert _narrowing_warnings(caught) == []
     assert _column(result, "x") == updated.as_table()["x"].to_pylist()
