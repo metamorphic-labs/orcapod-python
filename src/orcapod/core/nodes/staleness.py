@@ -8,15 +8,12 @@ rebound two nodes up makes every node below it stale, not only its direct consum
 
 from __future__ import annotations
 
+import importlib
 import weakref
 from collections.abc import Iterable
 from typing import Any
 
 from orcapod.errors import live_input_cycle_error
-from orcapod.utils.lazy_module import LazyModule
-
-# Source consistency identifies job nodes using this mixin.
-_source_consistency = LazyModule("orcapod.pipeline.source_consistency")
 
 
 class RunHoldingNode:
@@ -89,7 +86,12 @@ class RunHoldingNode:
 
     def _require_live_bindings(self) -> None:
         """Validate the stream graph even when there are no held rows to check."""
-        _source_consistency.require_live_source_bindings((self,))
+        # Source consistency sits above this mixin in the import graph and uses it
+        # to recognize job nodes. Resolve the module when the graph is checked.
+        source_consistency = importlib.import_module(
+            "orcapod.pipeline.source_consistency"
+        )
+        source_consistency.require_live_source_bindings((self,))
 
     def _holds_run(self, *, load_only: bool) -> bool:
         """Whether the node holds the rows of a completed run good for such a run."""
