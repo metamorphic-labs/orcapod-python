@@ -70,6 +70,30 @@ def test_tagged_derived_source_identity_table_documents_positional_marker() -> N
     assert "record_id_columns=()" in recipe
 
 
+def test_derived_source_docstring_documents_positional_marker() -> None:
+    """The class docstring gives the tagged form's identity as the reference table does."""
+    from orcapod.core.sources import DerivedSource
+
+    docstring = " ".join((DerivedSource.__doc__ or "").split())
+    assert (
+        'Explicit ``record_id_columns=()`` appends the marker ``("record_id_policy", '
+        '"position")``'
+    ) in docstring
+
+
+def test_job_guide_says_which_stored_records_a_derived_source_reads() -> None:
+    """``as_source()`` reads the latest record per lineage, not every stored record."""
+    guide = (PROJECT_ROOT / "docs" / "concepts" / "pipeline-job.md").read_text(
+        encoding="utf-8"
+    )
+    (entry,) = [
+        part for part in guide.split("\n- ") if part.startswith("**`as_source()`**")
+    ]
+    entry = " ".join(entry.split())
+    assert "the most recent readable stored record per input lineage" in entry
+    assert "over the same stored records" not in entry
+
+
 def _documented_sites() -> set[str]:
     """The call sites named in the inventory section of the hashing reference."""
     text = REFERENCE.read_text(encoding="utf-8")

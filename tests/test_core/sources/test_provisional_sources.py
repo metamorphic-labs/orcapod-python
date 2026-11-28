@@ -127,6 +127,22 @@ def test_under_an_error_filter_every_construction_raises() -> None:
                 _ = _polling()
 
 
+def test_the_warning_says_what_may_change_and_what_is_reused() -> None:
+    """The warning promises no recomputation: a function result is found again by its
+    input data hash, whatever the source's identity (independent review of PR 609)."""
+    from orcapod.core.sources.provisional import warn_provisional_source
+
+    with pytest.warns(ProvisionalHashWarning) as caught:
+        warn_provisional_source("DerivedSource")
+    (warning,) = caught
+    text = str(warning.message)
+    assert "may also change" in text
+    assert (
+        "can reuse cached function results when their input data is unchanged" in text
+    )
+    assert "computed again instead of reused" not in text
+
+
 def test_every_use_is_recorded() -> None:
     """The golden tool refuses a case that records an undeclared provisional use."""
     with recording_provisional_uses() as used:
