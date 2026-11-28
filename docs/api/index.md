@@ -16,7 +16,8 @@ directly:
 | [`PipelineJob`](pipeline.md) | A pipeline bound to sources and a database; the object you run |
 | [`side_effect_pod`, `sink_pod`, `tap_pod`](function-pods.md) | Decorators for functions run for their side effects |
 
-Everything else lives in subpackages:
+The table lists the public modules alongside the top-level `orcapod` namespace.
+Other modules support Orcapod internally or are covered in the concept pages.
 
 | Subpackage | Description |
 |------------|-------------|
@@ -25,4 +26,8 @@ Everything else lives in subpackages:
 | [`orcapod.databases`](databases.md) | Persistent storage backends for computation results |
 | [`orcapod.nodes`](nodes.md) | Pipeline graph elements, including the DB-backed job nodes |
 | [`orcapod.streams`](streams.md) | Immutable (Tag, Data) sequences backed by PyArrow tables |
+| [`orcapod.pipeline`](pipeline.md) | Pipelines, jobs, orchestrators, observers, and run summaries |
 | [`orcapod.types`](types.md) | Core type definitions: `Schema`, `ColumnConfig`, `ContentHash`, `Condition`, `col`, `Explanation`, `Trace`, `Absence`, `Highlight` |
+| [`orcapod.errors`](errors.md) | Orcapod exceptions and warnings |
+
+See the [command-line reference](../reference/cli.md) for `orcapod warm-cache`.

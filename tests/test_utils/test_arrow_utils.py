@@ -995,12 +995,22 @@ class TestPreparePrefixedColumnsSourceInfoTokens:
         )
 
     def test_stream_with_nested_source_info_iterates(self) -> None:
-        """``ArrowTableStream(source_info=...)`` accepts a nested token."""
+        """``ArrowTableStream(source_info=...)`` accepts a nested token.
+
+        The data column has the token's two list layers (the token-shape rule,
+        ITL-1491: a list token needs list data of the same layers).
+        """
         from orcapod.core.streams import ArrowTableStream
 
         token: SourceInfoValue = [["a", None], ["b"]]
+        values = pa.large_list(pa.large_list(pa.int64()))
         stream = ArrowTableStream(
-            pa.table({"id": [1, 2], "v": [10, 20]}),
+            pa.table(
+                {
+                    "id": [1, 2],
+                    "v": pa.array([[[10, 10], [10]], [[20, 20], [20]]], values),
+                }
+            ),
             tag_columns=["id"],
             source_info={"v": token},
         )

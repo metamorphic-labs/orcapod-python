@@ -179,6 +179,143 @@ def _fold_members(tokens: Sequence[str | None]) -> str:
     return arrow_utils.fold_system_tag_values(ordered, label=JOIN_FOLD_LABEL)
 
 
+class NullTokenListError(ValueError):
+    """A token list that is to be merged is null where a list of tokens is declared.
+
+    Two inputs' tokens of a merged data-tag are merged position by position. A null
+    where the token column's type still has a list layer (a null inner list of a
+    list-of-lists token) has no positions to merge. The caller, which knows the
+    operator and the column, raises the ``InputValidationError``.
+    """
+
+
+def _is_token_list(kind: pa.DataType | None) -> bool:
+    """Whether ``kind`` is a list of tokens (a large, plain or fixed-size list)."""
+    return kind is not None and (
+        pa.types.is_large_list(kind)
+        or pa.types.is_list(kind)
+        or pa.types.is_fixed_size_list(kind)
+    )
+
+
+def _merge_typed(left: Any, right: Any, kind: pa.DataType | None) -> Any:
+    """Merge two inputs' tokens of one merged column, keeping the column's shape.
+
+    ``_merge_pending`` for a token column of type ``kind``: the tokens are merged
+    position by position down to the strings, where the two members are held
+    pending.
+
+    Args:
+        left: The first input's token.
+        right: The second input's token.
+        kind: The token column's Arrow type, or ``None`` when no input declares
+            one (rows built from values): the tokens' own shapes are then used.
+
+    Returns:
+        The merged token, of the column's shape.
+
+    Raises:
+        NullTokenListError: If a token is null where ``kind`` is a list.
+        ValueError: If the two tokens' lists differ in length, or one is a list
+            and the other is not (``merge_source_info``).
+    """
+    if not _is_token_list(kind):
+        return _merge_pending(left, right)
+    if left is None or right is None:
+        raise NullTokenListError(
+            f"a null where a list of tokens (type {kind}) is declared: no stream "
+            + "holds one (a token's list is never null at any level)"
+        )
+    if not (isinstance(left, list) and isinstance(right, list)):
+        return _merge_pending(left, right)
+    if len(left) != len(right):
+        return _merge_pending(left, right)  # raises: lists of different lengths
+    assert kind is not None
+    item = kind.value_type  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a list type has a value type
+    return [_merge_typed(a, b, item) for a, b in zip(left, right)]  # pyright: ignore[reportUnknownArgumentType]
+
+
+def null_token_list_error(
+    operator: str, column: str, kind: pa.DataType
+) -> InputValidationError:
+    """Return the refusal of a merged token that holds a null list of tokens.
+
+    Args:
+        operator: The operator's name.
+        column: The token column.
+        kind: The token column's Arrow type.
+
+    Returns:
+        The ``InputValidationError`` naming the operator, the column and its type.
+    """
+    return InputValidationError(
+        f"{operator}: the source-info token column {column!r} (type {kind}) of a "
+        + "data-tag both inputs hold has a null where a list of tokens is declared. "
+        + "The tokens of the two inputs are merged position by position, and a null "
+        + "list has no position to merge. Give that list its tokens (an empty list, "
+        + "or null tokens inside a list), or keep the column a data-tag of one "
+        + "input only."
+    )
+
+
+def _token_fits(value: Any, kind: pa.DataType) -> bool:
+    """Whether the token ``value`` can be written as ``kind`` with its shape kept.
+
+    A string is a token of a string type only, and a list of a list type whose
+    items fit; a null fits any type. pyarrow would read a string given for a list
+    type as the list of its characters, so the shape is checked before writing.
+
+    Args:
+        value: A source-info token: a string, ``None`` or a list of tokens.
+        kind: The Arrow type of the token column.
+
+    Returns:
+        Whether ``pa.array([value], type=kind)`` holds ``value`` as it is.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return pa.types.is_large_string(kind) or pa.types.is_string(kind)
+    if isinstance(value, list):
+        if not (
+            pa.types.is_large_list(kind)
+            or pa.types.is_list(kind)
+            or pa.types.is_fixed_size_list(kind)
+        ):
+            return False
+        return all(_token_fits(item, kind.value_type) for item in value)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownArgumentType, reportUnknownMemberType]  # a list type has a value type
+    return False
+
+
+def _token_array(values: Sequence[Any], kind: pa.DataType, name: str) -> Any:
+    """Return the tokens ``values`` as an array of ``kind``, each with its shape kept.
+
+    The one way the join writes a token it made (a merged token, a fold) into a
+    column. A stream's tokens have the shape of their column (the token-shape
+    rule), so every such token fits; a token that does not is never written.
+
+    Args:
+        values: The tokens, one per row.
+        kind: The Arrow type of the token column.
+        name: The token column's name.
+
+    Returns:
+        The array.
+
+    Raises:
+        RuntimeError: If a token does not fit ``kind`` (``_token_fits``): pyarrow
+            would store a string given for a list type as its characters.
+    """
+    for value in values:
+        if not _token_fits(value, kind):
+            raise RuntimeError(
+                f"Join: a merged source-info token of column {name!r} does not have "
+                + f"the shape of its type {kind}; it is not written. This is a bug in "
+                + "Orcapod: a stream's tokens always have the shape of their column."
+            )
+    return pa.array(values, type=kind)
+
+
 def _fold_pending(value: Any) -> Any:
     """Replace every pending token position of ``value`` by its merged token."""
     if isinstance(value, list):
@@ -530,6 +667,15 @@ class Join(NonZeroInputOperator):
                 )
                 require_matchable_key("Join", key, key_type)
             common_tag_keys.add(_COMMON_JOIN_KEY)
+            # The token column of a merged data-tag must have one Arrow type in
+            # both inputs too: the merged token takes it (ITL-1491).
+            for left_name, right_name in sorted(right_source.items()):
+                _ = require_shared_arrow_type(
+                    "Join",
+                    left_name,
+                    table.schema.field(left_name).type,
+                    next_table.schema.field(right_name).type,
+                )
 
             table_ref_schema = table.schema
             table = _inner_join(table, next_table, list(common_tag_keys))
@@ -540,7 +686,12 @@ class Join(NonZeroInputOperator):
                 table, table_ref_schema, next_ref_schema, common_tag_keys
             )
             for left_name, right_name in right_source.items():
-                table = self._merge_source_columns(table, left_name, right_name)
+                try:
+                    table = self._merge_source_columns(table, left_name, right_name)
+                except NullTokenListError as error:
+                    raise null_token_list_error(
+                        "Join", left_name, table.schema.field(left_name).type
+                    ) from error
             merged_source |= set(right_source)
 
             tag_keys.update(next_tag_keys)
@@ -590,17 +741,22 @@ class Join(NonZeroInputOperator):
         Returns:
             The table with ``left_name`` holding both sides' members, pending until
             the join folds them (``_fold_source_column``).
+
+        Raises:
+            NullTokenListError: If a token is null where the column's type is a
+                list of tokens; the caller names the operator and the column.
         """
         field = table.schema.field(left_name)
-        merged = pa.array(
+        merged = _token_array(
             [
-                _merge_pending(left, right)
+                _merge_typed(left, right, field.type)
                 for left, right in zip(
                     table.column(left_name).to_pylist(),
                     table.column(right_name).to_pylist(),
                 )
             ],
-            type=field.type,
+            field.type,
+            left_name,
         )
         index = table.schema.get_field_index(left_name)
         table = table.set_column(index, field, merged)
@@ -618,9 +774,10 @@ class Join(NonZeroInputOperator):
             The table with one merged token at every token position of ``name``.
         """
         field = table.schema.field(name)
-        folded = pa.array(
+        folded = _token_array(
             [_fold_pending(value) for value in table.column(name).to_pylist()],
-            type=field.type,
+            field.type,
+            name,
         )
         return table.set_column(table.schema.get_field_index(name), field, folded)
 
@@ -839,6 +996,21 @@ class Join(NonZeroInputOperator):
         from orcapod.channels import Channel
 
         canon_order = self._canonical_input_order(suffixes)
+        # The columns the chain's steps merge, folded by its last step only.
+        merged_so_far: set[str] = set()
+        # Each input's first row, by canonical position. A row carries its token
+        # columns' types, so the first row of an input is its declaration: it is
+        # compared with every other input's as it arrives, whether or not any row
+        # matches (the sync path compares the inputs' tables before it joins).
+        first_rows: dict[int, tuple[TagProtocol, DataProtocol]] = {}
+
+        def declare(position: int, tag: TagProtocol, data: DataProtocol) -> None:
+            for other, (other_tag, other_data) in sorted(first_rows.items()):
+                if other < position:
+                    self._check_merged_token_types(other_tag, other_data, tag, data)
+                else:
+                    self._check_merged_token_types(tag, data, other_tag, other_data)
+            first_rows[position] = (tag, data)
 
         async with asyncio.TaskGroup() as tg:
             # Pre-rename system tags for each input so binary joins
@@ -846,13 +1018,14 @@ class Join(NonZeroInputOperator):
             renamed_readers: list[
                 ReadableChannel[tuple[TagProtocol, DataProtocol]]
             ] = []
-            for orig_idx in canon_order:
+            for position, orig_idx in enumerate(canon_order):
                 ch: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=64)
                 tg.create_task(
                     self._rename_sys_tags(
                         inputs[orig_idx],
                         ch.writer,
                         suffixes[orig_idx],
+                        functools.partial(declare, position),
                     )
                 )
                 renamed_readers.append(ch.reader)
@@ -874,7 +1047,11 @@ class Join(NonZeroInputOperator):
                         current_reader,
                         renamed_readers[i],
                         target_writer,
-                        functools.partial(self._merge_pair_passthrough, final=is_last),
+                        functools.partial(
+                            self._merge_pair_passthrough,
+                            final=is_last,
+                            merged_so_far=merged_so_far,
+                        ),
                     )
                 )
 
@@ -954,6 +1131,15 @@ class Join(NonZeroInputOperator):
                         # so the error does not depend on whether any values match.
                         self._check_shared_key_types(
                             tag, buffers[other][0][0], shared_keys
+                        )
+                        # The same for the token column of a data-tag both sides
+                        # hold, which the join merges (side 0 is the earlier input).
+                        rows = [buffers[other][0], (tag, pkt)]
+                        (first_tag, first), (second_tag, second) = (
+                            rows if other == 0 else rows[::-1]
+                        )
+                        self._check_merged_token_types(
+                            first_tag, first, second_tag, second
                         )
                         # The same, for a name that is a tag on one side and a data
                         # column on the other (the sync path checks the schemas).
@@ -1058,15 +1244,21 @@ class Join(NonZeroInputOperator):
         ch_in: ReadableChannel[tuple[TagProtocol, DataProtocol]],
         ch_out: WritableChannel[tuple[TagProtocol, DataProtocol]],
         suffix: str,
+        on_first_row: Callable[[TagProtocol, DataProtocol], None],
     ) -> None:
         """Read rows and rename system-tag keys by appending the per-input suffix.
 
         Used as a pre-processing step in ``_staggered_join`` so that
         downstream binary joins can pass system tags through without
         modification. The tag's user columns keep their Arrow table.
+        ``on_first_row`` is given the input's first row before it is passed on.
         """
         try:
+            first = True
             async for tag, pkt in ch_in:
+                if first:
+                    first = False
+                    on_first_row(tag, pkt)
                 if (system_tags := Join._system_tag_table(tag)) is not None:
                     tag = Join._build_tag(
                         Join._merge_tag_tables(tag, None),
@@ -1197,6 +1389,7 @@ class Join(NonZeroInputOperator):
         right_tag: TagProtocol,
         right: DataProtocol,
         final: bool = True,
+        merged_so_far: set[str] | None = None,
     ) -> DataProtocol:
         """Merge two data datagrams as Arrow, left columns first.
 
@@ -1216,6 +1409,9 @@ class Join(NonZeroInputOperator):
             final: Whether this row is emitted by the join (the last step of a
                 staggered chain, or a two-input join): then every merged column's
                 pending members are folded into merged tokens.
+            merged_so_far: The columns the steps of one join have merged so far,
+                shared by the steps of a staggered chain and added to here; only
+                these are folded. ``None`` for a join of one step.
 
         Returns:
             The merged data, in the context of ``left``.
@@ -1226,6 +1422,8 @@ class Join(NonZeroInputOperator):
         """
         from orcapod.core.datagrams import Data
 
+        if merged_so_far is None:
+            merged_so_far = set()
         left_table, right_table = left.as_table(), right.as_table()
         merged = Join._merged_data_tags(
             left_tag.keys(),
@@ -1238,17 +1436,59 @@ class Join(NonZeroInputOperator):
             raise InputValidationError(
                 f"Join: inputs share data columns {sorted(overlap - merged)}."
             )
-        source_info = {**left.source_info(), **right.source_info()}
-        if merged:
-            left_info, right_info = left.source_info(), right.source_info()
-            for name in merged:
-                source_info[name] = _merge_pending(
-                    left_info.get(name), right_info.get(name)
+        # Each column's token goes on as the typed column its row carries: the
+        # pipeline determines a token column's type, and it is never taken from a
+        # value (ITL-1491). Only a token the join makes is given: the token of a
+        # merged data-tag, from both sides' tokens, and, when the row is emitted,
+        # the fold of the members this or an earlier step of the chain left
+        # pending. Only columns the join merged are folded (``merged_so_far``): a
+        # column's own token is the user's, whatever it looks like.
+        declared = Join._declared_token_types(left, right)
+        left_info, right_info = left.source_info(), right.source_info()
+        source_info: dict[str, Any] = {}
+        for name in sorted(merged):
+            try:
+                source_info[name] = _merge_typed(
+                    left_info.get(name), right_info.get(name), declared.get(name)
                 )
+            except NullTokenListError as error:
+                raise null_token_list_error(
+                    "Join", f"{constants.SOURCE_PREFIX}{name}", declared[name]
+                ) from error
+        merged_so_far.update(merged)
         if final:
+            carried = {**left_info, **right_info, **source_info}
             source_info = {
-                name: _fold_pending(value) for name, value in source_info.items()
+                name: _fold_pending(carried[name])
+                for name in sorted(merged_so_far)
+                if name in carried
             }
+        made = set(source_info)
+        tokens = Join._token_columns(left, made) + Join._token_columns(right, made)
+        # A token the join makes is written with the type its column declares in
+        # the inputs, as the sync path writes it into the left input's column; it
+        # is given as a value only when no input declares a type for it (rows
+        # built from values).
+        typed_names = [name for name in source_info if name in declared]
+        if typed_names:
+            tokens.append(
+                pa.Table.from_arrays(
+                    [
+                        _token_array(
+                            [source_info.pop(name)],
+                            declared[name],
+                            f"{constants.SOURCE_PREFIX}{name}",
+                        )
+                        for name in typed_names
+                    ],
+                    schema=pa.schema(
+                        [
+                            pa.field(f"{constants.SOURCE_PREFIX}{name}", declared[name])
+                            for name in typed_names
+                        ]
+                    ),
+                )
+            )
         # Column order as ``static_process`` lays it out: the data-tag columns
         # first, in the merged tag order, then each side's other data columns.
         tag_order = [*left_tag.keys()]
@@ -1260,7 +1500,7 @@ class Join(NonZeroInputOperator):
         ]
         if not with_data_tags:
             return Data(
-                arrow_utils.hstack_tables(left_table, right_table),
+                arrow_utils.hstack_tables(left_table, right_table, *tokens),
                 source_info=source_info,
                 data_context=left.data_context_key,
             )
@@ -1292,10 +1532,87 @@ class Join(NonZeroInputOperator):
             schema=pa.schema(fields),
         )
         return Data(
-            arrow_utils.hstack_tables(data_tags, left_rest, right_rest),
+            arrow_utils.hstack_tables(data_tags, left_rest, right_rest, *tokens),
             source_info=source_info,
             data_context=left.data_context_key,
         )
+
+    @staticmethod
+    def _declared_token_types(*rows: DataProtocol) -> dict[str, pa.DataType]:
+        """Return the type each row declares for its token columns, by data column.
+
+        Args:
+            *rows: Rows, in the canonical order of their inputs; the first row that
+                has a token column for a name gives its type.
+
+        Returns:
+            The Arrow type of each ``_source_<name>`` column, keyed by ``name``.
+        """
+        declared: dict[str, pa.DataType] = {}
+        for row in rows:
+            for field in row.arrow_schema(columns={"source": True}):
+                if field.name.startswith(constants.SOURCE_PREFIX):
+                    _ = declared.setdefault(
+                        field.name.removeprefix(constants.SOURCE_PREFIX), field.type
+                    )
+        return declared
+
+    @staticmethod
+    def _check_merged_token_types(
+        first_tag: TagProtocol,
+        first: DataProtocol,
+        second_tag: TagProtocol,
+        second: DataProtocol,
+    ) -> None:
+        """Raise if a merged data-tag's token column has two types in two inputs.
+
+        The async counterpart of the check ``static_process`` runs on the input
+        tables before its join, applied to the first row of each side, so the error
+        does not depend on whether any key matches.
+
+        Args:
+            first_tag: A tag from the canonically earlier input.
+            first: Its data.
+            second_tag: A tag from the other input.
+            second: Its data.
+
+        Raises:
+            InputValidationError: If the large-normalized Arrow types of a merged
+                data-tag's token column differ (``require_shared_arrow_type``).
+        """
+        merged = Join._merged_data_tags(
+            first_tag.keys(),
+            data_tag_names(first_tag.keys(), first.keys()),
+            second_tag.keys(),
+            data_tag_names(second_tag.keys(), second.keys()),
+        )
+        left = Join._declared_token_types(first)
+        right = Join._declared_token_types(second)
+        for name in sorted(merged & left.keys() & right.keys()):
+            _ = require_shared_arrow_type(
+                "Join", f"{constants.SOURCE_PREFIX}{name}", left[name], right[name]
+            )
+
+    @staticmethod
+    def _token_columns(data: DataProtocol, merged: Collection[str]) -> list[pa.Table]:
+        """Return ``data``'s source-info columns, without those of ``merged`` columns.
+
+        Args:
+            data: One side's row.
+            merged: The columns whose token the join makes, given as a value.
+
+        Returns:
+            A list holding the one-row table of the kept ``_source_*`` columns, with
+            the types the row carries; an empty list when no column is kept.
+        """
+        table = data.as_table(columns={"source": True})
+        kept = [
+            name
+            for name in table.column_names
+            if name.startswith(constants.SOURCE_PREFIX)
+            and name.removeprefix(constants.SOURCE_PREFIX) not in merged
+        ]
+        return [table.select(kept)] if kept else []
 
     @staticmethod
     def _merge_pair_rename(
@@ -1332,13 +1649,15 @@ class Join(NonZeroInputOperator):
         right_tag: TagProtocol,
         right_pkt: DataProtocol,
         final: bool = True,
+        merged_so_far: set[str] | None = None,
     ) -> tuple[TagProtocol, DataProtocol]:
         """Merge a matched pair, passing system tags through without renaming.
 
         Used in the staggered chain where system tags have already been
         pre-renamed by ``_rename_sys_tags``. The merged row is built from the
         inputs' Arrow tables, in the left (canonically first) tag's context.
-        ``final`` is true only for the chain's last step (see ``_merge_data``).
+        ``final`` is true only for the chain's last step, and ``merged_so_far``
+        is the chain's one set of merged columns (see ``_merge_data``).
         """
         merged_sys = Join._join_system_tag_tables(
             [Join._system_tag_table(left_tag), Join._system_tag_table(right_tag)]
@@ -1349,7 +1668,12 @@ class Join(NonZeroInputOperator):
             left_tag.data_context_key,
         )
         return merged_tag, Join._merge_data(
-            left_tag, left_pkt, right_tag, right_pkt, final=final
+            left_tag,
+            left_pkt,
+            right_tag,
+            right_pkt,
+            final=final,
+            merged_so_far=merged_so_far,
         )
 
     def rows_dropped_text(

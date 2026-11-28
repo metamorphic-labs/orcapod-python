@@ -509,7 +509,8 @@ def test_the_provenance_columns_have_the_row_built_schema() -> None:
         [
             pa.field("k", pa.int64()),
             pa.field(SYSTEM_TAG, pa.large_string(), metadata={"m": "1"}),
-            pa.field("x", pa.int64()),
+            # A list token needs list data (the token-shape rule, ITL-1491).
+            pa.field("x", pa.large_list(pa.int64())),
             pa.field("z", pa.int64()),
             pa.field("y", pa.int64()),
             pa.field(
@@ -523,7 +524,7 @@ def test_the_provenance_columns_have_the_row_built_schema() -> None:
             [
                 pa.array([1, 2], pa.int64()),
                 pa.array(["s", "s"], pa.large_string()),
-                pa.array([1, 2], pa.int64()),
+                pa.array([[1], [2]], pa.large_list(pa.int64())),
                 pa.array([3, 4], pa.int64()),
                 pa.array([5, 6], pa.int64()),
                 pa.array([["a"], ["b"]], schema.field("_source_x").type),
@@ -631,16 +632,17 @@ def _schema_outcome(make: Callable[[], StreamProtocol]) -> tuple[str, Any]:
 
 
 @pytest.mark.parametrize("layout", ["one_batch", "one_row_per_batch"])
-def test_empty_source_info_lists_are_typed_from_their_tokens(layout: str) -> None:
+def test_empty_source_info_lists_keep_their_columns_type(layout: str) -> None:
     """A raw stream whose source-info column is a nested list type holding only empty
-    lists: the channel's result equals the job's sync path, both typing the tokens from
-    their values over the complete table (``_type_source_info_by_values``), as the rows
-    do: one list level, not the column's two."""
+    lists: the channel's result equals the job's sync path, and both keep the column's
+    two list levels. The pipeline determines a token column's type; it is never taken
+    from the tokens, which here show one level only (ITL-1491)."""
     raw = ArrowTableStream(
         pa.table(
             {
                 "k": pa.array([1, 2], pa.int64()),
-                "x": pa.array([1, 2], pa.int64()),
+                # ``x`` has its token's two list layers (the token-shape rule).
+                "x": pa.array([[], []], pa.large_list(pa.large_list(pa.int64()))),
                 "z": pa.array([3, 4], pa.int64()),
                 "_source_x": pa.array(
                     [[], []], pa.large_list(pa.large_list(pa.large_string()))
@@ -655,7 +657,9 @@ def test_empty_source_info_lists_are_typed_from_their_tokens(layout: str) -> Non
     rebuilt = job_sync.as_table(columns=ALL)
     assert got.to_pylist() == rebuilt.to_pylist()
     assert got.schema.equals(rebuilt.schema)
-    assert got.schema.field("_source_x").type == pa.large_list(pa.large_string())
+    assert got.schema.field("_source_x").type == pa.large_list(
+        pa.large_list(pa.large_string())
+    )
 
 
 def test_a_raw_nullable_system_tag_keeps_its_field_in_a_job_and_channel() -> None:

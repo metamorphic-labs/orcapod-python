@@ -13,6 +13,8 @@ from orcapod.core.operators.base import (
 )
 from orcapod.core.operators.join import (
     _MERGED_SOURCE_PREFIX,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
+    NullTokenListError,
+    null_token_list_error,
     _inner_join,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
     _COMMON_JOIN_KEY,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
     _with_common_key,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
@@ -54,7 +56,9 @@ def _output_types(
         Column name to its output Arrow type, for every column of either input.
     """
     resolved: dict[str, pa.DataType] = {}
-    for name in left_types.keys() | right_types.keys():
+    # In name order: which disagreement is reported first never follows a set's
+    # order (and so the hash seed).
+    for name in sorted(left_types.keys() | right_types.keys()):
         left_type, right_type = left_types.get(name), right_types.get(name)
         if left_type is not None and right_type is not None:
             resolved[name] = require_shared_arrow_type(
@@ -424,6 +428,17 @@ class MergeJoin(BinaryOperator):
             for name in sorted(merged)
             if f"{constants.SOURCE_PREFIX}{name}" in right_table.column_names
         }
+        # The two tokens become one of the type both inputs declare: compared
+        # before the second input's column is renamed, so the outcome never
+        # depends on whether a row matches (ITL-1491).
+        for left_name in sorted(right_source):
+            if left_name in left_table.column_names:
+                _ = require_shared_arrow_type(
+                    "MergeJoin",
+                    left_name,
+                    left_table.schema.field(left_name).type,
+                    right_table.schema.field(left_name).type,
+                )
         if right_source:
             right_table = right_table.rename_columns(
                 [right_source.get(c, c) for c in right_table.column_names]
@@ -491,7 +506,12 @@ class MergeJoin(BinaryOperator):
         joined = _inner_join(left_table, right_table, join_keys)
         joined = joined.drop(_COMMON_JOIN_KEY)
         for left_name, right_name in right_source.items():
-            joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            try:
+                joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            except NullTokenListError as error:
+                raise null_token_list_error(
+                    "MergeJoin", left_name, joined.schema.field(left_name).type
+                ) from error
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
 
         # Use the left stream's type converter — not the default context — so that a

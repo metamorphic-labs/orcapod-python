@@ -803,6 +803,10 @@ class TestProducerlessStreamIdentity:
 
 SOURCE_ROOT = Path(orcapod.__file__).parent
 LABEL_DEFINITIONS = {
+    "sha256": "hashing/hash_utils.py",
+    "hash_path": "hashing/hash_utils.py",
+    "xxh64": "hashing/hash_utils.py",
+    "crc32": "hashing/hash_utils.py",
     "semantic_v1": "hashing/semantic_hashing/semantic_hasher.py",
     "arrow_v1": "hashing/arrow_hashers.py",
     "arrow_ordered_v1": "hashing/arrow_hashers.py",

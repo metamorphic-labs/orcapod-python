@@ -449,14 +449,18 @@ def test_operator_storage_keeps_one_declared_token_schema(
     from orcapod.streams import ArrowTableStream
     from orcapod.types import col
 
-    op_filter = Filter(col("x") > 0)
+    op_filter = Filter(col("k") >= 0)
     origin = op.sources.DictSource(
         [{"k": 0, "x": 1}], tag_columns=["k"], tag_only_columns=True, source_id="seed"
     )
     schema = pa.schema(
         [
             pa.field("k", pa.int64(), nullable=False),
-            pa.field("x", pa.int64(), nullable=False),
+            pa.field(
+                "x",
+                pa.large_list(pa.large_list(pa.int64())) if nested else pa.int64(),
+                nullable=False,
+            ),
             pa.field(
                 "_source_x",
                 pa.large_list(pa.large_list(pa.large_string()))
@@ -468,10 +472,20 @@ def test_operator_storage_keeps_one_declared_token_schema(
 
     def stream(mixed: bool) -> ArrowTableStream:
         rows: list[dict[str, int | str | list[list[str]] | None]] = [
-            {"k": 0, "x": 1, "_source_x": [["seed::0::x"]] if nested else "seed::0::x"}
+            {
+                "k": 0,
+                "x": [[1]] if nested else 1,
+                "_source_x": [["seed::0::x"]] if nested else "seed::0::x",
+            }
         ]
         if mixed:
-            rows.append({"k": 1, "x": 2, "_source_x": [] if nested else None})
+            rows.append(
+                {
+                    "k": 1,
+                    "x": [[2]] if nested else 2,
+                    "_source_x": [] if nested else None,
+                }
+            )
         return ArrowTableStream(
             pa.Table.from_pylist(rows, schema=schema),
             tag_columns=["k"],
@@ -533,8 +547,8 @@ def test_operator_storage_keeps_one_declared_token_schema(
             == saved
         )
     assert node.as_source().as_table().sort_by("k").to_pylist() == [
-        {"k": 0, "x": 1},
-        {"k": 1, "x": 2},
+        {"k": 0, "x": [[1]] if nested else 1},
+        {"k": 1, "x": [[2]] if nested else 2},
     ]
     node.attach_databases(pipeline_database=store, cache_mode=CacheMode.REPLAY)
     replayed = node.execute(stream_value).as_table(columns={"source": True})

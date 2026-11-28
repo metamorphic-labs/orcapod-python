@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import pyarrow as pa
-import pyarrow.compute as pc
 
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
@@ -88,9 +87,9 @@ class RowBuiltFormUnavailable(ValueError):
 
 
 class SourceInfoTypesDisagree(RowBuiltFormUnavailable):
-    """Two rows give one source-info column different types (``_row_built_form``).
+    """Two record batches of one stream declare one source-info column with two types.
 
-    A table built from such rows cannot be concatenated.
+    A table cannot be built from such batches (``settle_token_types``).
     """
 
 
@@ -500,82 +499,14 @@ class StaticOutputOperatorPod(TraceableBase):
         )
 
     @staticmethod
-    def _type_source_info_by_values(table: pa.Table) -> pa.Table:
-        """Type each source-info column from its tokens, as the rows of a table built from rows do.
-
-        This step of F (``_row_built_form``) runs on the complete table.
-        A row's ``Data`` types each source-info token from its
-        value (``arrow_utils.source_info_arrow_type``, the one rule): a string or
-        ``None`` as ``large_string``, a list as ``large_list`` of its first informative
-        element's type, so a list of ``None`` or of empty lists shows fewer levels than
-        its column may declare. The rows' tables are then concatenated, which needs
-        every row to give a column one type. This step gives each column that type,
-        built from the same values. A ``large_string`` column is every row's type
-        already and is left as it is.
-
-        Stopgap, not the proper solution (developer, November 27, 2026): this
-        step infers a token column's declared type again from its values. A
-        token column's type is fixed by the pipeline and is not meant to be
-        taken from values. The inference can narrow a declared type (example:
-        ``[None]`` in a token column a ``Batch`` declares with two list levels
-        infers one). ITL-1491 removes it.
-
-        Args:
-            table: A table of user tags, system tags, data and source info, after the
-                per-slice steps (``streams.base.row_built_columns``).
-
-        Returns:
-            The table with each source-info column of the type its tokens give.
-
-        Raises:
-            SourceInfoTypesDisagree: If two rows give one source-info column different
-                types, where the rows' tables cannot be concatenated. The caller builds
-                the rows (``_rows_to_table``), which raises the error a table built from
-                rows raises.
-        """
-        from orcapod.utils import arrow_utils
-
-        columns = list(table.columns)
-        fields = list(table.schema)
-        changed = False
-        for index, field in enumerate(fields):
-            if not field.name.startswith(constants.SOURCE_PREFIX):
-                continue
-            if pa.types.is_large_string(field.type):
-                continue
-            values = table.column(index).to_pylist()
-            kinds = {arrow_utils.source_info_arrow_type(value) for value in values}
-            if len(kinds) != 1:
-                raise SourceInfoTypesDisagree(field.name)
-            (kind,) = kinds
-            if kind == field.type:
-                continue
-            columns[index] = pa.chunked_array([pa.array(values, type=kind)])
-            fields[index] = arrow_utils.source_info_field(field.name, kind)
-            changed = True
-        if not changed:
-            return table
-        return pa.Table.from_arrays(
-            columns,
-            schema=pa.schema(
-                fields,
-                cast("dict[bytes | str, bytes | str] | None", table.schema.metadata),
-            ),
-        )
-
-    @staticmethod
     def _row_built_form(
         table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
     ) -> pa.Table:
         """Return ``table`` as ``_rows_to_table`` builds it from the table's own rows.
 
-        F in the ITL-1347 spec: the same table, without making the rows. Two steps:
-
-        - per slice (``streams.base.row_built_columns``), what each row decides on its
-          own: the columns, their order, the declared system-tag fields, and the
-          source-info fields in the form the rows give them;
-        - on the complete table, what depends on the values of every row: each
-          source-info column's type, from its tokens (``_type_source_info_by_values``).
+        The row-built form selects and orders columns using their row fields without
+        building the rows. It keeps the declared system-tag fields and each token
+        column's declared type, and drops table-level schema metadata.
 
         The equality with ``_rows_to_table`` is tested over every operator, source kind,
         column role and raw-stream provenance shape (ITL-1347, L0-L2).
@@ -589,15 +520,12 @@ class StaticOutputOperatorPod(TraceableBase):
             The table ``_rows_to_table`` would build from its rows.
 
         Raises:
-            RowBuiltFormUnavailable: If the whole table cannot be built: the rows'
-                tokens give a source-info column two types
-                (``SourceInfoTypesDisagree``), or an Arrow conversion fails. The node
-                then builds its rows (``_raise_as_rows_do``).
+            RowBuiltFormUnavailable: If the whole table cannot be built because an
+                Arrow conversion fails. The node then builds its rows
+                (``_raise_as_rows_do``).
         """
         try:
-            return StaticOutputOperatorPod._type_source_info_by_values(
-                row_built_columns(table, keys)
-            ).replace_schema_metadata(None)
+            return row_built_columns(table, keys).replace_schema_metadata(None)
         except RowBuiltFormUnavailable:
             raise
         except pa.ArrowException as error:
@@ -1072,9 +1000,8 @@ class StaticOutputOperatorPod(TraceableBase):
         try:
             if self.ROW_BY_ROW:
                 (channel,) = inputs
-                # The input's token types across its batches: a batch whose tokens
-                # cannot make one table with the earlier ones is refused, as the sync
-                # path refuses the whole input, never processed alone.
+                # The input's token types across its batches: a batch that declares
+                # another type than the earlier ones is refused, never processed alone.
                 settled: dict[str, pa.DataType] = {}
                 async for batch in channel:
                     settled = settle_token_types(batch, settled)
@@ -1250,7 +1177,7 @@ def stream_from_batches(
     applied to. The batches are put under one another in the order given, and the
     table is handed on as a node hands its rows to its successors
     (``_output_stream``): declared system-tag flags are restored, and source-info
-    fields are nullable with types settled from the complete table's tokens.
+    fields are nullable and keep the types declared by the batches.
     The result keeps ``stream``'s producer, upstreams, pipeline hash and data context.
     With no batch it is ``stream``'s zero-row input,
     typed by its description and never by rows.
@@ -1321,11 +1248,13 @@ def settle_token_types(
 ) -> dict[str, pa.DataType]:
     """Each source-info column's token type, settled with the batches accepted so far.
 
-    A source-info column's type follows its tokens over the complete table, as a row
-    types each token from its value (``arrow_utils.source_info_arrow_type``, the one
-    rule ``_type_source_info_by_values`` applies). A batch with no rows has no token
-    and settles nothing. Every token of the batch must then be representable in its
-    column's settled type, so that the complete table can be built.
+    A source-info column's type is the one its batch declares: the pipeline determines
+    it, and it is never taken from the tokens' values (developer, November 27, 2026,
+    ITL-1491). Every batch of one stream therefore declares the same type, compared
+    strictly (list kind, depth, and each item field's name, nullability and
+    metadata), so that the order of the batches never decides the table's type; a
+    batch that declares another is refused. A batch with no rows has no token and settles
+    nothing (its column may be of the ``null`` type of a zero-row form).
 
     Args:
         batch: A record batch of a stream's rows.
@@ -1335,119 +1264,29 @@ def settle_token_types(
         The token types with this batch accepted.
 
     Raises:
-        SourceInfoTypesDisagree: If the batch's tokens give a column two types, or a
+        SourceInfoTypesDisagree: If the batch declares, for a source-info column, a
             type other than the accepted batches'.
-        RowBuiltFormUnavailable: If a token cannot be represented in its column's
-            settled type.
     """
-    from orcapod.utils import arrow_utils
-
     settled = dict(accepted)
     if not batch.num_rows:
         return settled  # no token: nothing to learn
-    for field, column in zip(batch.schema, batch.columns, strict=True):
+    for field in batch.schema:
         if not field.name.startswith(constants.SOURCE_PREFIX):
             continue
-        kinds: set[pa.DataType]
-        if pa.types.is_large_string(field.type):
-            kinds = {pa.large_string()}
-        else:
-            kinds = {
-                arrow_utils.source_info_arrow_type(value)
-                for value in column.to_pylist()
-            }
-        if field.name in settled:
-            kinds.add(settled[field.name])
-        if len(kinds) > 1:
+        accepted_type = settled.setdefault(field.name, field.type)
+        # Strictly: the item fields' names, nullability and metadata too. pyarrow's
+        # ``==`` takes lists with differently named items as equal, and a table
+        # made of such batches would take the first batch's name.
+        if not accepted_type.equals(field.type, check_metadata=True):
             raise SourceInfoTypesDisagree(field.name)
-        (kind,) = kinds
-        _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
-        settled[field.name] = kind
     return settled
-
-
-def tokens_as(column: pa.Array[Any], kind: pa.DataType) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
-    """``column``'s source-info tokens as an array of ``kind``, every value kept.
-
-    The same array when it has that type. A token type that one batch's values give
-    (``arrow_utils.source_info_arrow_type``) can be shallower than another's (a null
-    or an empty list fixes fewer list levels); converting keeps every token, and a
-    token that ``kind`` cannot hold is refused, never changed.
-
-    Args:
-        column: Source-info tokens.
-        kind: A token type (``large_string``, or ``large_list`` of a token type).
-
-    Returns:
-        The tokens as ``kind``.
-
-    Raises:
-        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
-    """
-    return _tokens_into(column, kind)
-
-
-def _tokens_into(column: pa.Array[Any], kind: pa.DataType) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
-    """``tokens_as``, level by level, never reading a value as another shape.
-
-    A level whose values are all null (or that has none) takes ``kind`` as it is; two
-    list levels convert their values; any other difference is refused. A value is
-    never re-read in another type (pyarrow reads a string as a list of characters).
-
-    Raises:
-        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
-    """
-    if column.type == kind:
-        return column
-    if column.null_count == len(column):
-        return pa.nulls(len(column), kind)  # pyright: ignore[reportCallIssue, reportArgumentType]  # pyarrow takes any type; the stubs say an extension type
-    lists = (pa.ListType, pa.LargeListType)
-    if isinstance(column.type, lists) and isinstance(kind, lists):
-        # The slice's own lists: its values, and offsets from its lists' lengths (a
-        # null list holds none), so a sliced array converts as its rows say.
-        values = _tokens_into(pc.list_flatten(column), kind.value_type)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-        lengths = pc.fill_null(pc.list_value_length(column), 0)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportArgumentType]  # pyarrow takes a Python fill value
-        offset_type = pa.int64() if isinstance(kind, pa.LargeListType) else pa.int32()
-        offsets = pa.concat_arrays(
-            [
-                pa.array([0], offset_type),
-                pc.cumulative_sum(lengths).cast(offset_type),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-            ]
-        )
-        build = (
-            pa.LargeListArray.from_arrays
-            if isinstance(kind, pa.LargeListType)
-            else pa.ListArray.from_arrays
-        )
-        return build(offsets, values, type=kind, mask=column.is_null())  # pyright: ignore[reportUnknownVariableType, reportCallIssue, reportArgumentType]  # the offsets' width follows ``kind``
-    raise RowBuiltFormUnavailable(
-        f"a token of type {column.type} cannot be represented as {kind}"
-    )
-
-
-def _named_tokens_as(
-    column: pa.Array[Any],  # pyright: ignore[reportExplicitAny]  # any column
-    kind: pa.DataType,
-    name: str,
-) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
-    """``tokens_as`` for the source-info column ``name``, whose name a refusal gives.
-
-    Raises:
-        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
-    """
-    try:
-        return tokens_as(column, kind)
-    except RowBuiltFormUnavailable as error:
-        raise RowBuiltFormUnavailable(f"{name}: {error}") from error
 
 
 def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
     """Put a stream's record batches under one another, or ``None`` with no row.
 
-    Batches may differ in system-tag nullability and source-info token types.
-    System tags are opened to nullable and each source-info column is brought to
-    the type its tokens settle over all the batches (``settle_token_types``).
-    Batches with no rows are skipped. The values are unchanged.
+    System tags are opened to nullable while joining batches, and each source-info
+    column keeps the type every batch declares. Batches with no rows are skipped.
 
     Args:
         batches: Record batches of one stream's rows, in order.
@@ -1456,9 +1295,8 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
         The table, or ``None`` when no batch has a row.
 
     Raises:
-        SourceInfoTypesDisagree: If the tokens give a source-info column two types.
-        RowBuiltFormUnavailable: If a token cannot be represented in its column's
-            settled type.
+        SourceInfoTypesDisagree: If two batches declare a source-info column with
+            two types.
     """
     from orcapod.utils import arrow_utils
 
@@ -1475,7 +1313,6 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
         fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
         for field, column in zip(batch.schema, batch.columns, strict=True):
             if field.name in settled:
-                column = _named_tokens_as(column, settled[field.name], field.name)
                 field = arrow_utils.source_info_field(field.name, settled[field.name])
             if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
                 field = field.with_nullable(True)

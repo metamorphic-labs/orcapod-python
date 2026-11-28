@@ -268,8 +268,8 @@ def row_built_columns(
        column of ``table``.
     3. Normalized to the large types without keeping ``null``: each row's datagram
        stores a ``null`` column as ``large_string`` (``Datagram._init_from_table``).
-    4. Leave system-tag fields as declared. Give source-info fields the form their
-       tokens give (``row_built_provenance``).
+    4. Keep the declared system-tag fields. Strip top-level metadata from
+       source-info fields while preserving their types (``row_built_provenance``).
 
     Args:
         table: A table of user tags, system tags, data and source info.
@@ -289,62 +289,31 @@ def row_built_columns(
     return row_built_provenance(normalized)
 
 
-def _source_info_value_type(kind: pa.DataType) -> pa.DataType:
-    """The Arrow type a row gives a source-info column of type ``kind``.
-
-    A row's ``Data`` types its tokens from their Python values
-    (``arrow_utils.source_info_arrow_type``): a string as ``large_string``, a list as
-    ``large_list`` of its element's type, with the item field named ``item`` and
-    nullable. A type of any other kind is left as it is.
-    """
-    if (
-        pa.types.is_list(kind)
-        or pa.types.is_large_list(kind)
-        or pa.types.is_fixed_size_list(kind)
-    ):
-        return pa.large_list(_source_info_value_type(kind.value_type))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownArgumentType, reportUnknownMemberType]  # a list type has a value type
-    if (
-        pa.types.is_string(kind)
-        or pa.types.is_large_string(kind)
-        or pa.types.is_null(kind)
-    ):
-        return pa.large_string()
-    return kind
-
-
 def row_built_provenance(table: pa.Table) -> pa.Table:
     """Give ``table``'s source-info fields the form a row builds.
 
-    A row still builds its source info from its values, so those
-    fields carry no field metadata, and a source-info column has the type its tokens
-    give (``_source_info_value_type``): a list's item field named ``item`` and
-    nullable at every depth. The values are unchanged: a type that differs only in
-    its item fields is cast. Other column groups keep their fields.
+    Rows keep the declared token types, including nested field metadata.
+    The top-level source-info fields are nullable and carry no field metadata.
 
     Args:
         table: A table of user tags, system tags, data and source info.
 
     Returns:
-        The same values under the rebuilt fields.
+        The same columns under the rebuilt fields.
     """
-    fields: list[pa.Field[pa.DataType]] = []
-    columns: list[Any] = []
-    changed = False
-    for field, column in zip(table.schema, table.columns, strict=True):
-        if field.name.startswith(constants.SOURCE_PREFIX):
-            kind = _source_info_value_type(field.type)
-            if kind != field.type:
-                column = column.cast(kind)
-            new_field = arrow_utils.source_info_field(field.name, kind)
-        else:
-            new_field = field
-        changed = changed or not new_field.equals(field, check_metadata=True)
-        fields.append(new_field)
-        columns.append(column)
-    if not changed:
+    fields = [
+        arrow_utils.source_info_field(field.name, field.type)
+        if field.name.startswith(constants.SOURCE_PREFIX)
+        else field
+        for field in table.schema
+    ]
+    if all(
+        new.equals(old, check_metadata=True)
+        for new, old in zip(fields, table.schema, strict=True)
+    ):
         return table
     return pa.Table.from_arrays(
-        columns,
+        table.columns,
         schema=pa.schema(
             fields, cast("dict[bytes | str, bytes | str] | None", table.schema.metadata)
         ),
@@ -432,12 +401,9 @@ def stream_arrow_schema(
     stream that cannot type itself without rows answers with its Python schema
     converted by its data context (``arrow_types_declared`` is then false), and one
     whose schema is known only by polling (nothing declared, nothing polled:
-    ``schema_requires_io``) answers with no column. Source-info fields are nullable.
-    System-tag fields keep their declared flags and metadata. A source-info field's
-    type is stated as the declared
-    token type; a complete table decides it from its tokens
-    (``StaticOutputOperatorPod._type_source_info_by_values``), so consumers must not
-    rely on it. A ``null`` column keeps the zero-row ``null`` type; rows
+    ``schema_requires_io``) answers with no column. Source-info fields are nullable
+    and keep their declared token type. System-tag fields keep their flags and
+    metadata. A ``null`` column keeps the zero-row ``null`` type; rows
     carry ``large_string`` (ITL-1319). ITL-1307 later reads it from ``Schema`` instead,
     here.
 

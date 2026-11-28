@@ -321,9 +321,9 @@ def enable_file_hash_caching(
             are not inserted into the cache. ``None`` and ``0`` disable the
             threshold. Defaults to ``None``.
         match_mtime: When ``True`` (default), cache lookups require an exact
-            match on ``path``, ``mtime_ns``, and ``size``. When ``False``,
-            only ``path`` and ``size`` are used for matching — an mtime
-            change alone will not cause a cache miss. Useful for environments
+            match on ``path``, ``mtime_ns``, ``size``, and ``algorithm``. When
+            ``False``, lookups match ``path``, ``size``, and ``algorithm`` and
+            select the newest matching entry. Useful for environments
             where file timestamps
             are unreliable (e.g. network filesystems or build tools that
             preserve content but reset mtimes). Note that with

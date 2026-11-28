@@ -159,6 +159,48 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _broadcast_row_zero_in_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Seed historical broadcast tokens on source and function job edges."""
+    # Non-public on purpose: re-creating the pre-fix behaviour has no public hook.
+    original = StaticOutputOperatorPod._rows_to_table  # pyright: ignore[reportPrivateUsage]
+
+    def broadcasting(
+        rows: Sequence[Row],
+        *,
+        keep_token_fields: bool = False,
+    ) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
+        """Stamp row 0's source info on every row, then build the table."""
+        row_zero = rows[0][1].source_info()
+        return original(
+            [(tag, data.with_source_info(**row_zero)) for tag, data in rows],
+            keep_token_fields=keep_token_fields,
+        )
+
+    original_form = StaticOutputOperatorPod._row_built_form  # pyright: ignore[reportPrivateUsage]
+
+    def broadcasting_form(
+        table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+    ) -> pa.Table:
+        """Stamp row 0's source info on every row of the row-built form (ITL-1347)."""
+        formed = original_form(table, keys)
+        if not formed.num_rows:
+            return formed
+        for i, name in enumerate(formed.column_names):
+            if name.startswith(constants.SOURCE_PREFIX):
+                column = formed.column(i)
+                first = column.slice(0, 1).combine_chunks()
+                repeated = pa.concat_arrays([first] * formed.num_rows)
+                formed = formed.set_column(i, formed.schema.field(i), repeated)
+        return formed
+
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_rows_to_table", staticmethod(broadcasting)
+    )
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_row_built_form", staticmethod(broadcasting_form)
+    )
+
+
 def _stored_source(node: OperatorJobNode, column: str = "x") -> list[Any]:
     """Return the node's stored ``_source_<column>`` values, sorted by tag."""
     records = node.get_all_records(columns={"source": True})
