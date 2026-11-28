@@ -1,420 +1,381 @@
-"""Delta keeps or refuses nested Arrow extension types before queuing (ITL-1372)."""
+"""Delta accepts a logical type only as a whole top-level column (ITL-1372)."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pyarrow as pa
 import pytest
+from pydantic import BaseModel
 
-from orcapod.databases import (
-    DeltaTableDatabase,
-    ExtensionAwareDatabase,
-    InMemoryArrowDatabase,
-)
+from orcapod import dataclass
+from orcapod.contexts import get_default_context
+from orcapod.databases import DeltaTableDatabase, ExtensionAwareDatabase
 from orcapod.errors import UnstorableColumnError
 from orcapod.logical_types.registry import LogicalTypeRegistry
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 
 PATH = ("t",)
+NAME = b"ARROW:extension:name"
+META = b"ARROW:extension:metadata"
 
 
 class _Unit(pa.ExtensionType):
-    """A logical type over large strings."""
+    """A small Arrow extension with a caller-supplied storage type."""
 
-    def __init__(
-        self, name: str = "itl1372.unit", storage_type: pa.DataType | None = None
-    ) -> None:
-        super().__init__(
-            pa.large_string() if storage_type is None else storage_type, name
-        )
+    def __init__(self, name: str, storage: pa.DataType) -> None:
+        super().__init__(storage, name)
 
     def __arrow_ext_serialize__(self) -> bytes:
-        return b"{}"
+        return self.extension_name.encode()
 
     @classmethod
-    def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> _Unit:
-        return cls()
+    def __arrow_ext_deserialize__(
+        cls, storage_type: pa.DataType, serialized: bytes
+    ) -> _Unit:
+        return cls(serialized.decode(), storage_type)
 
 
-@pytest.fixture
-def unit() -> Any:
-    """An Arrow extension type registered for the lifetime of one test."""
-    extension = _Unit()
-    pa.register_extension_type(cast(Any, extension))
+@contextmanager
+def _register(extension: _Unit, registered: bool) -> Iterator[None]:
+    """Register the extension only when the test calls for a warm reader."""
+    if registered:
+        pa.register_extension_type(cast(Any, extension))
     try:
-        yield extension
+        yield
     finally:
-        pa.unregister_extension_type(extension.extension_name)
+        if registered:
+            pa.unregister_extension_type(extension.extension_name)
 
 
-def _nested(kind: str, values: Any) -> Any:
-    """Build one occurrence of `values` per row, nested in the given container."""
-    offsets = range(len(values) + 1)
-    if kind == "list":
-        return pa.ListArray.from_arrays(pa.array(offsets, pa.int32()), values)
-    if kind == "large list":
-        return pa.LargeListArray.from_arrays(pa.array(offsets, pa.int64()), values)
-    if kind == "fixed-size list":
-        return pa.FixedSizeListArray.from_arrays(values, 1)
-    if kind == "list of structs":
-        return _nested("large list", _nested("struct", values))
-    if kind == "struct of lists":
-        return _nested("struct", _nested("large list", values))
-    if kind == "struct of dictionaries":
-        return _nested("struct", _nested("dictionary", values))
-    if kind == "dictionary of structs":
-        return _nested("dictionary", _nested("struct", values))
-    if kind == "struct of structs":
-        return _nested("struct", _nested("struct", values))
-    if kind == "struct":
-        return pa.StructArray.from_arrays([values], names=["v"])
-    if kind == "dictionary":
-        return pa.DictionaryArray.from_arrays(
-            pa.array(range(len(values)), pa.int32()), values
+def _annotation(extension: _Unit) -> dict[bytes | str, bytes | str]:
+    """The storage form's extension identifier."""
+    return {
+        NAME: extension.extension_name.encode(),
+        META: extension.__arrow_ext_serialize__(),
+    }
+
+
+def _nest(container: str, field: Any, array: Any) -> tuple[Any, Any]:
+    """Wrap one row in a container, keeping any annotation on the nested field."""
+    if container == "struct":
+        array = pa.StructArray.from_arrays([array], fields=[field.with_name("v")])
+    elif container == "list":
+        array = pa.ListArray.from_arrays(
+            pa.array([0, 1], pa.int32()), array, type=pa.list_(field.with_name("item"))
         )
-    ordinary = pa.array([f"k{i}" for i in range(len(values))], pa.large_string())
-    from_arrays: Any = pa.MapArray.from_arrays
-    if kind == "map key":
-        return from_arrays(pa.array(offsets, pa.int32()), values, ordinary)
-    assert kind == "map value"
-    return from_arrays(pa.array(offsets, pa.int32()), ordinary, values)
+    elif container == "large list":
+        array = pa.LargeListArray.from_arrays(
+            pa.array([0, 1], pa.int64()),
+            array,
+            type=pa.large_list(field.with_name("item")),
+        )
+    elif container == "fixed list":
+        from_fixed_arrays: Any = pa.FixedSizeListArray.from_arrays
+        array = from_fixed_arrays(array, type=pa.list_(field.with_name("item"), 1))
+    elif container == "list view":
+        from_arrays: Any = pa.ListViewArray.from_arrays
+        array = from_arrays(
+            pa.array([0], pa.int32()),
+            pa.array([1], pa.int32()),
+            array,
+            type=pa.list_view(field.with_name("item")),
+        )
+    elif container == "dictionary":
+        # Dictionary values have no Field of their own to carry an annotation.
+        array = pa.DictionaryArray.from_arrays(pa.array([0], pa.int8()), array)
+    else:
+        assert container in ("map key", "map value")
+        from_arrays: Any = pa.MapArray.from_arrays
+        plain = pa.array(["k"], pa.large_string())
+        plain_field = pa.field("key", plain.type, nullable=False)
+        if container == "map key":
+            key, value = array, plain
+            key_field, value_field = (
+                field.with_name("key").with_nullable(False),
+                plain_field.with_name("value"),
+            )
+        else:
+            key, value = plain, array
+            key_field, value_field = plain_field, field.with_name("value")
+        map_type = pa.map_(key_field, value_field)  # pyright: ignore[reportArgumentType]  # Arrow accepts Fields
+        array = from_arrays(pa.array([0, 1], pa.int32()), key, value, type=map_type)
+    return pa.field("measurement", array.type), array
 
 
-REFUSED = [
-    ("list", "list item"),
-    ("large list", "list item"),
-    ("fixed-size list", "list item"),
-    ("map key", "map key"),
-    ("map value", "map value"),
-    ("dictionary", "dictionary values"),
-    ("list of structs", "list item"),
-    ("struct of lists", "list item"),
-    ("struct of dictionaries", "dictionary values"),
-    ("dictionary of structs", "dictionary values"),
-]
-
-
-@pytest.mark.parametrize(("kind", "why"), REFUSED)
-@pytest.mark.parametrize("wrap", [False, True], ids=["direct", "wrapper"])
-def test_nested_extension_is_refused_before_queueing(
-    tmp_path: Path, unit: Any, kind: str, why: str, wrap: bool
+@pytest.mark.parametrize(
+    ("containers", "path"),
+    [
+        (("struct",), ".v"),
+        (("struct", "struct"), ".v.v"),
+        (("list",), "[]"),
+        (("large list", "struct"), ".v[]"),
+        (("fixed list", "struct"), ".v[]"),
+        (("list view",), "[]"),
+        (("map key",), ".key"),
+        (("map value",), ".value"),
+        (("struct", "map value"), ".value.v"),
+        (("struct", "dictionary"), "<dictionary values>.v"),
+    ],
+)
+@pytest.mark.parametrize("annotated", [False, True], ids=["actual", "annotated"])
+@pytest.mark.parametrize(
+    "registered", [False, True], ids=["unregistered", "registered"]
+)
+def test_delta_refuses_nested_logical_types(
+    tmp_path: Path,
+    containers: tuple[str, ...],
+    path: str,
+    annotated: bool,
+    registered: bool,
 ) -> None:
-    """Both write entry points reject the same column before it reaches the queue."""
-    delta = DeltaTableDatabase(tmp_path)
-    db = (
-        ExtensionAwareDatabase(
+    """The public write APIs refuse the same nested position before queuing."""
+    extension = _Unit("itl1372.unit", pa.large_string())
+    storage = pa.array(["a"], extension.storage_type)
+    array: Any = storage if annotated else extension.wrap_array(storage)
+    field: Any = pa.field(
+        "measurement",
+        array.type,
+        metadata=_annotation(extension) if annotated else None,
+    )
+    for container in containers:
+        field, array = _nest(container, field, array)
+    table = pa.Table.from_arrays([array], schema=pa.schema([field]))
+    records = table.append_column("id", pa.array([b"1"], pa.large_binary()))
+    with _register(extension, registered):
+        delta = DeltaTableDatabase(tmp_path)
+        wrapped = ExtensionAwareDatabase(
             delta, UniversalTypeConverter(logical_type_registry=LogicalTypeRegistry())
         )
-        if wrap
-        else delta
-    )
-    values = unit.wrap_array(pa.array(["a"], pa.large_string()))
-    table = pa.table({"measurement": _nested(kind, values)})
-    rows = table.append_column("id", pa.array([b"1"], pa.large_binary()))
-    with pytest.raises(UnstorableColumnError, match=why) as first:
-        db.add_records(PATH, rows, record_id_column="id")
-    db.flush()
-    assert db.get_all_records(PATH) is None
-    assert not (tmp_path / "t" / "_delta_log").exists()
+        with pytest.raises(
+            UnstorableColumnError, match=re.escape("measurement" + path)
+        ) as first:
+            delta.add_records(PATH, records, record_id_column="id")
+        delta.flush()
+        assert delta.get_all_records(PATH) is None
+        with pytest.raises(
+            UnstorableColumnError, match="logical type nested in another type"
+        ) as second:
+            wrapped.add_record(PATH, b"2", table)
+        assert str(first.value) == str(second.value)
+        assert first.value.column == "measurement"
+        assert "Orcapod container or class type" in str(first.value)
+        delta.flush()
+        assert not (tmp_path / "t" / "_delta_log").exists()
 
-    with pytest.raises(UnstorableColumnError, match=why) as second:
-        db.add_record(PATH, b"2", table)
-    assert str(first.value) == str(second.value)
-    assert first.value.column == "measurement"
-    assert first.value.arrow_type == table.schema.field("measurement").type
-    message = str(first.value)
-    assert "storage form" in message
-    assert "InMemoryArrowDatabase" in message
-    assert "docs/reference/database-types.md" in message
-    db.flush()
-    assert db.get_all_records(PATH) is None
-    assert not (tmp_path / "t" / "_delta_log").exists()
+
+@pytest.mark.parametrize("inner_annotated", [False, True], ids=["actual", "annotated"])
+@pytest.mark.parametrize("outer_annotated", [False, True], ids=["actual", "annotated"])
+@pytest.mark.parametrize(
+    "registered", [False, True], ids=["unregistered", "registered"]
+)
+def test_delta_refuses_nested_type_in_top_level_extension_storage(
+    tmp_path: Path, inner_annotated: bool, outer_annotated: bool, registered: bool
+) -> None:
+    """A top-level extension cannot hide another extension in its storage."""
+    inner = _Unit("itl1372.inner", pa.large_string())
+    scalar = pa.array(["a"], inner.storage_type)
+    item = scalar if inner_annotated else inner.wrap_array(scalar)
+    child = pa.field(
+        "value", item.type, metadata=_annotation(inner) if inner_annotated else None
+    )
+    _, storage = _nest("map value", child, item)
+    outer = _Unit("itl1372.outer", storage.type)
+    values = storage if outer_annotated else outer.wrap_array(storage)
+    field = pa.field(
+        "measurement",
+        values.type,
+        metadata=_annotation(outer) if outer_annotated else None,
+    )
+    table = pa.Table.from_arrays([values], schema=pa.schema([field]))
+    with _register(inner, registered), _register(outer, registered):
+        db = DeltaTableDatabase(tmp_path)
+        for rid in (b"1", b"2"):
+            with pytest.raises(
+                UnstorableColumnError, match=r"measurement<storage>\.value"
+            ):
+                db.add_record(PATH, rid, table)
+            db.flush()
+            assert db.get_all_records(PATH) is None
 
 
 @pytest.mark.parametrize("order", [("samples", "units"), ("units", "samples")])
 def test_delta_names_both_unstorable_columns(
-    tmp_path: Path, unit: Any, order: tuple[str, str]
+    tmp_path: Path, order: tuple[str, str]
 ) -> None:
-    """All columns with unsupported extensions are named in either input order."""
-    values = unit.wrap_array(pa.array(["a"], pa.large_string()))
+    """An error names both columns and their paths in either schema order."""
+    extension = _Unit("itl1372.multi", pa.large_string())
+    values = extension.wrap_array(pa.array(["a"], extension.storage_type))
+    field = pa.field("x", values.type)
     columns = {
-        "samples": _nested("list", values),
-        "units": _nested("map value", values),
+        "samples": _nest("list", field, values)[1],
+        "units": _nest("map value", field, values)[1],
     }
-    table = pa.table({name: columns[name] for name in order})
-    rows = table.append_column("id", pa.array([b"1"], pa.large_binary()))
+    table = pa.table(
+        {
+            "id": pa.array([b"1"], pa.large_binary()),
+            **{key: columns[key] for key in order},
+        }
+    )
     db = DeltaTableDatabase(tmp_path)
-    with pytest.raises(UnstorableColumnError) as refused:
-        db.add_records(PATH, rows, record_id_column="id")
-    message = str(refused.value)
-    assert "'samples'" in message and "list item" in message
-    assert "'units'" in message and "map value" in message
+    with pytest.raises(UnstorableColumnError) as error:
+        db.add_records(PATH, table, record_id_column="id")
+    assert "samples[]" in str(error.value)
+    assert "units.value" in str(error.value)
     db.flush()
     assert db.get_all_records(PATH) is None
 
 
-@pytest.mark.parametrize("kind", [*dict(REFUSED), "struct", "struct of structs"])
-def test_memory_keeps_nested_extensions(unit: Any, kind: str) -> None:
-    """In-memory preserves both writes, including the extension type."""
-    values = unit.wrap_array(pa.array(["a"], pa.large_string()))
-    table = pa.table({"x": _nested(kind, values)})
-    db = InMemoryArrowDatabase()
-    for rid in (b"1", b"2"):
-        db.add_record(PATH, rid, table)
-        db.flush()
-    stored = db.get_all_records(PATH)
-    assert stored is not None
-    assert stored.select(["x"]).equals(
-        pa.concat_tables([table, table]), check_metadata=True
+@pytest.mark.parametrize("annotated", [False, True], ids=["actual", "annotated"])
+@pytest.mark.parametrize(
+    "registered", [False, True], ids=["unregistered", "registered"]
+)
+@pytest.mark.parametrize(
+    "metadata", [False, True], ids=["no metadata", "ordinary metadata"]
+)
+def test_delta_keeps_top_level_scalar_extension(
+    tmp_path: Path, annotated: bool, registered: bool, metadata: bool
+) -> None:
+    """Both writes preserve the whole-column extension and its ordinary metadata."""
+    extension = _Unit("itl1372.scalar", pa.large_string())
+    storage = pa.array(["a"], extension.storage_type)
+    actual = extension.wrap_array(storage)
+    ordinary = {b"units": b"metres"} if metadata else {}
+
+    def table(array: Any, is_annotated: bool) -> pa.Table:
+        md = {**ordinary, **(_annotation(extension) if is_annotated else {})}
+        return pa.Table.from_arrays(
+            [array], schema=pa.schema([pa.field("x", array.type, metadata=md or None)])
+        )
+
+    given = table(storage, True) if annotated else table(actual, False)
+    expected = table(actual, False) if registered else table(storage, True)
+    with _register(extension, registered):
+        for count in (1, 2):
+            DeltaTableDatabase(tmp_path).add_record(
+                PATH, str(count).encode(), given, flush=True
+            )
+            read = DeltaTableDatabase(tmp_path).get_all_records(PATH)
+            assert read is not None
+            assert read.select(["x"]).equals(
+                pa.concat_tables([expected] * count), check_metadata=True
+            )
+
+
+@dataclass
+class _WithPath:
+    """A structural dataclass with a logical field."""
+
+    value: Path
+
+
+class _WithUUID(BaseModel):
+    """A Pydantic model with a logical field."""
+
+    value: UUID
+
+
+@pytest.mark.parametrize(
+    ("python_type", "value"),
+    [
+        (Path, Path("/a")),
+        (list[Path], [Path("/a")]),
+        (set[Path], {Path("/a")}),
+        (_WithPath, _WithPath(Path("/a"))),
+        (_WithUUID, _WithUUID(value=UUID(int=1))),
+        (list[_WithPath], [_WithPath(Path("/a"))]),
+    ],
+    ids=["scalar", "list", "set", "dataclass", "pydantic", "list of dataclasses"],
+)
+def test_delta_keeps_orcapod_logical_columns(
+    tmp_path: Path, python_type: Any, value: Any
+) -> None:
+    """The warm and cold reads recover the original logical types and values."""
+    converter = get_default_context().type_converter
+    table = converter.python_dicts_to_arrow_table(
+        [{"x": value}], python_schema={"x": python_type}
     )
-
-
-@pytest.mark.parametrize("kind", ["struct", "struct of structs"])
-def test_delta_keeps_extension_in_struct(tmp_path: Path, unit: Any, kind: str) -> None:
-    """Struct children keep their type and an identical second append succeeds."""
-    values = unit.wrap_array(pa.array(["a"], pa.large_string()))
-    table = pa.table({"x": _nested(kind, values)})
-    db = DeltaTableDatabase(tmp_path)
-    for rid in (b"1", b"2"):
-        db.add_record(PATH, rid, table)
-        db.flush()
-        stored = DeltaTableDatabase(tmp_path).get_all_records(PATH)
-        assert stored is not None
-        expected = table if rid == b"1" else pa.concat_tables([table, table])
-        assert stored.select(["x"]).equals(expected, check_metadata=True)
-
+    field = table.schema.field("x")
+    assert isinstance(field.type, pa.ExtensionType)
+    assert field.type.extension_name
+    field = field.with_metadata({b"units": b"metres"})
+    table = pa.Table.from_arrays([table.column("x")], schema=pa.schema([field]))
     code = """
 import sys
 
 import pyarrow as pa
 
-from orcapod.databases import DeltaTableDatabase
+from orcapod.contexts import get_default_context
+from orcapod.databases import DeltaTableDatabase, ExtensionAwareDatabase
+from orcapod.databases.utils import identity_node
+from tests.test_databases.test_delta_nested_extension_types import _WithPath, _WithUUID
 
-table = DeltaTableDatabase(sys.argv[1]).get_all_records(("t",))
-child = table.schema.field("x").type.field("v")
-if sys.argv[2] == "struct of structs":
-    child = child.type.field("v")
-assert child.type == pa.large_string(), child
-assert child.metadata == {
-    b"ARROW:extension:name": b"itl1372.unit",
-    b"ARROW:extension:metadata": b"{}",
-}, child.metadata
+db = ExtensionAwareDatabase(DeltaTableDatabase(sys.argv[1]), get_default_context().type_converter)
+actual = db.get_all_records(("t",)).select(["x"])
+with pa.ipc.open_file(sys.argv[2]) as reader:
+    expected = reader.read_all()
+given, recovered = expected.column("x").combine_chunks(), actual.column("x").combine_chunks()
+assert given.type == recovered.type
+assert given.storage.equals(recovered.storage)
+assert actual.equals(expected)
+actual_field, expected_field = actual.schema.field("x"), expected.schema.field("x")
+assert identity_node(actual_field).identifier == identity_node(expected_field).identifier
+ordinary = {k: v for k, v in actual_field.metadata.items() if not k.startswith(b"ARROW:extension:")}
+assert ordinary == expected_field.metadata
 """
-    subprocess.run([sys.executable, "-c", code, str(tmp_path), kind], check=True)
-
-
-def test_delta_keeps_ordinary_struct_child_metadata_on_append(tmp_path: Path) -> None:
-    """An identical second write preserves ordinary metadata on a struct child."""
-    field = pa.field("v", pa.large_string(), metadata={b"unit": b"m"})
-    array = pa.StructArray.from_arrays([pa.array(["a"], field.type)], fields=[field])
-    table = pa.table({"x": array})
-    db = DeltaTableDatabase(tmp_path)
-    for rid in (b"1", b"2"):
-        db.add_record(PATH, rid, table)
-        db.flush()
-    stored = DeltaTableDatabase(tmp_path).get_all_records(PATH)
-    assert stored is not None
-    assert stored.select(["x"]).equals(
-        pa.concat_tables([table, table]), check_metadata=True
-    )
-
-
-@pytest.mark.parametrize(
-    "registered", [False, True], ids=["unregistered", "registered"]
-)
-@pytest.mark.parametrize(
-    "kind", ["list", "map value", "list of structs", "map of structs"]
-)
-def test_delta_refuses_annotated_storage_under_list_or_map(
-    tmp_path: Path, unit: Any, kind: str, registered: bool
-) -> None:
-    """The refusal is independent of registry state and applies through a struct."""
-    metadata = {
-        b"ARROW:extension:name": b"itl1372.unit" if registered else b"itl1372.missing",
-        b"ARROW:extension:metadata": b"{}",
-    }
-    field = pa.field("v", pa.large_string(), metadata=metadata)
-    values: Any = pa.array(["a"], field.type)
-    if kind.endswith("of structs"):
-        values = pa.StructArray.from_arrays([values], fields=[field])
-        field = pa.field("v", values.type)
-    if kind.startswith("list"):
-        array = pa.LargeListArray.from_arrays(
-            pa.array([0, 1], pa.int64()),
-            values,
-            type=pa.large_list(field.with_name("item")),
-        )
-    else:
-        from_arrays: Any = pa.MapArray.from_arrays
-        map_type = pa.map_(pa.large_string(), field.with_name("value"))  # pyright: ignore[reportArgumentType]
-        array = from_arrays(
-            pa.array([0, 1], pa.int32()),
-            pa.array(["key"], pa.large_string()),
-            values,
-            type=map_type,
-        )
-    db = DeltaTableDatabase(tmp_path)
-    errors = []
-    for rid in (b"1", b"2"):
-        with pytest.raises(UnstorableColumnError, match="annotated storage") as refused:
-            db.add_record(PATH, rid, pa.table({"measurement": array}))
-        errors.append(str(refused.value))
-        db.flush()
-        assert db.get_all_records(PATH) is None
-    assert errors[0] == errors[1]
-
-
-@pytest.mark.parametrize("slot", ["map key", "map value"])
-def test_delta_keeps_extension_in_struct_under_map(
-    tmp_path: Path, unit: Any, slot: str
-) -> None:
-    """A map's struct child keeps its type and accepts identical appends."""
-    values = unit.wrap_array(pa.array(["a"], pa.large_string()))
-    table = pa.table({"x": _nested(slot, _nested("struct", values))})
-    for rid in (b"1", b"2"):
-        db = DeltaTableDatabase(tmp_path)
-        db.add_record(PATH, rid, table)
-        db.flush()
-        stored = DeltaTableDatabase(tmp_path).get_all_records(PATH)
-        assert stored is not None
-        expected = table if rid == b"1" else pa.concat_tables([table, table])
-        assert stored.select(["x"]).equals(expected, check_metadata=True)
-
-
-@pytest.mark.parametrize("container", ["struct", "map key", "map value"])
-@pytest.mark.parametrize("sibling", ["uint16", "high uint16", "list"])
-def test_delta_refuses_extension_struct_with_lossy_sibling(
-    tmp_path: Path, unit: Any, container: str, sibling: str
-) -> None:
-    """An extension disables type recording for its entire column."""
-    extension = unit.wrap_array(pa.array(["a"], pa.large_string()))
-    other = (
-        pa.array([["s"]], pa.large_list(pa.large_string()))
-        if sibling == "list"
-        else pa.array([65535 if sibling == "high uint16" else 1], pa.uint16())
-    )
-    struct = pa.StructArray.from_arrays([extension, other], names=["v", "sibling"])
-    values = struct if container == "struct" else _nested(container, struct)
-    db = DeltaTableDatabase(tmp_path)
-    table = pa.table({"measurement": values})
-    errors = []
-    for rid in (b"1", b"2"):
-        with pytest.raises(UnstorableColumnError, match="type recording") as refused:
-            db.add_record(PATH, rid, table)
-        assert refused.value.column == "measurement"
-        errors.append(str(refused.value))
-        db.flush()
-        assert DeltaTableDatabase(tmp_path).get_all_records(PATH) is None
-        assert not (tmp_path / "t" / "_delta_log").exists()
-    assert errors[0] == errors[1]
-
-
-@pytest.mark.parametrize(
-    "registered", [False, True], ids=["unregistered", "registered"]
-)
-@pytest.mark.parametrize("form", ["extension", "annotated"])
-def test_delta_refuses_struct_extension_with_field_metadata(
-    tmp_path: Path, unit: Any, registered: bool, form: str
-) -> None:
-    """Both writes refuse even if Arrow has no registered reader for the identifier."""
-    if not registered:
-        unit = _Unit("itl1372.unregistered")
-    storage = pa.array(["a"], pa.large_string())
-    if form == "annotated":
-        metadata = {
-            b"ARROW:extension:name": unit.extension_name.encode(),
-            b"ARROW:extension:metadata": b"{}",
-        }
-        values = storage
-    else:
-        metadata = {b"units": b"metres"}
-        values = unit.wrap_array(storage)
-    field = pa.field("v", values.type, metadata=metadata)
-    table = pa.table(
-        {"measurement": pa.StructArray.from_arrays([values], fields=[field])}
-    )
-    db = DeltaTableDatabase(tmp_path)
-    for rid in (b"1", b"2"):
-        with pytest.raises(
-            UnstorableColumnError, match="annotated storage|field metadata"
-        ) as refused:
-            db.add_record(PATH, rid, table)
-        assert refused.value.column == "measurement"
-        db.flush()
-        assert DeltaTableDatabase(tmp_path).get_all_records(PATH) is None
-
-
-@pytest.mark.parametrize(
-    ("arrow_type", "value"),
-    [
-        (pa.bool_(), True),
-        (pa.int8(), -8),
-        (pa.int16(), -16),
-        (pa.int32(), -32),
-        (pa.int64(), -64),
-        (pa.float32(), 1.25),
-        (pa.float64(), -1.25),
-        (pa.string(), "s"),
-        (pa.large_string(), "s"),
-        (pa.binary(), b"s"),
-        (pa.large_binary(), b"s"),
-        (pa.date32(), 1),
-        (pa.struct([("n", pa.int64())]), {"n": 1}),
-        (pa.map_(pa.large_string(), pa.int64()), [("n", 1)]),
-    ],
-    ids=str,
-)
-def test_delta_keeps_proven_sibling_layouts(
-    tmp_path: Path, unit: Any, arrow_type: pa.DataType, value: Any
-) -> None:
-    """A supported sibling keeps its value and type through both writes."""
-    from orcapod.utils.arrow_utils import normalize_to_large_types
-
-    extension = unit.wrap_array(pa.array(["a"], pa.large_string()))
-    original = pa.array([value], arrow_type)
-    normalized = pa.array([value], normalize_to_large_types(arrow_type))
-    tables = [
-        pa.table(
-            {
-                "x": _nested(
-                    "map value",
-                    pa.StructArray.from_arrays(
-                        [extension, sibling], names=["v", "sibling"]
-                    ),
-                )
-            }
-        )
-        for sibling in (original, normalized)
-    ]
-    table, expected = tables
     for count in (1, 2):
-        db = DeltaTableDatabase(tmp_path)
-        db.add_record(PATH, str(count).encode(), table, flush=True)
-        actual = DeltaTableDatabase(tmp_path).get_all_records(PATH)
-        assert actual is not None
-        assert actual.select(["x"]).equals(
-            pa.concat_tables([expected] * count), check_metadata=True
+        DeltaTableDatabase(tmp_path).add_record(
+            PATH, str(count).encode(), table, flush=True
+        )
+        warm = DeltaTableDatabase(tmp_path).get_all_records(PATH)
+        assert warm is not None
+        expected = pa.concat_tables([table] * count)
+        assert warm.select(["x"]).equals(expected, check_metadata=True)
+        expected_file = tmp_path / "expected.arrow"
+        with pa.ipc.new_file(str(expected_file), expected.schema) as writer:
+            writer.write_table(expected)
+        subprocess.run(
+            [sys.executable, "-c", code, str(tmp_path), str(expected_file)], check=True
         )
 
 
-@pytest.mark.parametrize(
-    ("storage_type", "value"), [(pa.string(), "a"), (pa.binary(), b"a")], ids=str
-)
-def test_delta_refuses_nested_extension_storage_that_would_be_widened(
-    tmp_path: Path, storage_type: pa.DataType, value: Any
-) -> None:
-    """Delta normalizes small text and binary when comparing an identical append."""
-    extension = _Unit("itl1372.small-storage", storage_type)
-    values = extension.wrap_array(pa.array([value], storage_type))
-    table = pa.table({"measurement": _nested("map value", _nested("struct", values))})
+def test_delta_refuses_annotation_in_later_chunk(tmp_path: Path) -> None:
+    """A child annotation in a later chunk can differ from the table schema."""
+    extension = _Unit("itl1372.later", pa.large_string())
+    values = pa.array(["a"], extension.storage_type)
+    field = pa.field("v", values.type)
+    plain = pa.StructArray.from_arrays([values], fields=[field])
+    annotated = pa.StructArray.from_arrays(
+        [values], fields=[field.with_metadata(_annotation(extension))]
+    )
+    x = pa.chunked_array([plain, annotated])
+    table = pa.Table.from_arrays(
+        [pa.array([b"1", b"2"], pa.large_binary()), x], names=["id", "x"]
+    )
+    assert not table.schema.field("x").type.field("v").metadata
+    assert x.chunk(1).type.field("v").metadata
+
     db = DeltaTableDatabase(tmp_path)
-    for rid in (b"1", b"2"):
-        with pytest.raises(UnstorableColumnError, match="type recording") as refused:
-            db.add_record(PATH, rid, table)
-        assert refused.value.column == "measurement"
+    with pytest.raises(UnstorableColumnError, match=r"x\.v"):
+        db.add_records(PATH, table, record_id_column="id")
+    db.flush()
+    assert db.get_all_records(PATH) is None
+
+
+def test_delta_refuses_nested_extension_metadata_without_a_name(tmp_path: Path) -> None:
+    """The blanket rule covers incomplete as well as complete extension annotations."""
+    values = pa.array(["a"], pa.large_string())
+    field = pa.field("v", values.type, metadata={META: b"{}"})
+    column = pa.StructArray.from_arrays([values], fields=[field])
+    db = DeltaTableDatabase(tmp_path)
+    with pytest.raises(UnstorableColumnError, match=r"x\.v"):
+        db.add_record(PATH, b"1", pa.table({"x": column}))
     db.flush()
     assert db.get_all_records(PATH) is None

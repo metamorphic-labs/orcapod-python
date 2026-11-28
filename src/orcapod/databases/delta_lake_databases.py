@@ -8,7 +8,7 @@ import sys
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +28,6 @@ from orcapod.databases._row_index import (
 )
 from orcapod.databases.delta_arrow_types import (
     ARROW_TYPE_KEY,
-    _has_extension_type,  # pyright: ignore[reportPrivateUsage]
     first_column_out_of_stored_range,
     from_delta_layout,
     merged_type,
@@ -1373,143 +1372,53 @@ def _holds_null_type(arrow_type: pa.DataType) -> bool:
     )
 
 
-def _unsupported_nested_extension(
-    field: "pa.Field[Any]",
-    *,
-    extension_slot: str | None = None,
-    annotation_slot: str | None = None,
+def _nested_logical_type_path(
+    field: "pa.Field[Any]", *, top_level: bool = False
 ) -> str | None:
-    """Describe a nested logical type Delta cannot keep (ITL-1372).
+    """Find the first nested logical type, without consulting Arrow's registry.
 
     Args:
-        field: The column or nested field to check.
-        extension_slot: An enclosing list item or dictionary value, where no
-            Arrow extension type is supported, even through a struct.
-        annotation_slot: The nested position. A stored annotation at any nested
-            position can restore as a different field once registered.
+        field: A column or a field within its type.
+        top_level: Whether this field may itself carry a logical type.
 
     Returns:
-        A description of the unsupported type and nesting, or ``None``.
+        A relative path to the first unsupported field, or ``None``.
     """
     arrow_type = field.type
-    if isinstance(arrow_type, pa.BaseExtensionType):
-        if extension_slot is not None:
-            return f"an Arrow extension type in {extension_slot}"
-        if annotation_slot is not None and field.metadata:
-            return f"an Arrow extension field with field metadata in {annotation_slot}"
-        return None
-    if annotation_slot is not None and b"ARROW:extension:name" in (
-        field.metadata or {}
-    ):
-        return f"an extension type supplied as annotated storage in {annotation_slot}"
+    annotation = any(
+        key.startswith(b"ARROW:extension:") for key in (field.metadata or {})
+    )
+    if isinstance(arrow_type, pa.BaseExtensionType) or annotation:
+        if not top_level:
+            return ""
+        storage = (
+            arrow_type.storage_type
+            if isinstance(arrow_type, pa.BaseExtensionType)
+            else arrow_type
+        )
+        path = _nested_logical_type_path(pa.field("storage", storage))
+        return None if path is None else f"<storage>{path}"
 
     t = pa.types
-    if (
+    if t.is_dictionary(arrow_type):
+        children = (("<dictionary values>", pa.field("values", arrow_type.value_type)),)
+    elif t.is_map(arrow_type):
+        children = ((".key", arrow_type.key_field), (".value", arrow_type.item_field))
+    elif (
         t.is_list(arrow_type)
         or t.is_large_list(arrow_type)
         or t.is_fixed_size_list(arrow_type)
+        or t.is_list_view(arrow_type)
+        or t.is_large_list_view(arrow_type)
     ):
-        return _unsupported_nested_extension(
-            arrow_type.value_field,
-            extension_slot=extension_slot or "a list item",
-            annotation_slot=annotation_slot or "a list item",
-        )
-    if t.is_dictionary(arrow_type):
-        return _unsupported_nested_extension(
-            field.with_type(arrow_type.value_type),
-            extension_slot=extension_slot or "dictionary values",
-            annotation_slot=annotation_slot,
-        )
-    if t.is_map(arrow_type):
-        for child, slot in (
-            (arrow_type.key_field, "a map key"),
-            (arrow_type.item_field, "a map value"),
-        ):
-            if isinstance(child.type, pa.BaseExtensionType):
-                return f"an Arrow extension type in {extension_slot or slot}"
-            reason = _unsupported_nested_extension(
-                child,
-                extension_slot=extension_slot,
-                annotation_slot=annotation_slot or slot,
-            )
-            if reason is not None:
-                return reason
-        return None
-    for i in range(arrow_type.num_fields):
-        reason = _unsupported_nested_extension(
-            arrow_type.field(i),
-            extension_slot=extension_slot,
-            annotation_slot=annotation_slot or "a struct field",
-        )
-        if reason is not None:
-            return reason
-    return None
-
-
-_UNRECORDED_EXTENSION_SCALARS = frozenset(
-    {
-        pa.bool_(),
-        pa.int8(),
-        pa.int16(),
-        pa.int32(),
-        pa.int64(),
-        pa.float32(),
-        pa.float64(),
-        pa.string(),
-        pa.large_string(),
-        pa.binary(),
-        pa.large_binary(),
-        pa.date32(),
-    }
-)
-
-
-def _unrecorded_extension_part(arrow_type: pa.DataType) -> str | None:
-    """Describe a part of an extension column that needs Delta type recording.
-
-    A Python extension disables recording for its whole column. Keep only the
-    scalar types verified to round-trip without a record, and struct fields and
-    ordinary maps over those types. Apply the same rule to extension storage.
-
-    Args:
-        arrow_type: The composite column's type, or a type inside it.
-
-    Returns:
-        The first unsupported part, or ``None`` for a supported layout.
-    """
-    if isinstance(arrow_type, pa.BaseExtensionType):
-        storage = arrow_type.storage_type
-        if storage != arrow_utils.normalize_to_large_types(storage, keep_null=True):
-            return f"extension storage type {storage} that Delta would widen"
-        return _unrecorded_extension_part(storage)
-    if pa.types.is_struct(arrow_type):
-        fields = list(arrow_type)
-    elif pa.types.is_map(arrow_type):
-        fields = [arrow_type.key_field, arrow_type.item_field]
-        if arrow_type.keys_sorted or any(field.metadata for field in fields):
-            return "a map with sorted keys or key/value field metadata"
-    elif arrow_type in _UNRECORDED_EXTENSION_SCALARS:
-        return None
+        children = (("[]", arrow_type.value_field),)
     else:
-        return f"the Arrow type {arrow_type}"
-    for field in fields:
-        part = _unrecorded_extension_part(field.type)
-        if part is not None:
-            return part
-    return None
-
-
-def _nested_extension_reason(field: "pa.Field[Any]") -> str | None:
-    """Describe the first unsupported logical type or layout in a column."""
-    reason = _unsupported_nested_extension(field)
-    if reason is not None:
-        return reason
-    if not isinstance(field.type, pa.BaseExtensionType) and _has_extension_type(
-        field.type
-    ):
-        part = _unrecorded_extension_part(field.type)
-        if part is not None:
-            return f"a nested extension that disables type recording with {part}"
+        fields = (arrow_type.field(i) for i in range(arrow_type.num_fields))
+        children = ((f".{child.name}", child) for child in fields)
+    for step, child in children:
+        path = _nested_logical_type_path(child)
+        if path is not None:
+            return step + path
     return None
 
 
@@ -2479,29 +2388,7 @@ class DeltaTableDatabase:
                 arrow_type=schema.field(position).type,
                 reason=_case_reason(*clash),
             )
-        unsupported = [
-            (field, reason)
-            for field in schema
-            if (reason := _nested_extension_reason(field)) is not None
-        ]
-        if unsupported:
-            (field, reason), *others = unsupported
-            details = [f"Delta cannot reliably round-trip {reason}"]
-            details.extend(
-                f"Column {other.name!r} of Arrow type {other.type} has {why}"
-                for other, why in others
-            )
-            details.append(
-                "Store the affected columns in their storage form"
-                if others
-                else "Store the column in its storage form"
-            )
-            raise UnstorableColumnError(
-                database_kind=type(self).__name__,
-                column=field.name,
-                arrow_type=field.type,
-                reason=". ".join(details),
-            )
+        self._require_top_level_logical_types(schema)
         for field in schema:
             reason = delta_unstorable_reason(field)
             if reason is not None:
@@ -2511,6 +2398,31 @@ class DeltaTableDatabase:
                     arrow_type=field.type,
                     reason=reason,
                 )
+
+    def _require_top_level_logical_types(
+        self, fields: "Iterable[pa.Field[Any]]"
+    ) -> None:
+        """Name each column whose logical type is nested within another type."""
+        unsupported = {}
+        for field in fields:
+            path = _nested_logical_type_path(field, top_level=True)
+            if path is not None:
+                unsupported.setdefault(field.name, (field.type, f"{field.name}{path}"))
+        if unsupported:
+            column, (arrow_type, _) = next(iter(unsupported.items()))
+            paths = ", ".join(repr(path) for _, path in unsupported.values())
+            raise UnstorableColumnError(
+                database_kind=type(self).__name__,
+                column=column,
+                arrow_type=arrow_type,
+                reason=(
+                    f"the Delta store does not support a logical type nested in another "
+                    f"type yet. Nested paths: {paths}. Arrow storage cannot reliably "
+                    "preserve these nested logical types. Use the corresponding Orcapod "
+                    "container or class type, which stores its children as Arrow storage "
+                    "within one top-level logical column, or use plain Arrow storage"
+                ),
+            )
 
     def _refuse_case_clash_with_pending(
         self, record_path: tuple[str, ...], schema: pa.Schema
@@ -2915,6 +2827,15 @@ class DeltaTableDatabase:
 
         if records.num_rows == 0:
             return
+
+        # A chunk can carry nested field metadata different from the table schema.
+        # Check those original types before any casts normalize them to the schema.
+        self._require_top_level_logical_types(
+            field.with_type(chunk.type)
+            for index, field in enumerate(records.schema)
+            for chunk in records.column(index).chunks
+            if not chunk.type.equals(field.type, check_metadata=True)
+        )
 
         # Convert view types up front so the whole write path (group_by dedup,
         # filters, storage) avoids string_view's missing kernels (ENG-601).

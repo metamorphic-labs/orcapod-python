@@ -165,6 +165,111 @@ def test_annotated_list_reaches_delta_operator_log(
     cause = error.value.__cause__
     assert isinstance(cause, UnstorableColumnError)
     assert cause.column == "extra"
-    assert "annotated storage in a list item" in cause.reason
+    assert "logical type nested in another type" in cause.reason
+    assert "extra[]" in cause.reason
     database.flush()
     assert database.list_table_paths() == []
+
+
+def test_nested_logical_function_output_is_refused_at_declaration(
+    tmp_path: Path,
+) -> None:
+    """A Python dict with logical values is refused before Delta gets a schema."""
+    from orcapod.semantic_types.nested_storage import NestedTypeNotStorableError
+
+    def nested(v: int) -> dict[str, Path]:
+        return {"path": Path(str(v))}
+
+    database = DeltaTableDatabase(tmp_path)
+    job = PipelineJob(name="itl1372", database=database)
+    with (
+        job,
+        pytest.raises(
+            NestedTypeNotStorableError, match=r"Column 'payload'.*orcapod.path"
+        ),
+    ):
+        function_pod(output_keys="payload")(nested).pod(
+            _source([1], [2]), label="nested"
+        )
+    database.flush()
+    assert database.list_table_paths() == []
+
+
+class _NestedStorageResult(str):
+    """A function result whose custom logical type declares annotated storage."""
+
+
+def test_delta_refuses_nested_logical_storage_in_function_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A custom logical output that reaches Delta is refused when attaching the store."""
+    from orcapod.contexts import create_registry, get_default_context
+    from orcapod.logical_types.base_logical_type import BaseLogicalType
+    from orcapod.logical_types.registry import (
+        make_arrow_extension_type,
+        make_polars_extension_type,
+    )
+    from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+
+    label = "itl1372.nested-output"
+    storage = pa.struct(
+        [
+            pa.field(
+                "leaf",
+                pa.large_string(),
+                metadata={
+                    b"ARROW:extension:name": b"itl1372.nested-leaf",
+                    b"ARROW:extension:metadata": b"{}",
+                },
+            )
+        ]
+    )
+    arrow_extension: Any = make_arrow_extension_type(label, storage, b"{}")
+    polars_extension: Any = make_polars_extension_type(
+        label, pa.struct([("leaf", pa.large_string())])
+    )
+
+    class LogicalResult(BaseLogicalType):
+        logical_type_name = label
+        python_type = _NestedStorageResult
+
+        def get_arrow_extension_type(self) -> pa.ExtensionType:
+            return arrow_extension()
+
+        def get_polars_extension_type(self) -> Any:
+            return polars_extension()
+
+        def python_to_storage(
+            self, value: _NestedStorageResult, converter: Any
+        ) -> dict[str, str]:
+            return {"leaf": str(value)}
+
+        def storage_to_python(
+            self, storage_value: dict[str, str], converter: Any
+        ) -> _NestedStorageResult:
+            return _NestedStorageResult(storage_value["leaf"])
+
+    converter = create_registry().get_context().type_converter
+    assert isinstance(converter, UniversalTypeConverter)
+    converter.register_logical_type(LogicalResult())
+    monkeypatch.setattr(get_default_context(), "type_converter", converter)
+
+    @function_pod(output_keys="payload")
+    def nested(v: int | None) -> _NestedStorageResult:
+        return _NestedStorageResult(str(v))
+
+    database = DeltaTableDatabase(tmp_path)
+    job = PipelineJob(name="itl1372", database=database)
+    try:
+        with pytest.raises(
+            UnstorableColumnError, match=r"payload<storage>\.leaf"
+        ) as error:
+            with job:
+                nested.pod(_source([1], [2]), label="nested")
+            job.run()
+        assert error.value.column == "payload"
+        assert error.value.node_label == "nested"
+        database.flush()
+        assert database.list_table_paths() == []
+    finally:
+        pa.unregister_extension_type(label)

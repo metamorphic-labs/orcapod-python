@@ -194,10 +194,7 @@ BASE = [
     (kind, state, form, depth)
     for kind, state, form, depth in itertools.product(KINDS, STATES, FORMS, DEPTHS)
     if (kind == "in-memory" and state != "reopened")
-    or (
-        kind == "Delta"
-        and (depth == "top" or (depth == "struct" and form == "extension"))
-    )
+    or (kind == "Delta" and depth == "top")
 ]
 
 REFUSED_CASES = [
@@ -271,11 +268,7 @@ LOGICAL_OVER_PLAIN = [
     )
     # A stored Delta column with no identifier and no recorded type: the rule
     # abstains (test_delta_logical_type_over_a_plain_column).
-    if kind == "in-memory"
-    or (
-        state == "pending"
-        and (depth == "top" or (depth == "struct" and form == "extension"))
-    )
+    if kind == "in-memory" or (state == "pending" and depth == "top")
 ]
 
 
@@ -426,7 +419,7 @@ def test_delta_reads_an_older_annotated_struct_child(tmp_path: Path) -> None:
     pa.register_extension_type(extension)
     try:
         db = DeltaTableDatabase(tmp_path)
-        new = extension.wrap_array(pa.array(["2"], pa.large_string()))
+        new = pa.array(["2"], pa.large_string())
         with pytest.raises(
             InputValidationError, match="the stored column's 'itl1371.readable;6f6c64'"
         ):
@@ -470,7 +463,7 @@ def test_delta_legacy_record_keeps_dictionary_child_identifier(tmp_path: Path) -
     assert identity_node(child).identifier == (b"itl1371.a", b"m")
     assert stored.column("x").to_pylist() == [{"v": "1", "u": 65535}]
 
-    different = _wrapped(b"n", ["2"])
+    different = pa.array(["2"], pa.large_string())
     for ids, skip in (([b"2"], False), ([b"1"], True)):
         with pytest.raises(
             InputValidationError, match="the stored column's 'itl1371.a;6d'"
@@ -660,23 +653,16 @@ def test_delta_annotated_dictionary_of_the_stored_type_is_accepted(
 
 
 @pytest.mark.parametrize("state", ["pending", "committed", "reopened"])
-@pytest.mark.parametrize(
-    "metadata",
-    [
-        {b"orcapod:arrow_type": b"a"},  # an ordinary key with that name, nested
-        {META: b"a"},  # extension metadata without a name: no identifier
-    ],
-    ids=["arrow_type key", "lone extension metadata"],
-)
 def test_other_nested_metadata_without_an_identifier_is_still_refused(
-    tmp_path: Path, metadata: dict[bytes, bytes], state: str
+    tmp_path: Path, state: str
 ) -> None:
     """Nested metadata other than a complete identifier stays with ITL-1334's
     comparison: a change is refused, as on main."""
 
     def rows(value: bytes, ids: list[bytes]) -> pa.Table:
-        key = next(iter(metadata))
-        field = pa.field("v", pa.large_string(), metadata={key: value})
+        field = pa.field(
+            "v", pa.large_string(), metadata={b"orcapod:arrow_type": value}
+        )
         array = pa.array([i.decode() for i in ids], pa.large_string())
         return _struct_of(field, array, ids)
 
@@ -1001,7 +987,7 @@ def test_delta_identity_is_checked_before_recorded_types_are_decoded(
     with _store("Delta", tmp_path) as store:
         store.db.add_records(
             PATH,
-            _rows(HELD, "extension", "struct", [b"1"]),
+            _rows(HELD, "extension", "top", [b"1"]),
             record_id_column="id",
             flush=True,
         )
@@ -1013,11 +999,11 @@ def test_delta_identity_is_checked_before_recorded_types_are_decoded(
 
         monkeypatch.setattr(delta_module, "_held_columns", undecodable)
         with pytest.raises(
-            InputValidationError, match="x.v is of logical type 'itl1371.b"
+            InputValidationError, match="x is of logical type 'itl1371.b"
         ):
             store.db.add_records(
                 PATH,
-                _rows(("itl1371.b", b"m"), "extension", "struct", [b"22"]),
+                _rows(("itl1371.b", b"m"), "extension", "top", [b"22"]),
                 record_id_column="id",
             )
 
@@ -1191,7 +1177,7 @@ def test_delta_identity_is_refused_before_an_undecodable_stored_type(
     """The legacy log exposes its raw identifier even if Arrow cannot read the rows."""
     field = pa.field("v", pa.large_string(), metadata={NAME: b"itl1371.a", META: b"m"})
     _write_legacy(tmp_path, _struct_of(field, pa.array(["1"], field.type), [b"1"]))
-    incoming = _rows(("itl1371.b", b"n"), "extension", "struct", [b"2"])
+    incoming = _rows(None, "extension", "struct", [b"2"])
     pa.register_extension_type(cast(Any, _failing_reader(ValueError)()))
     try:
         db = DeltaTableDatabase(tmp_path)
@@ -1200,7 +1186,7 @@ def test_delta_identity_is_refused_before_an_undecodable_stored_type(
                 PATH, incoming, record_id_column="id", skip_duplicates=skip_duplicates
             )
         message = str(refused.value)
-        assert "x.v is of logical type 'itl1371.b;6e'" in message
+        assert "x.v is of logical type no logical type" in message
         assert "the stored column's 'itl1371.a;6d'" in message
         with pytest.raises(OrcapodDatabaseReadError):
             db.get_all_records(PATH, record_id_column="id")
@@ -1431,9 +1417,10 @@ def test_duplicate_only_append_of_the_same_identifier_is_a_no_op(
 # ---------------------------------------------------------------------------
 
 
-def _map_of_structs(meta: bytes, ids: list[bytes]) -> pa.Table:
+def _map_of_structs(meta: bytes | None, ids: list[bytes]) -> pa.Table:
     """A map value whose struct child carries the given extension identifier."""
-    field, leaf = _leaf(("itl1371.a", meta), "extension", [i.decode() for i in ids])
+    identifier = None if meta is None else ("itl1371.a", meta)
+    field, leaf = _leaf(identifier, "extension", [i.decode() for i in ids])
     struct = pa.StructArray.from_arrays([leaf], fields=[field])
     n = len(ids)
     keys = pa.array([f"k{i}" for i in range(n)], pa.large_string())
@@ -1447,35 +1434,24 @@ def _map_of_structs(meta: bytes, ids: list[bytes]) -> pa.Table:
     )
 
 
-@pytest.mark.parametrize("state", ["committed", "reopened"])
-def test_delta_struct_children_beneath_maps_are_compared(
-    tmp_path: Path, state: str
-) -> None:
-    """The map value keeps no metadata, but its struct child's identifier is kept."""
-    with _store("Delta", tmp_path) as store:
-        store.db.add_records(
-            PATH,
-            _map_of_structs(b"m", [b"1", b"22"]),
-            record_id_column="id",
-            flush=True,
-        )
-        if state == "reopened":
-            store.reopen()
-        for ids, skip in (([b"333"], False), ([b"1", b"22"], True)):
-            with pytest.raises(
-                InputValidationError, match=r"x\.item\.v is of logical type"
-            ):
-                store.db.add_records(
-                    PATH,
-                    _map_of_structs(b"n", ids),
-                    record_id_column="id",
-                    skip_duplicates=skip,
-                )
-        stored = store.stored()
-        assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
-            b"1",
-            b"22",
-        ]
+def test_delta_legacy_struct_children_beneath_maps_are_compared(tmp_path: Path) -> None:
+    """An extension-free append cannot overwrite a legacy map child's identifier."""
+    _write_legacy(tmp_path, _map_of_structs(b"m", [b"1", b"22"]))
+    db = DeltaTableDatabase(tmp_path)
+    for ids, skip in (([b"333"], False), ([b"1", b"22"], True)):
+        with pytest.raises(
+            InputValidationError, match=r"x\.item\.v is of logical type no logical type"
+        ):
+            db.add_records(
+                PATH,
+                _map_of_structs(None, ids),
+                record_id_column="id",
+                skip_duplicates=skip,
+            )
+    db.flush()
+    stored = db.get_all_records(PATH, record_id_column="id")
+    assert stored is not None
+    assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [b"1", b"22"]
 
 
 def _late_chunk_rows(metas: list[bytes], ids: list[bytes]) -> pa.Table:
@@ -1730,16 +1706,12 @@ def test_delta_identity_beneath_map_comes_before_an_undecodable_child(
     from orcapod.errors import TypeIdentityError
 
     root = tmp_path / "delta"
-    DeltaTableDatabase(root).add_records(
-        PATH, _map_of_structs(b"m", [b"1"]), record_id_column="id", flush=True
-    )
-    incoming = _map_of_structs(b"n", [b"1", b"22"])
-    pa.register_extension_type(
-        cast(Any, _failing_reader(TypeIdentityError, readable=b"n")())
-    )
+    _write_legacy(root, _map_of_structs(b"m", [b"1"]))
+    incoming = _map_of_structs(None, [b"1", b"22"])
+    pa.register_extension_type(cast(Any, _failing_reader(TypeIdentityError)()))
     try:
         with pytest.raises(
-            InputValidationError, match=r"x\.item\.v is of logical type"
+            InputValidationError, match=r"x\.item\.v is of logical type no logical type"
         ) as refused:
             DeltaTableDatabase(root).add_records(
                 PATH, incoming, record_id_column="id", skip_duplicates=skip_duplicates

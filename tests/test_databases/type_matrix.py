@@ -1062,10 +1062,13 @@ representative, not every Arrow type: dictionary-encoded columns are refused by 
 stream before they reach a database (the dictionary row uses a raw Arrow table), and
 union, run-end-encoded and list-view types are not covered.
 
-Delta accepts an Arrow extension array on a struct child when the column can round-trip
-without recording its type and the extension field has no extra field metadata.
-An extension field supplied as annotated storage is refused at nested positions so the
-write verdict stays the same whether or not Arrow has registered the identifier.
+Delta supports logical types only as whole top-level columns. A logical type nested
+in another Arrow type, including inside an extension's storage, is refused before
+buffering. The rule covers both extension arrays and fields with Arrow extension
+metadata, regardless of registration. Arrow's storage interchange cannot reliably
+preserve a nested extension. Use the corresponding Orcapod container or class type
+to keep the logical type: it stores its children in Arrow storage form within one
+top-level logical column.
 
 What a cell says:
 
