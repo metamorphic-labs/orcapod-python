@@ -1221,7 +1221,10 @@ instance and the result it points at.
   and result (the record id covers the node's content hash; developer, November 26, 2026), so it
   keeps its own row. A recompute (the
   stored result is gone) has a new result id, so it is a new row; among the rows of one
-  instance, the one recorded last is the current one. There is no recomputation index.
+  instance, the one recorded last is the current one. If records have the same
+  recording time, a record with an available result wins over one whose ephemeral
+  result is gone. Among equally timed records whose results are all available
+  or all gone, the greater result UUID wins. There is no recomputation index.
   "Recorded last" is read from `__recorded_at`, the recording process's UTC clock at the
   write: a clock set back between two writes of one instance leaves the earlier record
   current until a later write.
