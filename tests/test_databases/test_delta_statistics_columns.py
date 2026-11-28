@@ -213,12 +213,18 @@ class TestNewTableWritePaths:
             STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
         }
 
+        other = DeltaTableDatabase(tmp_path)
+        other.add_records(PATH, rows(range(15, 30)))
         db.add_records(PATH, rows(range(10, 20)), flush=True)
         assert stats_warnings(capfd) == [], "append"
 
-        # One stored id among the new ones forces the MERGE path.
-        db.add_records(PATH, rows(range(15, 30)), skip_duplicates=False, flush=True)
+        # Five IDs were committed after the second handle queued them.
+        other.flush()
         assert stats_warnings(capfd) == [], "merge"
+        merge = deltalake.DeltaTable(str(tmp_path / "t")).history(1)[0]
+        assert merge["operation"] == "MERGE"
+        assert merge["operationMetrics"]["num_source_rows"] == 15
+        assert merge["operationMetrics"]["num_target_rows_inserted"] == 10
 
         # New columns (one binary, one int): schema evolution, through MERGE.
         db.add_records(PATH, rows(range(30, 40), extra=True), flush=True)
@@ -358,9 +364,7 @@ class TestEveryColumnKind:
         capfd.readouterr()
         db.add_records(PATH, _every_kind(range(0, 3)), flush=True)
         db.add_records(PATH, _every_kind(range(3, 6)), flush=True)
-        db.add_records(
-            PATH, _every_kind(range(5, 9)), skip_duplicates=False, flush=True
-        )
+        db.add_records(PATH, _every_kind(range(5, 9)), skip_duplicates=True, flush=True)
         assert stats_warnings(capfd) == []
 
         assert set(statistics_columns(_delta_schema(tmp_path / "t"))) == LISTED
@@ -453,7 +457,7 @@ class TestEveryColumnKind:
         capfd.readouterr()
         db.add_records(PATH, table(range(0, 3)), flush=True)
         db.add_records(PATH, table(range(3, 6)), flush=True)
-        db.add_records(PATH, table(range(5, 9)), skip_duplicates=False, flush=True)
+        db.add_records(PATH, table(range(5, 9)), skip_duplicates=True, flush=True)
         assert stats_warnings(capfd) == []
         assert configuration(tmp_path / "t") == {STATS_COLUMNS_PROPERTY: "`c`"}
         assert len(stored_ids(db)) == 9
@@ -493,6 +497,21 @@ class TestFileSkipping:
 
 
 class TestTablesCreatedElsewhere:
+    def test_existing_statistics_property_with_a_typed_id_is_retained(
+        self, tmp_path: Path
+    ) -> None:
+        """Appending does not rewrite the statistics property of an older table."""
+        location = tmp_path / "t"
+        record_id = DeltaTableDatabase.RECORD_ID_COLUMN
+        old_property = {STATS_COLUMNS_PROPERTY: f"`{record_id}`,`v`"}
+        deltalake.write_deltalake(
+            location, pa.table({record_id: [1.0], "v": [1]}), configuration=old_property
+        )
+
+        db = DeltaTableDatabase(tmp_path)
+        db.add_records(PATH, pa.table({record_id: [2.0], "v": [2]}), flush=True)
+        assert configuration(location) == old_property
+
     def test_existing_table_without_the_property_is_unaltered(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
     ) -> None:
@@ -503,7 +522,7 @@ class TestTablesCreatedElsewhere:
         capfd.readouterr()
 
         db.add_records(PATH, rows(range(10, 20)), flush=True)
-        db.add_records(PATH, rows(range(15, 30)), skip_duplicates=False, flush=True)
+        db.add_records(PATH, rows(range(15, 30)), skip_duplicates=True, flush=True)
 
         # deltalake 1.6 no longer logs the binary-column warning (1.0.2 did); what
         # the property was about stays: no min/max is kept for a binary column.

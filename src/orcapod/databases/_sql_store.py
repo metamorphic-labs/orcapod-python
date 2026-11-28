@@ -67,16 +67,22 @@ class SQLStoreConnector(Protocol):
         """Create a record table in the verified schema."""
         ...
 
-    def upsert_records(
+    def existing_store_ids(
+        self, table_name: str, id_column: str, ids: set[bytes], *, schema: str
+    ) -> set[bytes]:
+        """Return the supplied record IDs currently present in the verified table."""
+        ...
+
+    def insert_store_records(
         self,
         table_name: str,
         records: pa.Table,
         id_column: str,
-        skip_existing: bool = False,
         *,
-        schema: str | None = None,
+        skip_duplicates: bool,
+        schema: str,
     ) -> None:
-        """Write rows to the record table in the verified schema."""
+        """Insert rows into the verified table, skipping IDs won by another writer."""
         ...
 
 

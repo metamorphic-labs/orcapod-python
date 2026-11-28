@@ -191,7 +191,8 @@ def test_a_stored_id_written_again_keeps_the_stored_row(tmp_path: Path) -> None:
     """A commit never replaces a stored row (insert-if-not-exists), as before."""
     db = DeltaTableDatabase(tmp_path)
     _write(db, 0, 10, 5)
-    db.add_record(PATH, b"id-3", _row(3, "changed", 0))
+    with pytest.raises(ValueError, match="already exist.*stored"):
+        db.add_record(PATH, b"id-3", _row(3, "changed", 0))
     db.add_record(PATH, b"id-new", _row(99, "g0", 0))
     db.flush()
     everything = db.get_all_records(PATH, record_id_column="rid")

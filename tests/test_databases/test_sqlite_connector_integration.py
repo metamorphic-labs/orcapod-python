@@ -236,7 +236,7 @@ class TestConnectorArrowDatabaseWithSQLite:
             db = ConnectorArrowDatabase(connector)
             db.add_record(path, b"id", one, flush=True)
             if operation in ("flush", "pending_point"):
-                db.add_record(path, b"id", two)
+                db.add_record(path, b"pending", two)
             conn = connector._require_open()
             _ = conn.execute("PRAGMA ignore_check_constraints=ON")
             _ = conn.execute(
@@ -281,11 +281,14 @@ class TestConnectorArrowDatabaseWithSQLite:
             _ = conn.execute(
                 f'CREATE TEMP TABLE "{name}" ("__record_id" BLOB PRIMARY KEY, value INTEGER)'
             )
-            _ = conn.execute(f'INSERT INTO temp."{name}" VALUES (?, ?)', (b"id", 99))
+            _ = conn.execute(f'INSERT INTO temp."{name}" VALUES (?, ?)', (b"new", 99))
             if write:
-                store.add_record(path, b"id", two, flush=True)
+                store.add_record(path, b"new", two, flush=True)
                 assert tuple(
-                    conn.execute(f'SELECT value FROM main."{name}"').fetchone()
+                    conn.execute(
+                        f'SELECT value FROM main."{name}" WHERE "__record_id" = ?',
+                        (b"new",),
+                    ).fetchone()
                 ) == (2,)
                 assert tuple(
                     conn.execute(f'SELECT value FROM temp."{name}"').fetchone()
@@ -338,21 +341,17 @@ class TestConnectorArrowDatabaseWithSQLite:
                 db.add_record(path, b"one", pa.table({"value": [1]}), flush=True)
             assert connector.get_table_names() == [name]
 
-    def test_registration_and_table_creation_roll_back_on_write_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_registration_and_table_creation_roll_back_on_write_error(self) -> None:
         with SQLiteConnector(":memory:") as connector:
             db = ConnectorArrowDatabase(connector)
-
-            def fail_write(*args: object, **kwargs: object) -> None:
-                raise RuntimeError("simulated write failure")
-
-            with monkeypatch.context() as patch:
-                patch.setattr(connector, "upsert_records", fail_write)
-                with pytest.raises(RuntimeError, match="simulated write failure"):
-                    db.add_record(
-                        ("new",), b"one", pa.table({"value": [1]}), flush=True
-                    )
+            schema = pa.schema([pa.field("value", pa.int64(), nullable=False)])
+            with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+                db.add_record(
+                    ("new",),
+                    b"one",
+                    pa.table({"value": [None]}, schema=schema),
+                    flush=True,
+                )
             assert connector.get_table_names() == []
             db.add_record(("new",), b"one", pa.table({"value": [1]}), flush=True)
             assert db.list_table_paths() == [("new",)]
@@ -522,7 +521,7 @@ def _check_catalog_operation(
     elif operation == "read":
         db.get_all_records(path)
     elif operation == "pending_point":
-        db.get_record_by_id(path, b"id")
+        db.get_record_by_id(path, b"pending")
     elif operation == "queue":
         db.add_record(path, b"id", table)
     elif operation == "flush":

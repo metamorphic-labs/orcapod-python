@@ -172,13 +172,13 @@ def test_commits_with_new_ids_are_merged_and_stored_unchanged(tmp_path: Path) ->
     assert _values(DeltaTableDatabase(tmp_path).get_all_records(PATH)) == list(range(9))
 
 
-def test_a_stored_id_goes_through_merge_and_keeps_the_stored_row(
+def test_skip_duplicates_preserves_the_stored_row_during_merge(
     tmp_path: Path,
 ) -> None:
-    """A batch holding a stored id is MERGEd: the stored row stays, the new ones land."""
+    """A mixed batch skips the stored row and MERGEs the new rows."""
     db = DeltaTableDatabase(tmp_path)
     db.add_records(PATH, _rows(["a", "b"], [1, 2]), flush=True)
-    db.add_records(PATH, _rows(["b", "c"], [20, 3]), flush=True)
+    db.add_records(PATH, _rows(["b", "c"], [20, 3]), skip_duplicates=True, flush=True)
     assert _operations(tmp_path / "table") == ["WRITE", "MERGE"]
     assert _values(DeltaTableDatabase(tmp_path).get_all_records(PATH)) == [1, 2, 3]
     assert _values(db.get_records_with_column_value(PATH, {"g": b"g"})) == [1, 2, 3]
@@ -189,9 +189,10 @@ def test_ids_another_writer_stored_are_not_appended_twice(tmp_path: Path) -> Non
     db = DeltaTableDatabase(tmp_path)
     db.add_records(PATH, _rows(["a"], [1]), flush=True)
     assert _values(db.get_records_with_column_value(PATH, {"g": b"g"})) == [1]
-    # Another writer stores ``b`` after this family loaded the table.
+    # Another writer stores ``b`` after this family queued it.
+    db.add_records(PATH, _rows(["b", "c"], [20, 3]))
     DeltaTableDatabase(tmp_path).add_records(PATH, _rows(["b"], [2]), flush=True)
-    db.add_records(PATH, _rows(["b", "c"], [20, 3]), flush=True)
+    db.flush()
     stored = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
     assert stored is not None
     assert sorted(cast(list[bytes], stored["rid"].to_pylist())) == [b"a", b"b", b"c"]

@@ -13,6 +13,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
+from weakref import ReferenceType, ref
 
 import polars as pl
 import pyarrow as pa
@@ -909,7 +910,9 @@ def _evolution_change(
     return None
 
 
-def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
+def _column_change(
+    held: "pa.Field[Any]", field: "pa.Field[Any]", *, from_delta_log: bool = False
+) -> str | None:
     """Say why rows of column ``field`` cannot be appended where ``held`` is held.
 
     The column's own field metadata and its nested field tree must be the held ones
@@ -924,18 +927,20 @@ def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
         held: The column as the table holds it (its record, else its stored type,
             with its field metadata; or a pending batch's column).
         field: The column of the rows to append.
+        from_delta_log: Whether the held column came from the Delta log.
 
     Returns:
         The reason, naming the path, or ``None``.
     """
-    if _is_logical(field) or _is_logical(held):
-        if _metadata(held.metadata) == _metadata(field.metadata):
-            return None
-        return f"{field.name} has other field metadata than the stored column"
-    return appended_field_change(
-        held.with_metadata(cast(Any, _metadata(held.metadata))),
+    held_metadata = metadata_bytes(held.metadata)
+    changed = appended_field_change(
+        held.with_metadata(cast(Any, _metadata(held_metadata))),
         field.with_metadata(cast(Any, _metadata(field.metadata))),
-    ) or _evolution_change(
+        delta_log_storage=from_delta_log and ARROW_TYPE_KEY not in held_metadata,
+    )
+    if changed is not None or _is_logical(field) or _is_logical(held):
+        return changed
+    return _evolution_change(
         arrow_utils.normalize_to_large_types(held.type, keep_null=True),
         arrow_utils.normalize_to_large_types(field.type, keep_null=True),
         field.name,
@@ -945,7 +950,7 @@ def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
 def _held_columns(delta_table: deltalake.DeltaTable) -> dict[str, "pa.Field[Any]"]:
     """Each stored column as the table holds it: its recorded type, else its stored
     type, with its field metadata as stored. Read from the log; no data is read."""
-    stored = _stored_arrow_schema(delta_table)
+    stored = _stored_arrow_schema(delta_table, keep_nested_metadata=True)
     fields: dict[str, pa.Field[Any]] = {}
     for delta_field in delta_table.schema().fields:
         record = recorded_type(delta_field.metadata)
@@ -1206,7 +1211,7 @@ def _append_refusal(
         held_folded.setdefault(name.lower(), name)
     for field in rows.schema:
         if field.name in held:
-            change = _column_change(held[field.name], field)
+            change = _column_change(held[field.name], field, from_delta_log=True)
             if change is not None:
                 return field.name, change
         elif schema_evolution:
@@ -1529,40 +1534,66 @@ def _merge_source_in_stored_layout(
     return batch
 
 
-def _without_field_metadata(delta_type: Any) -> Any:
-    """Return a Delta type with the metadata of every nested field dropped.
+def _plain_delta_type(delta_type: Any, *, keep_user_metadata: bool) -> Any:
+    """Return a Delta type with extension markers stripped at every depth.
 
     Args:
         delta_type: A ``deltalake.schema`` type.
+        keep_user_metadata: Preserve user metadata on nested fields.
 
     Returns:
-        The same type with no field metadata at any depth.
+        The same storage type with the requested metadata.
     """
     from deltalake.schema import ArrayType, Field, MapType, StructType
 
     if isinstance(delta_type, StructType):
         return StructType(
             [
-                Field(f.name, _without_field_metadata(f.type), nullable=f.nullable)
+                Field(
+                    f.name,
+                    _plain_delta_type(f.type, keep_user_metadata=keep_user_metadata),
+                    nullable=f.nullable,
+                    metadata=(
+                        {
+                            k: v
+                            for k, v in f.metadata.items()
+                            if k.encode() != _EXTENSION_KEYS[0]
+                            and (
+                                k.encode() != _EXTENSION_KEYS[1]
+                                or _EXTENSION_KEYS[0].decode() not in f.metadata
+                            )
+                        }
+                        if keep_user_metadata
+                        else None
+                    ),
+                )
                 for f in delta_type.fields
             ]
         )
     if isinstance(delta_type, ArrayType):
         return ArrayType(
-            _without_field_metadata(delta_type.element_type),
+            _plain_delta_type(
+                delta_type.element_type, keep_user_metadata=keep_user_metadata
+            ),
             contains_null=delta_type.contains_null,
         )
     if isinstance(delta_type, MapType):
         return MapType(
-            _without_field_metadata(delta_type.key_type),
-            _without_field_metadata(delta_type.value_type),
+            _plain_delta_type(
+                delta_type.key_type, keep_user_metadata=keep_user_metadata
+            ),
+            _plain_delta_type(
+                delta_type.value_type, keep_user_metadata=keep_user_metadata
+            ),
             value_contains_null=delta_type.value_contains_null,
         )
     return delta_type
 
 
-def _stored_arrow_schema(delta_table: deltalake.DeltaTable) -> pa.Schema:
-    """Return the Arrow schema of the table's stored Delta schema, without metadata.
+def _stored_arrow_schema(
+    delta_table: deltalake.DeltaTable, *, keep_nested_metadata: bool = False
+) -> pa.Schema:
+    """Return the Arrow schema of the table's stored Delta schema, stripped of markers.
 
     Delta keeps the Arrow field metadata it was written with, including the
     extension type name of a logical type. Reading that back into pyarrow would
@@ -1572,6 +1603,8 @@ def _stored_arrow_schema(delta_table: deltalake.DeltaTable) -> pa.Schema:
 
     Args:
         delta_table: The loaded stored table.
+        keep_nested_metadata: Keep user metadata on stored struct fields for the
+            append attribute check, while stripping extension markers.
 
     Returns:
         The stored schema as plain Arrow types.
@@ -1581,7 +1614,11 @@ def _stored_arrow_schema(delta_table: deltalake.DeltaTable) -> pa.Schema:
     stored = delta_table.schema()
     plain = Schema(
         [
-            Field(f.name, _without_field_metadata(f.type), nullable=f.nullable)
+            Field(
+                f.name,
+                _plain_delta_type(f.type, keep_user_metadata=keep_nested_metadata),
+                nullable=f.nullable,
+            )
             for f in stored.fields
         ]
     )
@@ -1786,6 +1823,11 @@ class DeltaTableDatabase:
         self._delta_table_cache: dict[str, deltalake.DeltaTable] = (
             _shared_delta_table_cache if _shared_delta_table_cache is not None else {}
         )
+        # A local directory stamp can show that a loaded log has not changed
+        # without asking Delta to list its commits again for every strict add.
+        self._local_log_stamps: dict[
+            str, tuple[ReferenceType[deltalake.DeltaTable], os.stat_result]
+        ] = _root._local_log_stamps if _root is not None else {}
         if _shared_pending_batches is not None:
             self._pending_batches = _shared_pending_batches
         else:
@@ -1930,9 +1972,7 @@ class DeltaTableDatabase:
 
         try:
             # Try to load existing table
-            delta_table = deltalake.DeltaTable(
-                table_uri, storage_options=self._storage_options or None
-            )
+            delta_table = self._open_delta_table(table_uri)
             self._delta_table_cache[record_key] = delta_table
             logger.debug(f"Loaded existing Delta table for {record_key}")
             return delta_table
@@ -1958,6 +1998,72 @@ class DeltaTableDatabase:
         return OrcapodDatabaseReadError(
             self._get_table_uri(record_path), self._path_prefix + record_path
         )
+
+    def _local_log_stamp(self, table_uri: str) -> os.stat_result | None:
+        """Observe the local log directory, or return None if it is unavailable."""
+        if self._is_cloud:
+            return None
+        try:
+            return (Path(table_uri) / "_delta_log").stat()
+        except OSError:
+            return None
+
+    def _open_delta_table(self, table_uri: str) -> deltalake.DeltaTable:
+        """Load a table and remember the local log stamp from before the load."""
+        stamp = self._local_log_stamp(table_uri)
+        table = deltalake.DeltaTable(
+            table_uri, storage_options=self._storage_options or None
+        )
+        if stamp is not None:
+            self._local_log_stamps[table_uri] = (ref(table), stamp)
+        return table
+
+    def _refresh_before_strict_add(self, record_path: tuple[str, ...]) -> None:
+        """Bring a cached table up to date without reopening it on each add."""
+        record_key = self._get_record_key(record_path)
+        table_uri = self._get_table_uri(record_path)
+        stamp = self._local_log_stamp(table_uri)
+        cached = self._delta_table_cache.get(record_key)
+        if cached is not None:
+            if not self._is_cloud:
+                loaded = self._local_log_stamps.get(table_uri)
+                if (
+                    stamp is None
+                    or loaded is None
+                    or loaded[0]() is not cached
+                    or not os.path.samestat(stamp, loaded[1])
+                ):
+                    # An incremental update cannot detect a different table
+                    # recreated at the same path and version.
+                    self._delta_table_cache.pop(record_key, None)
+                    return
+                if (stamp.st_mtime_ns, stamp.st_ctime_ns) == (
+                    loaded[1].st_mtime_ns,
+                    loaded[1].st_ctime_ns,
+                ):
+                    return
+            try:
+                cached.update_incremental()
+            except Exception:  # noqa: BLE001  # the commit reload reports the failure
+                # Keep the readable snapshot for lookups during the rest of the
+                # batch. The failed refresh must be retried on the next strict add.
+                return
+            if stamp is not None:
+                self._local_log_stamps[table_uri] = (ref(cached), stamp)
+            return
+        if record_key in self._absent_tables:
+            try:
+                appeared = (
+                    deltalake.DeltaTable.is_deltatable(
+                        table_uri, storage_options=self._storage_options or None
+                    )
+                    if self._is_cloud
+                    else stamp is not None
+                )
+            except Exception:  # noqa: BLE001  # let the next load report any read failure
+                appeared = True
+            if appeared:
+                self._absent_tables.discard(record_key)
 
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """List the paths of the Delta tables stored under ``prefix``.
@@ -2643,9 +2749,9 @@ class DeltaTableDatabase:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
             delta_table = None
-        held: list[dict[str, pa.Field[Any]]] = []
+        held: list[tuple[dict[str, pa.Field[Any]], bool]] = []
         if pending is not None:
-            held.append({f.name: f for f in pending.schema})
+            held.append(({f.name: f for f in pending.schema}, False))
         if delta_table is not None:
             # The identity rule on this very table, from its log, before its recorded
             # types are decoded: the table loaded here may not be the one
@@ -2657,12 +2763,14 @@ class DeltaTableDatabase:
                     f"{self._get_table_uri(record_path)!r}: column {found[0]!r}: "
                     f"{found[1]}. The stored rows are unchanged and nothing was written."
                 )
-            held.append(_held_columns(delta_table))
-        for given in held:
+            held.append((_held_columns(delta_table), True))
+        for given, from_delta_log in held:
             for field in schema:
                 if field.name not in given:
                     continue
-                change = _column_change(given[field.name], field)
+                change = _column_change(
+                    given[field.name], field, from_delta_log=from_delta_log
+                )
                 if change is not None:
                     raise InputValidationError(
                         f"Cannot append to the stored table "
@@ -2734,17 +2842,21 @@ class DeltaTableDatabase:
         flush: bool = False,
         schema_handling: Literal["merge", "error", "coerce"] = "error",
     ) -> None:
-        """
-        Insert new records. By default, never overwrites existing records.
+        """Insert new records, keeping the first commit for each record ID.
 
         Args:
-            schema_handling: How to handle schema differences
-            skip_duplicates: If True, skip records with IDs that already exist.
-                           If False, raise error on duplicates.
-            flush: Whether to flush immediately after the insert
+            record_path: Path to the record table, relative to this database.
+            records: Rows to add.
+            record_id_column: Name of the ID column. Defaults to the first column.
+            skip_duplicates: Skip pending or stored IDs when True, raise when
+                False. A key another writer commits after the add-time check is
+                skipped at commit in either mode.
+            flush: Whether to flush immediately after the insert.
+            schema_handling: How to handle schema differences.
 
         Raises:
-            ValueError: If any record IDs already exist and skip_duplicates=False
+            ValueError: If the ID column is absent or when a strict add encounters
+                a pending or stored ID.
         """
         self._validate_record_path(record_path)
 
@@ -2772,6 +2884,8 @@ class DeltaTableDatabase:
 
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
+        if not skip_duplicates:
+            self._refresh_before_strict_add(record_path)
         self._refuse_untyped_null_columns(record_path, records.schema)
         # A logical type identifier known to differ from the held one is refused
         # first (ITL-1371), whatever skip_duplicates: found from the Delta log, before
@@ -2796,24 +2910,7 @@ class DeltaTableDatabase:
                 logger.debug("All records were duplicates, nothing to insert")
                 return None
         else:
-            # An id already queued would be committed twice: the commit inserts the
-            # ids the stored table does not hold, and both queued rows are such ids.
-            # Refused as the in-memory database refuses it (review of PR 511).
-            queued = self._pending_record_ids.get(self._get_record_key(record_path))
-            if queued:
-                again = {
-                    rid
-                    for rid in cast(
-                        list[bytes],
-                        deduplicated_table[self.RECORD_ID_COLUMN].to_pylist(),
-                    )
-                    if rid in queued
-                }
-                if again:
-                    raise ValueError(
-                        f"Records with IDs {again} already exist in the pending "
-                        "batch. Use skip_duplicates=True to skip them."
-                    )
+            self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
 
         # Against the rows queued, on the rows that remain once duplicates are
@@ -2930,21 +3027,35 @@ class DeltaTableDatabase:
         """Check for conflicts with both pending batch and Delta table."""
         input_ids = set(table[self.RECORD_ID_COLUMN].to_pylist())
         record_key = self._get_record_key(record_path)
-        # Check conflicts with pending batch
-        pending_conflicts = input_ids.intersection(self._pending_record_ids[record_key])
+        pending_conflicts = input_ids.intersection(
+            self._pending_record_ids.get(record_key, ())
+        )
         if pending_conflicts:
             raise ValueError(
-                f"Cannot insert records with IDs that already exist in pending batch: {pending_conflicts}. "
-                f"Use skip_duplicates=True to skip existing records or update() method to overwrite."
+                f"Records with IDs {pending_conflicts} already exist in the pending "
+                "batch. Use skip_duplicates=True to skip them."
             )
 
-        # Check conflicts with Delta table
-        existing_ids = self._stored_ids(record_path)
-        delta_conflicts = input_ids.intersection(existing_ids)
+        try:
+            stored_ids = self._stored_ids(record_path)
+        except OrcapodDatabaseReadError:
+            # As with schema preflight, flush checks the store again and reports
+            # the read error if it still cannot read this table.
+            return
+        if not stored_ids:
+            return
+        field = table.schema.field(self.RECORD_ID_COLUMN)
+        if not field.type.equals(written_field(field).type):
+            # The ID cache holds the values in the physical Delta layout, e.g.
+            # integer ticks for a nanosecond timestamp.
+            input_ids = self._non_null_ids(
+                to_delta_layout(table.select([self.RECORD_ID_COLUMN]))
+            )
+        delta_conflicts = input_ids.intersection(stored_ids)
         if delta_conflicts:
             raise ValueError(
-                f"Cannot insert records with IDs that already exist in Delta table: {delta_conflicts}. "
-                f"Use skip_duplicates=True to skip existing records or update() method to overwrite."
+                f"Records with IDs {delta_conflicts} already exist in the stored "
+                "table. Use skip_duplicates=True to skip them."
             )
 
     def _handle_schema_compatibility(
@@ -3576,10 +3687,11 @@ class DeltaTableDatabase:
         cached = self._delta_table_cache.get(record_key)
         if cached is None:
             return
+        table_uri = self._get_table_uri(record_path)
+        stamp = self._local_log_stamp(table_uri)
         try:
             latest = deltalake.DeltaTable(
-                self._get_table_uri(record_path),
-                storage_options=self._storage_options or None,
+                table_uri, storage_options=self._storage_options or None
             )
         except Exception:
             # The next read loads the table again and reports a failure itself.
@@ -3588,6 +3700,8 @@ class DeltaTableDatabase:
             return
         if latest.version() != cached.version():
             self._delta_table_cache[record_key] = latest
+            if stamp is not None:
+                self._local_log_stamps[table_uri] = (ref(latest), stamp)
             self._snapshots.pop(record_key, None)
 
     def _flush_by_key(self, record_key: str) -> None:
@@ -3741,9 +3855,7 @@ class DeltaTableDatabase:
             committed = (
                 delta_table
                 if delta_table is not None
-                else deltalake.DeltaTable(
-                    table_uri, storage_options=self._storage_options or None
-                )
+                else self._open_delta_table(table_uri)
             )
             self._delta_table_cache[record_key] = committed
             self._snapshots[record_key] = self._extend_snapshot(
@@ -3797,9 +3909,7 @@ class DeltaTableDatabase:
         # Only TableNotFoundError means "absent": a table that exists but cannot be
         # loaded is never created over (ITL-884).
         try:
-            delta_table = deltalake.DeltaTable(
-                table_uri, storage_options=self._storage_options or None
-            )
+            delta_table = self._open_delta_table(table_uri)
         except TableNotFoundError:
             delta_table = None
         except Exception as load_error:
@@ -3896,9 +4006,9 @@ class DeltaTableDatabase:
                 # The pending rows are in memory already. Not streaming them lets
                 # delta-rs read their id range first and plan the join with it: a
                 # one-row commit to a 10M-row table took 270 ms instead of 400 ms
-                # (ITL-1377). The id column has no file statistics (delta-rs keeps
-                # none for binary columns), so no file is skipped, and a concurrent
-                # commit of any id still makes this commit fail.
+                # (ITL-1377). New tables exclude the id column from file statistics
+                # (ITL-1444), so no file is skipped, and a concurrent commit of any
+                # id still makes this commit fail.
                 streamed_exec=False,
             ).when_not_matched_insert_all().execute()
         except CommitFailedError as conflict:

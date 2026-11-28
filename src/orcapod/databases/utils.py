@@ -132,16 +132,19 @@ def metadata_bytes(metadata: Mapping[Any, Any] | None) -> dict[bytes, bytes]:
 
 
 def appended_field_change(
-    held: "pa.Field[Any]", incoming: "pa.Field[Any]"
+    held: "pa.Field[Any]",
+    incoming: "pa.Field[Any]",
+    *,
+    delta_log_storage: bool = False,
 ) -> str | None:
     """Say why rows of ``incoming`` would not read back as written, appended to a
     column a database holds as ``held`` (ITL-1334).
 
     A table holds one type per column, so an appended column must have the held
     column's field metadata and, at every depth, each nested field's name and metadata
-    (a struct's children, matched by name; a list's item; a map's key and item) and a
-    map's ``keys_sorted``: otherwise one side's rows read back with the other side's
-    attributes. A struct field on one side only, and a difference in a type's kind or
+    (a struct's children, matched by name; a list's item; a map's key and item;
+    fields of extension storage) and a map's ``keys_sorted``: otherwise one side's
+    rows read back with the other side's attributes. A struct field on one side only, and a difference in a type's kind or
     parameters, are left to the database's own append rule (struct evolution, a type
     conflict). Nullability, at any depth, is too: whether a nullability change is
     refused belongs to the nullability audit (ITL-842).
@@ -149,6 +152,10 @@ def appended_field_change(
     Args:
         held: The column as the database holds it (stored or pending).
         incoming: The column of the rows to append.
+        delta_log_storage: The held type is the physical Delta log type. Within
+            extension storage the log cannot describe metadata on list items or
+            map keys and values. Struct field metadata is still known, apart
+            from the logical identifiers checked separately against the log.
 
     Returns:
         The reason, naming the path (``x``, ``x.a``, ``x[]``, ``x.key``), or ``None``.
@@ -159,43 +166,104 @@ def appended_field_change(
         arrow_utils.normalize_to_large_types(held.type, keep_null=True),
         arrow_utils.normalize_to_large_types(incoming.type, keep_null=True),
         incoming.name,
+        delta_log_storage=delta_log_storage,
     )
 
 
 def _child_change(
-    held: "pa.Field[Any]", incoming: "pa.Field[Any]", path: str
+    held: "pa.Field[Any]",
+    incoming: "pa.Field[Any]",
+    path: str,
+    *,
+    metadata_only: bool,
+    delta_log_storage: bool,
+    check_metadata: bool = True,
 ) -> str | None:
-    if held.name != incoming.name:
+    if not metadata_only and held.name != incoming.name:
         return f"{path} is named {incoming.name!r}, the stored column's {held.name!r}"
-    if metadata_bytes(held.metadata) != metadata_bytes(incoming.metadata):
-        return f"{path} has other field metadata than the stored column"
-    return _nested_change(held.type, incoming.type, path)
+    if check_metadata:
+        incoming_metadata = metadata_bytes(incoming.metadata)
+        if delta_log_storage and metadata_only and _EXTENSION_NAME in incoming_metadata:
+            # The physical Delta schema omits these keys to prevent Arrow from
+            # decoding the extension. The identity check uses the raw log instead.
+            del incoming_metadata[_EXTENSION_NAME]
+            incoming_metadata.pop(_EXTENSION_METADATA, None)
+        if metadata_bytes(held.metadata) != incoming_metadata:
+            return f"{path} has other field metadata than the stored column"
+    return _nested_change(
+        held.type,
+        incoming.type,
+        path,
+        metadata_only=metadata_only,
+        delta_log_storage=delta_log_storage,
+    )
 
 
-def _nested_change(held: Any, incoming: Any, path: str) -> str | None:
+def _nested_change(
+    held: Any,
+    incoming: Any,
+    path: str,
+    *,
+    delta_log_storage: bool,
+    metadata_only: bool = False,
+) -> str | None:
+    # Field metadata matters inside extension storage. Its layout is checked
+    # separately, and may use physical field names (e.g. Delta's list "element").
+    while isinstance(held, pa.BaseExtensionType):
+        held = held.storage_type
+        metadata_only = True
+    while isinstance(incoming, pa.BaseExtensionType):
+        incoming = incoming.storage_type
+        metadata_only = True
     t = pa.types
     if t.is_struct(held) and t.is_struct(incoming):
         known = {f.name: f for f in held}
         for field in incoming:
             if field.name in known:
-                found = _child_change(known[field.name], field, f"{path}.{field.name}")
+                found = _child_change(
+                    known[field.name],
+                    field,
+                    f"{path}.{field.name}",
+                    metadata_only=metadata_only,
+                    delta_log_storage=delta_log_storage,
+                )
                 if found is not None:
                     return found
         return None
+    # Delta has no field annotation for these positions. Continue into their
+    # types because a struct child further down still has its own metadata.
+    collection_metadata_known = not (metadata_only and delta_log_storage)
     if t.is_map(held) and t.is_map(incoming):
-        if held.keys_sorted != incoming.keys_sorted:
+        if not metadata_only and held.keys_sorted != incoming.keys_sorted:
             return (
                 f"{path} has keys_sorted={incoming.keys_sorted}, the stored column "
                 f"{held.keys_sorted}"
             )
         return _child_change(
-            held.key_field, incoming.key_field, f"{path}.key"
-        ) or _child_change(held.item_field, incoming.item_field, f"{path}.item")
+            held.key_field,
+            incoming.key_field,
+            f"{path}.key",
+            metadata_only=metadata_only,
+            delta_log_storage=delta_log_storage,
+            check_metadata=collection_metadata_known,
+        ) or _child_change(
+            held.item_field,
+            incoming.item_field,
+            f"{path}.item",
+            metadata_only=metadata_only,
+            delta_log_storage=delta_log_storage,
+            check_metadata=collection_metadata_known,
+        )
     lists = (t.is_list, t.is_large_list, t.is_fixed_size_list)
     if any(k(held) for k in lists) and any(k(incoming) for k in lists):
         # cast: the type guards above narrow the types in the stubs' terms.
         return _child_change(
-            cast(Any, held).value_field, cast(Any, incoming).value_field, f"{path}[]"
+            cast(Any, held).value_field,
+            cast(Any, incoming).value_field,
+            f"{path}[]",
+            metadata_only=metadata_only,
+            delta_log_storage=delta_log_storage,
+            check_metadata=collection_metadata_known,
         )
     return None
 

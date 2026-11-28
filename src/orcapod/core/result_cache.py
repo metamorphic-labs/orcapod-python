@@ -422,8 +422,8 @@ class ResultCache:
             output_data: The computed output data to store.
             variation_datagram: Function variation metadata as a Datagram.
             execution_datagram: Execution environment metadata as a Datagram.
-            skip_duplicates: If True, silently skip if a record with the
-                same ID already exists.
+            skip_duplicates: If True, skip a record with the same output UUID
+                already pending or stored.
             data_context_key: Key of the caller's data context, stored on the row.
 
         Raises:
@@ -431,6 +431,8 @@ class ResultCache:
                 is not a ``large_string`` (``RESULT_TOKEN_COLUMN``) or names no
                 output of ``output_data``; nothing is written. An output with no
                 token column is stored with a null token.
+            OrcapodDatabaseWriteError: If the database refuses the write, including
+                when the output UUID already exists and ``skip_duplicates=False``.
         """
         require_same_data_context(input_data.data_context_key, data_context_key)
         require_same_data_context(output_data.data_context_key, data_context_key)

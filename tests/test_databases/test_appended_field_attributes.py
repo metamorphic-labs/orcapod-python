@@ -18,7 +18,9 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from orcapod.databases import ConnectorArrowDatabase, DeltaTableDatabase
 from orcapod.errors import InputValidationError, UnstorableColumnError
+from tests.test_databases.test_connector_arrow_database import MockDBConnector
 from tests.test_databases.type_matrix import (
     expected_field,
     field_difference,
@@ -250,3 +252,196 @@ def test_delta_compares_attributes_before_schema_handling_casts(
         assert back is not None
         assert _values(back) == _values(written)
         _assert_kept_field(first, back)
+
+
+class _StructExtension(pa.ExtensionType):
+    """An extension whose struct storage carries field metadata."""
+
+    def __init__(self, storage_type: pa.DataType) -> None:
+        super().__init__(storage_type, "itl1415.struct")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return b""
+
+    @classmethod
+    def __arrow_ext_deserialize__(
+        cls, storage_type: pa.DataType, serialized: bytes
+    ) -> _StructExtension:
+        return cls(storage_type)
+
+
+def _extension_rows(rid: bytes, value: int, extension: _StructExtension) -> pa.Table:
+    """Build a row with the extension's struct storage and field metadata."""
+    storage = pa.array([{"a": value}], type=extension.storage_type)
+    return pa.table(
+        {"id": [rid], "x": pa.ExtensionArray.from_storage(extension, storage)}
+    )
+
+
+class _MetadataConnector(MockDBConnector):
+    """An Arrow connector that stores fields and their metadata."""
+
+    keeps_field_metadata = True
+
+    def validate_records(self, records: pa.Table) -> None:
+        """Accept Arrow metadata."""
+
+
+def test_connector_refuses_extension_storage_metadata_committed_after_add() -> None:
+    """A connector rechecks the storage metadata in the table found at flush."""
+    connector = _MetadataConnector()
+    first, second = ConnectorArrowDatabase(connector), ConnectorArrowDatabase(connector)
+    metres, seconds = (_StructExtension(_struct_child(u).type) for u in ("m", "s"))
+    first.add_records(PATH, _extension_rows(b"a", 1, metres))
+    second.add_records(PATH, _extension_rows(b"b", 2, seconds), flush=True)
+    with pytest.raises(InputValidationError, match=r"x\.a has other field metadata"):
+        first.flush()
+    rows = second.get_all_records(PATH, record_id_column="id")
+    assert rows is not None and rows["id"].to_pylist() == [b"b"]
+
+
+@pytest.mark.parametrize("database", DATABASES)
+@pytest.mark.parametrize("pending", [False, True], ids=["stored", "pending"])
+@pytest.mark.parametrize("units", [("m", "s"), ("s", "m")])
+def test_metadata_inside_extension_storage_must_match(
+    tmp_path: Path, database: str, pending: bool, units: tuple[str, str]
+) -> None:
+    """The struct field's metadata is checked even inside an extension type."""
+    first, second = (_StructExtension(_struct_child(u).type) for u in units)
+
+    pa.register_extension_type(first)  # pyright: ignore[reportArgumentType]  # Arrow accepts ExtensionType
+    try:
+        with open_database(database, tmp_path) as db:
+            db.add_records(PATH, _extension_rows(b"a", 1, first), flush=not pending)
+            with pytest.raises(
+                InputValidationError, match=r"x\.a has other field metadata"
+            ):
+                db.add_records(PATH, _extension_rows(b"b", 2, second))
+            db.add_records(PATH, _extension_rows(b"c", 3, first), flush=True)
+            stored = db.get_all_records(PATH, record_id_column="id")
+            assert stored is not None
+            assert sorted(stored["id"].to_pylist()) == [b"a", b"c"]
+    finally:
+        pa.unregister_extension_type(first.extension_name)
+
+
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+def test_delta_appends_ipc_decoded_unregistered_extension_child(
+    tmp_path: Path, skip_duplicates: bool
+) -> None:
+    """An IPC reader can expose a logical child as storage plus its identifier."""
+    inner = pa.large_string()
+
+    class _UnregisteredChild(pa.ExtensionType):
+        def __init__(self) -> None:
+            super().__init__(inner, "itl1415.unregistered-child")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return b"v1"
+
+    child = pa.ExtensionArray.from_storage(
+        _UnregisteredChild(), pa.array(["x"], type=inner)
+    )
+    storage = pa.StructArray.from_arrays([child], names=["a"])
+    extension = _StructExtension(storage.type)
+    first = pa.table(
+        {"id": [b"a"], "x": pa.ExtensionArray.from_storage(extension, storage)}
+    )
+    pa.register_extension_type(extension)  # pyright: ignore[reportArgumentType]  # Arrow accepts ExtensionType
+    try:
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, first.schema) as writer:
+            writer.write_table(first)
+        decoded = pa.ipc.open_stream(sink.getvalue()).read_all()
+        decoded_type = decoded.schema.field("x").type
+        assert isinstance(decoded_type, _StructExtension)
+        decoded_child = decoded_type.storage_type.field(0)
+        assert decoded_child.type == inner
+        assert decoded_child.metadata == {
+            b"ARROW:extension:name": b"itl1415.unregistered-child",
+            b"ARROW:extension:metadata": b"v1",
+        }
+
+        DeltaTableDatabase(tmp_path).add_records(PATH, first, flush=True)
+        fresh = DeltaTableDatabase(tmp_path)
+        fresh.add_records(
+            PATH,
+            decoded.set_column(0, "id", pa.array([b"b"])),
+            skip_duplicates=skip_duplicates,
+            flush=True,
+        )
+        stored = fresh.get_all_records(PATH, record_id_column="id")
+        assert stored is not None
+        assert stored.sort_by("id")["id"].to_pylist() == [b"a", b"b"]
+    finally:
+        pa.unregister_extension_type(extension.extension_name)
+
+
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+@pytest.mark.parametrize("key", ["orcapod:arrow_type", "ARROW:extension:metadata"])
+def test_delta_appends_identical_reserved_key_used_as_nested_metadata(
+    tmp_path: Path, skip_duplicates: bool, key: str
+) -> None:
+    """A nested key with no special meaning is compared as ordinary metadata."""
+    extension = _StructExtension(pa.struct([pa.field("a", I64, metadata={key: "m"})]))
+    changed = _StructExtension(pa.struct([pa.field("a", I64, metadata={key: "s"})]))
+    pa.register_extension_type(extension)  # pyright: ignore[reportArgumentType]  # Arrow accepts ExtensionType
+    try:
+        DeltaTableDatabase(tmp_path).add_records(
+            PATH, _extension_rows(b"a", 1, extension), flush=True
+        )
+        fresh = DeltaTableDatabase(tmp_path)
+        fresh.add_records(
+            PATH,
+            _extension_rows(b"b", 2, extension),
+            skip_duplicates=skip_duplicates,
+            flush=True,
+        )
+        with pytest.raises(
+            InputValidationError, match=r"x\.a has other field metadata"
+        ):
+            fresh.add_records(
+                PATH, _extension_rows(b"c", 3, changed), skip_duplicates=skip_duplicates
+            )
+        stored = fresh.get_all_records(PATH, record_id_column="id")
+        assert stored is not None
+        assert stored.sort_by("id")["id"].to_pylist() == [b"a", b"b"]
+    finally:
+        pa.unregister_extension_type(extension.extension_name)
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["list", "struct-of-list"])
+def test_delta_can_append_when_extension_list_item_metadata_is_unknown(
+    tmp_path: Path, nested: bool
+) -> None:
+    """The Delta log lacks list item metadata, including in extension storage."""
+
+    def rows(rid: bytes, unit: str) -> pa.Table:
+        storage_type = _list_item(unit).type
+        value = [1]
+        if nested:
+            storage_type = pa.struct([pa.field("a", storage_type)])
+            value = {"a": value}
+        extension = _StructExtension(storage_type)
+        storage = pa.array([value], type=storage_type)
+        return pa.table(
+            {"id": [rid], "x": pa.ExtensionArray.from_storage(extension, storage)}
+        )
+
+    first = rows(b"a", "m")
+    extension = first.schema.field("x").type
+    assert isinstance(extension, _StructExtension)
+    pa.register_extension_type(extension)  # pyright: ignore[reportArgumentType]  # Arrow accepts ExtensionType
+    try:
+        DeltaTableDatabase(tmp_path).add_records(PATH, first, flush=True)
+        fresh = DeltaTableDatabase(tmp_path)
+        fresh.add_records(PATH, rows(b"b", "m"))
+        with pytest.raises(InputValidationError, match="has other field metadata"):
+            fresh.add_records(PATH, rows(b"c", "s"))
+        fresh.flush()
+        fresh.add_records(PATH, rows(b"c", "s"), flush=True)
+        stored = fresh.get_all_records(PATH, record_id_column="id")
+        assert stored is not None
+        assert stored.sort_by("id")["id"].to_pylist() == [b"a", b"b", b"c"]
+    finally:
+        pa.unregister_extension_type(extension.extension_name)

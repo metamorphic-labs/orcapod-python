@@ -279,6 +279,7 @@ def test_an_unrecorded_struct_child_loosened_to_nullable_is_refused_once(
             }
         ),
         record_id_column="rid",
+        skip_duplicates=seen,
     )
     with pytest.raises(InputValidationError, match="Invalid data found"):
         db.flush()
@@ -405,6 +406,7 @@ def test_a_commit_conflict_carrying_a_duplicate_name_cause_stays_queued(
         PATH,
         _rows_of(b"1", b"2", b"3") if seen else _rows_of(b"2", b"3"),
         record_id_column="rid",
+        skip_duplicates=seen,
     )
     called: list[str] = []
 

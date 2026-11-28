@@ -544,8 +544,15 @@ class TestForeignCompletionsAfterTheFirstRun:
                 schema_mode="overwrite",
             )
         else:
-            holder.add_records(path, foreign, record_id_column="__rid")
-            holder.flush()
+            assert isinstance(holder, InMemoryArrowDatabase)
+            key = "/".join(path)
+            stored_id = holder.RECORD_ID_COLUMN
+            holder._tables[key] = foreign.rename_columns(  # pyright: ignore[reportPrivateUsage]  # inject a foreign completion
+                [
+                    stored_id if name == "__rid" else name
+                    for name in foreign.column_names
+                ]
+            )
 
         job.bind(sources={"s": make_source([1.0, 2.0, 3.0], "new")})
         with pytest.raises(SideEffectLogDataContextError):
@@ -920,6 +927,32 @@ class TestRefreshIsPerNodePerRun:
             _ = job.run()
         (result_table,) = {p for p in refreshed if p[-1] == "rdb_v1"}
         assert refreshed.count(result_table) == 2  # one per node, not per row
+
+
+def test_warm_delta_job_reuses_the_result_table_handle(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm job opens its result table only as often as on main before ITL-1386."""
+    import deltalake
+
+    db = DeltaTableDatabase(tmp_path)
+    _ = one_step_job("warm", db, [1.0], double).run(
+        orchestrator=SyncPipelineOrchestrator()
+    )
+    job = one_step_job("warm", db, [float(i) for i in range(2, 502)], double)
+    open_table = deltalake.DeltaTable
+    result_opens = 0
+
+    def count_open(uri: str, *args: Any, **kwargs: Any) -> deltalake.DeltaTable:
+        nonlocal result_opens
+        if uri.rstrip("/").endswith("/rdb_v1"):
+            result_opens += 1
+        return open_table(uri, *args, **kwargs)
+
+    monkeypatch.setattr(deltalake, "DeltaTable", count_open)
+    _ = job.run(orchestrator=SyncPipelineOrchestrator())
+    assert result_opens == 6
+    assert len(calls) == 501
 
 
 @pytest.mark.xfail(

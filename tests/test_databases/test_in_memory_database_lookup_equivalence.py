@@ -107,13 +107,13 @@ def test_lookup_accepts_a_list_of_pairs():
 
 
 @pytest.mark.parametrize("pairs", LOOKUPS, ids=lambda p: "-".join(p))
-def test_lookup_after_a_flush_overwrites_a_committed_id(pairs: dict[str, Any]):
-    """A rewritten committed id moves its row to the end and lookups follow it."""
+def test_lookup_after_rejecting_a_committed_id(pairs: dict[str, Any]):
+    """Rejecting a committed ID leaves the existing indexes valid for the next append."""
     db = InMemoryArrowDatabase()
     _fill(db, 40)
     _ = db.get_records_with_column_value(PATH, pairs)  # build the indexes first
-    # A committed id written again replaces its row, which moves to the end.
-    db.add_record(PATH, b"id-5", _row(5, "g1", 4))
+    with pytest.raises(ValueError, match="already exist.*stored"):
+        db.add_record(PATH, b"id-5", _row(5, "g1", 4))
     db.add_record(PATH, b"id-40", _row(40, "g1", 4))
     db.flush()
     actual = db.get_records_with_column_value(PATH, pairs, record_id_column="rid")
@@ -121,7 +121,7 @@ def test_lookup_after_a_flush_overwrites_a_committed_id(pairs: dict[str, Any]):
     everything = db.get_all_records(PATH, record_id_column="rid")
     assert everything is not None
     assert everything.num_rows == 41
-    assert everything["rid"].to_pylist()[-2:] == [b"id-5", b"id-40"]
+    assert everything["rid"].to_pylist()[-2:] == [b"id-39", b"id-40"]
 
 
 def test_indexes_follow_appends_after_they_are_built():

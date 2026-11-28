@@ -317,13 +317,21 @@ class InMemoryArrowDatabase:
             if records.num_rows == 0:
                 return
         else:
-            # Check for conflicts in the pending batch only
             input_ids = set(records[self.RECORD_ID_COLUMN].to_pylist())
-            pending_conflicts = input_ids & self._pending_record_ids[record_key]
+            pending_conflicts = input_ids.intersection(
+                self._pending_record_ids.get(record_key, ())
+            )
             if pending_conflicts:
                 raise ValueError(
                     f"Records with IDs {pending_conflicts} already exist in the "
                     f"pending batch. Use skip_duplicates=True to skip them."
+                )
+            committed_ids = self._committed_id_index(record_key)
+            stored_conflicts = {rid for rid in input_ids if rid in committed_ids}
+            if stored_conflicts:
+                raise ValueError(
+                    f"Records with IDs {stored_conflicts} already exist in the stored "
+                    "table. Use skip_duplicates=True to skip them."
                 )
 
         # Add to pending batch
@@ -442,20 +450,14 @@ class InMemoryArrowDatabase:
             self._tables[record_key] = pending.combine_chunks()
             return
 
-        # Insert-if-not-exists: keep committed rows not overwritten by new batch,
-        # then append the new batch on top.
-        new_ids = pending[self.RECORD_ID_COLUMN].to_pylist()
         committed_ids = self._committed_id_index(record_key)
-        if any(record_id in committed_ids for record_id in new_ids):
-            mask = pc.invert(
-                pc.is_in(committed[self.RECORD_ID_COLUMN], pa.array(list(new_ids)))
+        ids = pending[self.RECORD_ID_COLUMN]
+        conflicts = {rid for rid in ids.to_pylist() if rid in committed_ids}
+        if conflicts:
+            pending = pending.filter(
+                pc.invert(pc.is_in(ids, pa.array(list(conflicts))))
             )
-            kept = committed.filter(mask)
-            self._tables[record_key] = pa.concat_tables(
-                [kept, pending]
-            ).combine_chunks()
-            # Rows moved: the indexes are rebuilt on the next lookup.
-            self._indexes.pop(record_key, None)
+        if pending.num_rows == 0:
             return
 
         appended = compact_tail(pa.concat_tables([committed, pending]))

@@ -13,6 +13,8 @@ table (``deltalake.write_deltalake``). Two processes are checked as well.
 
 from __future__ import annotations
 
+import datetime
+import decimal
 import multiprocessing
 import sys
 from pathlib import Path
@@ -243,7 +245,13 @@ def _write_ids(root: str, start: Any, ids: list[int], value: int) -> None:
     db = DeltaTableDatabase(root)
     start.wait()
     for n in ids:
-        db.add_records(PATH, _records(n, value), record_id_column="rid", flush=True)
+        db.add_records(
+            PATH,
+            _records(n, value),
+            record_id_column="rid",
+            skip_duplicates=True,
+            flush=True,
+        )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="spawned writers on one table")
@@ -564,3 +572,44 @@ def test_an_id_another_writer_added_is_skipped_once_the_table_is_reloaded(
     if queued_clash:
         expected.append((b"\x03", 30))
     assert _stored(tmp_path) == expected
+
+
+@pytest.mark.parametrize(
+    ("id_type", "initial", "contested"),
+    [
+        (
+            pa.timestamp("us"),
+            datetime.datetime(2026, 1, 1),
+            datetime.datetime(2026, 1, 2),
+        ),
+        (pa.decimal128(38, 18), decimal.Decimal("1.125"), decimal.Decimal("2.125")),
+        (pa.float64(), 1.125, 2.125),
+    ],
+    ids=["timestamp", "decimal", "float"],
+)
+def test_typed_record_ids_have_no_file_statistics_and_keep_the_first_commit(
+    tmp_path: Path, id_type: pa.DataType, initial: Any, contested: Any
+) -> None:
+    """The typed ID must not let a MERGE miss a concurrent write to that ID."""
+    a, b = DeltaTableDatabase(tmp_path), DeltaTableDatabase(tmp_path)
+
+    def rows(rid: Any, value: int) -> pa.Table:
+        return pa.table({"id": pa.array([rid], type=id_type), "v": [value]})
+
+    a.add_records(PATH, rows(initial, 0), flush=True)
+    a.add_records(PATH, rows(contested, 1))
+    with _commit_after_load(
+        a, lambda: b.add_records(PATH, rows(contested, 2), flush=True)
+    ):
+        a.flush()
+
+    props = deltalake.DeltaTable(str(tmp_path / "t")).metadata().configuration
+    assert props["delta.dataSkippingStatsColumns"] == "`v`"
+    stored = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert stored is not None
+    assert stored.sort_by("id").to_pylist() == [
+        {"id": initial, "v": 0},
+        {"id": contested, "v": 2},
+    ]
+    with pytest.raises(ValueError, match="already exist.*stored"):
+        a.add_records(PATH, rows(contested, 3))

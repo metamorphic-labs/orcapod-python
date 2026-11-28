@@ -349,6 +349,27 @@ class SQLiteConnector:
         self._require_open()
         return "main"
 
+    def existing_store_ids(
+        self, table_name: str, id_column: str, ids: set[bytes], *, schema: str
+    ) -> set[bytes]:
+        """Look up existing record IDs using the table's primary key."""
+        table = sql_table_identifier(table_name, schema)
+        column = sql_table_identifier(id_column)
+        values = list(ids)
+        found: set[bytes] = set()
+        with self._lock:
+            conn = self._require_open()
+            # Stay below SQLite's variable limit, including builds limited to 999.
+            for start in range(0, len(values), 500):
+                keys = values[start : start + 500]
+                placeholders = ", ".join("?" for _ in keys)
+                cursor = conn.execute(
+                    f"SELECT {column} FROM {table} WHERE {column} IN ({placeholders})",
+                    keys,
+                )
+                found.update(cast(bytes, row[0]) for row in cursor)
+        return found
+
     @contextmanager
     def store_table_transaction(
         self, table_name: str, path_json: str, *, schema: str
@@ -618,14 +639,51 @@ class SQLiteConnector:
                 (INSERT OR IGNORE). If False, overwrite (INSERT OR REPLACE).
             schema: The verified schema when called by a connector store.
         """
+        policy = " OR IGNORE" if skip_existing else " OR REPLACE"
+        self._insert_records(table_name, records, schema, policy=policy)
+
+    def insert_store_records(
+        self,
+        table_name: str,
+        records: pa.Table,
+        id_column: str,
+        *,
+        skip_duplicates: bool,
+        schema: str,
+    ) -> None:
+        """Insert, preserving SQLite's existing write-if-missing behavior."""
+        if skip_duplicates:
+            self.upsert_records(table_name, records, id_column, True, schema=schema)
+        else:
+            column = sql_table_identifier(id_column)
+            self._insert_records(
+                table_name,
+                records,
+                schema,
+                conflict_clause=f" ON CONFLICT ({column}) DO NOTHING",
+            )
+
+    def _insert_records(
+        self,
+        table_name: str,
+        records: pa.Table,
+        schema: str | None,
+        *,
+        policy: str = "",
+        conflict_clause: str = "",
+    ) -> None:
+        """Write a batch under the selected SQLite conflict policy."""
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
             cols = list(records.column_names)
-            col_list = ", ".join('"' + c.replace('"', '""') + '"' for c in cols)
+            col_list = ", ".join(sql_table_identifier(c) for c in cols)
             placeholders = ", ".join("?" for _ in cols)
-            verb = "INSERT OR IGNORE" if skip_existing else "INSERT OR REPLACE"
-            sql = f"{verb} INTO {sql_table_identifier(table_name, schema)} ({col_list}) VALUES ({placeholders})"
+            target = sql_table_identifier(table_name, schema)
+            sql = (
+                f"INSERT{policy} INTO {target} ({col_list}) VALUES ({placeholders})"
+                f"{conflict_clause}"
+            )
             rows = (tuple(row[c] for c in cols) for row in records.to_pylist())
             conn.executemany(sql, rows)
 
