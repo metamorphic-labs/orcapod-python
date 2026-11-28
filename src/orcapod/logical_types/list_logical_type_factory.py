@@ -113,7 +113,7 @@ class ListLogicalType(BaseLogicalType):
             Python type and Arrow extension type are derived, or an ``ArrowElement``
             for a set of a plain Arrow type.
         is_set: If ``True``, uses ``set[T]`` semantics (``storage_to_python`` returns a
-            ``set``; ``python_to_storage`` sorts storage values for determinism). Defaults to
+            ``set``; ``python_to_storage`` stores the elements in canonical order). Defaults to
             ``False`` (``list[T]`` semantics).
 
     Attributes:
@@ -342,11 +342,15 @@ class ListLogicalType(BaseLogicalType):
         Delegates per-element conversion to ``converter.python_to_storage`` using
         the element Python type. If ``value`` is ``None``, returns an empty list.
 
-        For ``set[T]`` (``is_set=True``), the resulting list is sorted to guarantee
-        deterministic storage order regardless of Python set iteration order. For a
-        logical element sorting is attempted naturally; if elements are not comparable
-        (``TypeError``), falls back to ``repr``-based ordering. A plain Arrow element is
-        put in the canonical order of ``canonical_order.sort_set_elements``.
+        For ``set[T]`` (``is_set=True``), the storage values are put in the canonical
+        order of ``canonical_order.sort_set_elements``, whatever order the set iterates
+        in: for a plain Arrow element and for a logical element alike (ITL-922). A NaN,
+        two elements with one storage value and elements that cannot be ordered are
+        refused.
+
+        The one exception, pending the developer's decision in ITL-922: a logical
+        element stored as a struct (a user class) has no canonical order yet, so its
+        set keeps the order it had, by the ``repr`` of the storage values.
 
         Args:
             value: A Python list (or set) of elements of type ``element_python_type``,
@@ -358,8 +362,9 @@ class ListLogicalType(BaseLogicalType):
             For set semantics the list is sorted.
 
         Raises:
-            CanonicalOrderError: For a set of a plain Arrow type holding a NaN, elements
-                that cannot be ordered, or two elements with one storage value.
+            CanonicalOrderError: For a set holding a NaN, elements that cannot be
+                ordered, or two elements with one storage value (not for a set of a
+                struct-stored element, see above).
         """
         if value is None:
             return []
@@ -371,17 +376,18 @@ class ListLogicalType(BaseLogicalType):
                 for item in value
             ]
         if self._is_set:
-            if self._element_logical_type is None:
-                # A set of a plain Arrow type keeps the canonical order a plain set
-                # had before it was a native container (ITL-905), so the stored
-                # elements are unchanged (ITL-611).
-                from orcapod.semantic_types.canonical_order import sort_set_elements
+            if pa.types.is_struct(self._storage_type.value_type):
+                # TODO(ITL-922): pending the developer's decision. A struct (a user
+                # class's storage) has no canonical order yet, so a set of one keeps
+                # the order it always had: by the ``repr`` of the storage values. A
+                # change here moves the stored order, so the row hash, of such sets.
+                return sorted(elements, key=repr)
+            # One canonical order for every other set (ITL-905, ITL-611, ITL-922): it
+            # refuses a NaN, a repeated storage value and values with no order, and
+            # never falls back to another order.
+            from orcapod.semantic_types.canonical_order import sort_set_elements
 
-                return sort_set_elements(elements)
-            try:
-                elements = sorted(elements)
-            except TypeError:
-                elements = sorted(elements, key=repr)
+            return sort_set_elements(elements)
         return elements
 
     def storage_to_python(
