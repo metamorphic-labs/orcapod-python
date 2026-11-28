@@ -7,14 +7,19 @@ and real PipelineJob objects.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import cast
+
 import pyarrow as pa
 import pytest
+from typing_extensions import override
 
 from orcapod.core.executors import LocalPythonFunctionExecutor
-from orcapod.core.function_pod import FunctionPod
+from orcapod.core.function_pod import FunctionPod, function_pod
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import RowFailuresWarning
 from orcapod.pipeline import (
     AsyncPipelineOrchestrator,
     SyncPipelineOrchestrator,
@@ -110,6 +115,111 @@ class TestFailingDatasLogged:
             assert tb is not None
             assert "ValueError" in tb
             assert "boom" in tb
+
+
+@pytest.mark.parametrize(
+    "orchestrator_type", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+)
+@pytest.mark.parametrize(
+    "wrong_arity", [False, True], ids=["wrong-type", "wrong-arity"]
+)
+@pytest.mark.parametrize("reverse_layout", [False, True], ids=["forward", "reverse"])
+def test_rejected_output_logged_as_failure(
+    orchestrator_type: type[SyncPipelineOrchestrator] | type[AsyncPipelineOrchestrator],
+    wrong_arity: bool,
+    reverse_layout: bool,
+) -> None:
+    """Log the validation failure alongside the captured function output."""
+    executor = LocalPythonFunctionExecutor()
+    if wrong_arity:
+
+        @function_pod(output_keys=("first", "second"), executor=executor)
+        def rejected_arity(x: int, y: int) -> tuple[int, int]:
+            print(f"returning output for {x}, {y}")
+            return cast("tuple[int, int]", (x + y,))
+
+        pod = rejected_arity.pod
+        error_text = "does not match number of values"
+    else:
+
+        @function_pod(output_keys="result", executor=executor)
+        def rejected_type(x: int, y: int) -> int:
+            print(f"returning output for {x}, {y}")
+            return cast(int, cast(object, str(x + y)))
+
+        pod = rejected_type.pod
+        error_text = "OutputTypeError"
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="test_rejected_output", database=database)
+    table = pa.table({"id": ["0"], "x": [10], "region": ["west"], "y": [20]})
+    tag_columns = ["id", "region"]
+    if reverse_layout:
+        table = table.select(table.column_names[::-1])
+        tag_columns.reverse()
+    source = ArrowTableSource(
+        table, tag_columns=tag_columns, infer_nullable=True, tag_only_columns=True
+    )
+    with job:
+        _ = pod(source, label="rejected")
+
+    observer = LoggingObserver(log_database=database)
+    with pytest.warns(RowFailuresWarning, match=error_text):
+        summary = job.run(orchestrator=orchestrator_type(), observer=observer)
+
+    assert summary.nodes["rejected"].computed == 0
+    assert summary.nodes["rejected"].failed == 1
+    logs = observer.get_logs()
+    assert logs is not None
+    assert logs.column("_log_success").to_pylist() == [False]
+    traceback_text: object = logs.column("_log_traceback")[0].as_py()
+    assert isinstance(traceback_text, str)
+    assert error_text in traceback_text
+    assert logs.column("_log_stdout_log").to_pylist() == [
+        "returning output for 10, 20\n"
+    ]
+    assert logs.column("id").to_pylist() == ["0"]
+    assert logs.column("region").to_pylist() == ["west"]
+
+
+@pytest.mark.parametrize(
+    "orchestrator_type", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+)
+def test_validation_traceback_with_lone_surrogate(
+    orchestrator_type: type[SyncPipelineOrchestrator] | type[AsyncPipelineOrchestrator],
+) -> None:
+    """Store UTF-8 log text and preserve the original row error."""
+    error_text = "validation failed on \ud800"
+
+    class RejectedList(list[int]):
+        @override
+        def __iter__(self) -> Iterator[int]:
+            raise ValueError(error_text)
+
+    @function_pod(output_keys="result", executor=LocalPythonFunctionExecutor())
+    def rejected_list(x: int) -> list[int]:
+        return RejectedList([x])
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="test_validation_traceback", database=database)
+    with job:
+        _ = rejected_list.pod(_make_source(1), label="rejected")
+
+    observer = LoggingObserver(log_database=database)
+    with pytest.warns(RowFailuresWarning):
+        summary = job.run(orchestrator=orchestrator_type(), observer=observer)
+
+    node = summary.nodes["rejected"]
+    assert node.computed == 0
+    assert node.failed == 1
+    assert type(node.first_error) is ValueError
+    assert str(node.first_error) == error_text
+    logs = observer.get_logs()
+    assert logs is not None
+    assert logs.column("_log_success").to_pylist() == [False]
+    traceback_text: object = logs.column("_log_traceback")[0].as_py()
+    assert isinstance(traceback_text, str)
+    assert traceback_text.endswith(r"ValueError: validation failed on \ud800" + "\n")
 
 
 # ---------------------------------------------------------------------------

@@ -6,10 +6,12 @@ import logging
 import re
 import sys
 import tokenize
+import traceback
 import types
 import uuid
 from abc import abstractmethod
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 import typing
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
@@ -82,6 +84,51 @@ def _get_sync_executor():
 
         _sync_executor = ThreadPoolExecutor(1)
     return _sync_executor
+
+
+class _DeferredSuccessLogger:
+    """Hold executor success records until the output has been validated."""
+
+    def __init__(self, logger: DataExecutionLoggerProtocol) -> None:
+        self.logger = logger
+        self.pending: list[dict[str, Any]] = []
+
+    def record(self, **fields: Any) -> None:
+        """Save a success record or forward an executor failure as it arrives."""
+        if fields.get("success") is True:
+            self.pending.append(fields)
+        else:
+            self.logger.record(**fields)
+
+
+@contextmanager
+def _log_validated_outcome(
+    logger: DataExecutionLoggerProtocol | None,
+) -> Iterator[DataExecutionLoggerProtocol | None]:
+    """Record captured I/O with the outcome of execution and output validation."""
+    if logger is None:
+        yield None
+        return
+
+    deferred = _DeferredSuccessLogger(logger)
+    try:
+        yield deferred
+    except Exception:
+        if deferred.pending:
+            failure_traceback = (
+                traceback.format_exc()
+                .encode("utf-8", "backslashreplace")
+                .decode("utf-8")
+            )
+            for fields in deferred.pending:
+                fields["success"] = False
+                if "traceback" in fields:
+                    fields["traceback"] = failure_traceback
+                logger.record(**fields)
+        raise
+    else:
+        for fields in deferred.pending:
+            logger.record(**fields)
 
 
 def parse_function_outputs(
@@ -1208,16 +1255,17 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         if self._executor is not None:
             if not self._active:
                 return None
-            try:
-                raw = self._executor.execute_callable(
-                    self._function,
-                    {**data.as_dict(), **kwargs},
-                    executor_options=self._executor_return_options(),
-                    logger=logger,
-                )
-            except UnexpectedOutputContainer as exc:
-                raise self._output_container_error(exc) from exc
-            return self._build_output_data(raw)
+            with _log_validated_outcome(logger) as execution_logger:
+                try:
+                    raw = self._executor.execute_callable(
+                        self._function,
+                        {**data.as_dict(), **kwargs},
+                        executor_options=self._executor_return_options(),
+                        logger=execution_logger,
+                    )
+                except UnexpectedOutputContainer as exc:
+                    raise self._output_container_error(exc) from exc
+                return self._build_output_data(raw)
         if logger is not None:
             import warnings
 
@@ -1239,16 +1287,17 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
         if self._executor is not None:
             if not self._active:
                 return None
-            try:
-                raw = await self._executor.async_execute_callable(
-                    self._function,
-                    {**data.as_dict(), **kwargs},
-                    executor_options=self._executor_return_options(),
-                    logger=logger,
-                )
-            except UnexpectedOutputContainer as exc:
-                raise self._output_container_error(exc) from exc
-            return self._build_output_data(raw)
+            with _log_validated_outcome(logger) as execution_logger:
+                try:
+                    raw = await self._executor.async_execute_callable(
+                        self._function,
+                        {**data.as_dict(), **kwargs},
+                        executor_options=self._executor_return_options(),
+                        logger=execution_logger,
+                    )
+                except UnexpectedOutputContainer as exc:
+                    raise self._output_container_error(exc) from exc
+                return self._build_output_data(raw)
         if logger is not None:
             import warnings
 
