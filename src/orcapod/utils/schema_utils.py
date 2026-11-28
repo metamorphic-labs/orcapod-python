@@ -10,6 +10,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 import pyarrow as pa
 
 from orcapod.errors import InputValidationError
+from orcapod.semantic_types.narrow_float_keys import NarrowFloatKeyError
 from orcapod.types import ContentHash, Schema, SchemaLike
 from orcapod.utils.output_containers import EXCLUDED_OUTPUT_CONTAINERS
 
@@ -618,6 +619,8 @@ def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":
     """
     try:
         return converter.python_schema_to_arrow_schema(schema)
+    except NarrowFloatKeyError:
+        raise
     except (TypeError, ValueError):
         pass
     optional = getattr(schema, "optional_fields", frozenset())
@@ -628,11 +631,30 @@ def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":
         )
         try:
             converted = converter.python_schema_to_arrow_schema(single)
+        except NarrowFloatKeyError:
+            raise
         except (TypeError, ValueError):
             converter.ensure_types_registered_for_schemas(single)
             converted = converter.python_schema_to_arrow_schema(single)
         fields.append(converted.field(name))
     return pa.schema(fields)
+
+
+def require_python_schema_without_narrow_float_keys(
+    schema: SchemaLike, converter: Any
+) -> None:
+    """Check a Python declaration when its Arrow conversion is deferred or optional.
+
+    Use the converter's narrow key and element check. Other conversion errors
+    belong to the path that requires the converter to produce an Arrow type.
+    """
+    for name, python_type in schema.items():
+        try:
+            declared_arrow_schema({name: python_type}, converter)
+        except NarrowFloatKeyError:
+            raise
+        except Exception:  # noqa: BLE001 - conversion is optional here
+            continue
 
 
 def compute_schema_hash(

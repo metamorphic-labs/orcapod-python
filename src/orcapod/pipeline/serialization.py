@@ -24,6 +24,11 @@ from orcapod.logical_types.identifier import (
     require_readable,
 )
 
+from orcapod.semantic_types.narrow_float_keys import (
+    NarrowFloatKeyError,
+    require_schema_without_narrow_float_keys,
+)
+
 if TYPE_CHECKING:
     import pyarrow as pa
 
@@ -690,9 +695,9 @@ def resolve_source_from_config(
         # All sources accept db_registry — always forward it.
         # Sources that don't embed database references simply ignore it.
         return cls.from_config(config, db_registry=db_registry)
-    except Warning:
-        # A warning turned into an error (a ProvisionalHashWarning under an error
-        # filter) propagates; it is not a source that could not be rebuilt (ITL-1331).
+    except (NarrowFloatKeyError, Warning):
+        # An invalid declaration and a warning turned into an error propagate
+        # instead of becoming a proxy for a source that could not be rebuilt.
         raise
     except Exception:
         if fallback_to_proxy:
@@ -733,6 +738,17 @@ def saved_source_id(config: dict[str, Any]) -> str:
         _ = parse_source_id(full_id)
         return full_id
     return "unknown"
+
+
+def source_config_has_inherited_types(config: object) -> bool:
+    """Whether a saved source config describes types inherited from an upstream."""
+    if not isinstance(config, dict):
+        return False
+    fields = cast("dict[str, object]", config)
+    kind = fields.get("source_type")
+    if kind == "cached":
+        return source_config_has_inherited_types(fields.get("inner_source"))
+    return kind == "derived"
 
 
 def _source_proxy_from_config(
@@ -810,16 +826,19 @@ def _source_proxy_from_config(
         expected_class_name = SOURCE_REGISTRY[source_type].__name__
 
     # A config without the nullability record (written before ITL-1043) is lossy.
+    inherited_types = source_config_has_inherited_types(config)
     tag_schema = Schema(
         deserialize_schema(
             tag_schema_dict,
             nullable=None if saved_nullable is None else saved_nullable["tag"],
+            inherited_types=inherited_types,
         )
     )
     data_schema = Schema(
         deserialize_schema(
             data_schema_dict,
             nullable=None if saved_nullable is None else saved_nullable["data"],
+            inherited_types=inherited_types,
         )
     )
 
@@ -1098,6 +1117,8 @@ def deserialize_schema(
     schema_dict: dict[str, str],
     type_converter: Any | None = None,
     nullable: Collection[str] | None = None,
+    *,
+    inherited_types: bool = False,
 ) -> dict[str, Any]:
     """Reconstruct a Python-type schema from Arrow type string values.
 
@@ -1111,6 +1132,7 @@ def deserialize_schema(
             produced by `serialize_schema`.
         type_converter: Optional type converter for Arrow→Python conversion.
             When ``None``, the default data context's converter is used.
+        inherited_types: The saved types describe already-built upstream results.
         nullable: The columns saved as nullable (one group of
             ``serialize_nullability``); each becomes ``T | None``. ``None`` when the
             file records no nullability: every column is then restored as ``T``.
@@ -1122,6 +1144,8 @@ def deserialize_schema(
     Raises:
         ValueError: If ``nullable`` names a column that is not in ``schema_dict``.
     """
+    import pyarrow as pa
+
     if type_converter is None:
         from orcapod.contexts import resolve_context
 
@@ -1133,6 +1157,10 @@ def deserialize_schema(
     for name, type_str in schema_dict.items():
         try:
             arrow_type = parse_arrow_type_string(type_str, type_converter)
+            if not inherited_types:
+                require_schema_without_narrow_float_keys(
+                    pa.schema([(name, arrow_type)])
+                )
             result[name] = _python_type_of_saved_column(
                 name,
                 arrow_type,
@@ -1141,7 +1169,7 @@ def deserialize_schema(
             )
         except LogicalTypeIdentifierError as exc:
             raise exc.for_column(name) from exc
-        except (SavedSchemaVersionError, Warning):
+        except (NarrowFloatKeyError, SavedSchemaVersionError, Warning):
             # A warning turned into an error (a provisional library value type under an
             # error filter) propagates (ITL-1331).
             raise
@@ -1534,7 +1562,9 @@ def deserialize_arrow_schema(
                 "restored."
             ) from exc
         fields.append(pa.field(name, arrow_type, nullable=name in nullable))
-    return pa.schema(fields)
+    schema = pa.schema(fields)
+    require_schema_without_narrow_float_keys(schema)
+    return schema
 
 
 def parse_arrow_type_string(type_str: str, type_converter: Any | None = None) -> Any:

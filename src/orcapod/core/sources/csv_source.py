@@ -10,6 +10,9 @@ from typing import Any, ClassVar
 import pyarrow as pa
 from typing_extensions import override
 
+from orcapod.semantic_types.narrow_float_keys import (
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_name
@@ -309,6 +312,8 @@ class CSVSource(RootSource):
         # Every later read (a check, ITL-1102) opens the file found now, whatever the
         # working directory is then.
         self._access_path = os.path.abspath(file_path)
+        if schema is not None:
+            require_schema_without_narrow_float_keys(schema)
         self._schema = schema
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns

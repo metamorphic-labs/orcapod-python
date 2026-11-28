@@ -12,7 +12,7 @@ declared type.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -45,3 +45,39 @@ def require_storable_in_struct_field(arrow_type: pa.DataType) -> None:
             f"or declare the plain type (e.g. dict[str, list[int]] for "
             f"dict[str, set[int]]). Follow-up: {_FOLLOW_UP}."
         )
+
+
+def dict_entry_fields(
+    arrow_type: pa.DataType,
+) -> tuple[pa.Field[Any], pa.Field[Any]] | None:
+    """Return the key and value fields of ``arrow_type`` when it stores a dict.
+
+    The one definition of the dict shape: a ``dict[K, V]`` is stored as a list (large,
+    plain or fixed-size) of structs with exactly the two fields ``key`` and ``value``.
+    The converter reads such a type as a dict (``arrow_type_to_python_type``,
+    ``get_arrow_to_python_converter``), and the refusal of a narrow float key in a
+    declared type (``narrow_float_keys``, ITL-1591) asks here too. An Arrow ``map`` is
+    read as a dict as well and is not this shape: its key and item types are the
+    type's own.
+
+    Args:
+        arrow_type: Any Arrow type.
+
+    Returns:
+        ``(key field, value field)``, or ``None`` when ``arrow_type`` is not a list of
+        ``{key, value}`` structs.
+    """
+    import pyarrow as pa
+
+    if not (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        return None
+    element_type = arrow_type.value_type
+    if not pa.types.is_struct(element_type) or element_type.num_fields != 2:
+        return None
+    if {field.name for field in element_type} != {"key", "value"}:
+        return None
+    return element_type.field("key"), element_type.field("value")

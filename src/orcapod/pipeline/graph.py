@@ -248,6 +248,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         "tag_schema": dict(saved["tag"]),
                         "data_schema": dict(saved["data"]),
                         "nullable": copy.deepcopy(saved["nullable"]),
+                        "inherited_types": node._inherited_types,  # pyright: ignore[reportPrivateUsage]  # blueprint slot provenance
                     }
                     descriptor["reconstructable"] = True
 
@@ -427,6 +428,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     )
                     if not node_name:
                         node_name = descriptor.get("label") or "unknown"
+                    # Old blueprints did not distinguish declarations from
+                    # inherited schemas. Their saved Arrow types can describe an
+                    # operator result, so preserve them as they were saved.
+                    inherited_types = source_config.get("inherited_types", True)
                     # Which columns may be null: recorded (``require_nullability_records``).
                     saved_nullable: dict[str, list[str]]
                     if "tag_schema" in source_config and "data_schema" in source_config:
@@ -442,6 +447,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             saved_tag,
                             context.type_converter,
                             nullable=saved_nullable["tag"],
+                            inherited_types=inherited_types,
                         )
                     )
                     data_schema = Schema(
@@ -449,6 +455,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             saved_data,
                             context.type_converter,
                             nullable=saved_nullable["data"],
+                            inherited_types=inherited_types,
                         )
                     )
                     saved_context = resolve_saved_context(
@@ -475,6 +482,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         data_schema=data_schema,
                         data_context=saved_context,
                         arrow_schemas=arrow_schemas,
+                        _inherited_types=True,
                     )
                     # The saved hashes, and the saved type text of a column whose
                     # class this process has not registered yet (ITL-1138).
@@ -483,6 +491,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         content_hash=descriptor.get("content_hash"),
                         saved_types={"tag": saved_tag, "data": saved_data},
                         nullable=saved_nullable,
+                        inherited_types=inherited_types,
                     )
                     # Restore label from descriptor if set explicitly
                     stored_label = descriptor.get("label")

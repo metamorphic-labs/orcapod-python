@@ -22,6 +22,9 @@ import polars as pl
 import pyarrow as pa
 from typing_extensions import override
 
+from orcapod.semantic_types.narrow_float_keys import (
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.logical_types.canonical_form import declaration_form_schema
@@ -330,6 +333,7 @@ class PollingSource(RootSource, Generic[T]):
         self._declared_arrow: pa.Schema | None = None
         unified_schema = self._impl.schema()
         if isinstance(unified_schema, pa.Schema):
+            require_schema_without_narrow_float_keys(unified_schema)
             require_supported_nullable_types(unified_schema)
             # Logical types in one form first: a field declared with its identifier
             # in ARROW:extension:* metadata is that logical type (ITL-640).
@@ -874,6 +878,8 @@ class PollingSource(RootSource, Generic[T]):
         Returns:
             ``ArrowTableStream`` if data has rows and columns, ``None`` otherwise.
         """
+        if isinstance(data, (pa.Table, pa.RecordBatch)):
+            require_schema_without_narrow_float_keys(data.schema)
         df = pl.DataFrame(data)
         if len(df.columns) == 0:
             logger.debug(

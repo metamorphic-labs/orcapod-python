@@ -27,6 +27,9 @@ from orcapod.errors import InputValidationError, RowIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
+from orcapod.semantic_types.narrow_float_keys import (
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.schema_utils import compute_source_schema_hash
 
@@ -467,6 +470,7 @@ class SourceStreamBuilder:
         data_tags: Collection[str] = (),
         *,
         hash_in_key_order: bool = False,
+        inherited_types: bool = False,
     ) -> SourceStreamResult:
         """Run the full enrichment pipeline.
 
@@ -486,6 +490,8 @@ class SourceStreamBuilder:
                 which changes when rows are reordered unless ``hash_in_key_order`` is
                 given; pass an explicit value when the source id must survive
                 reordering.
+            inherited_types: The table retains already-built upstream types, as
+                when a derived source copies a tag into data.
             record_id_columns: The key columns whose values identify a row, in key
                 order: the row identifier is their canonical JSON
                 (``key_row_identifier``), which follows the row regardless of its
@@ -559,6 +565,10 @@ class SourceStreamBuilder:
             raise schema_utils.schema_hash_rejected_columns_error(
                 found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
             )
+        # Nor is a dict keyed by, or a set of, float32 or float16 (ITL-1591): refused
+        # here first, as the stream refuses it, before any key column or hash.
+        if not inherited_types:
+            require_schema_without_narrow_float_keys(table.schema)
 
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)

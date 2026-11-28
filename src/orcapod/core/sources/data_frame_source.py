@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import polars as pl
 import pyarrow as pa
 
+from orcapod.semantic_types.narrow_float_keys import (
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -65,6 +68,10 @@ class DataFrameSource(RootSource):
     ) -> None:
         super().__init__(source_id=source_id, **kwargs)
 
+        if schema is not None:
+            require_schema_without_narrow_float_keys(schema)
+        if isinstance(data, (pa.Table, pa.RecordBatch)):
+            require_schema_without_narrow_float_keys(data.schema)
         df = pl.DataFrame(data)
 
         # Convert any Object-dtype columns to Arrow-compatible types.

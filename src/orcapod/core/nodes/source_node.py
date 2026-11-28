@@ -21,6 +21,10 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.semantic_types.narrow_float_keys import (
+    NarrowFloatKeyError,
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
@@ -62,6 +66,7 @@ from orcapod.utils.schema_utils import (
     arrow_schema_identity,
     compute_source_schema_hash,
     declared_arrow_schema,
+    require_python_schema_without_narrow_float_keys,
 )
 
 if TYPE_CHECKING:
@@ -402,6 +407,8 @@ def _columns_without_arrow_type(
             seen.add(name)
             try:
                 declared_arrow_schema({name: python_type}, converter)
+            except NarrowFloatKeyError:
+                raise
             except (ValueError, TypeError):
                 missing.append((name, python_type))
     return missing
@@ -543,6 +550,8 @@ class SourceNodeBase(TraceableBase, ABC):
         label: str | None = None,
         config: OrcapodConfig | None = None,
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
+        *,
+        _inherited_types: bool = False,
     ) -> None:
         super().__init__(label=label, data_context=data_context, config=config)
         if isinstance(tag_schema, pa.Schema) or isinstance(data_schema, pa.Schema):
@@ -558,6 +567,8 @@ class SourceNodeBase(TraceableBase, ABC):
                 raise ValueError(
                     "arrow_schemas is given by tag_schema and data_schema already"
                 )
+            require_schema_without_narrow_float_keys(tag_schema)
+            require_schema_without_narrow_float_keys(data_schema)
             converter = self.data_context.type_converter
             # Logical types in one form first: a field declared with its identifier
             # in ARROW:extension:* metadata is that logical type (ITL-640).
@@ -566,7 +577,16 @@ class SourceNodeBase(TraceableBase, ABC):
             arrow_schemas = (tag_schema, data_schema)
             tag_schema = Schema(converter.arrow_schema_to_python_schema(tag_schema))
             data_schema = Schema(converter.arrow_schema_to_python_schema(data_schema))
+        elif arrow_schemas is not None and not _inherited_types:
+            for schema in arrow_schemas:
+                require_schema_without_narrow_float_keys(schema)
+            converter = self.data_context.type_converter
+            # A supplied Arrow mapping may cover Python types the converter does
+            # not know. Still check both roles for prohibited Python declarations.
+            require_python_schema_without_narrow_float_keys(tag_schema, converter)
+            require_python_schema_without_narrow_float_keys(data_schema, converter)
         self._name = name
+        self._inherited_types = _inherited_types
         self._tag_schema = tag_schema
         self._data_schema = data_schema
         # The Arrow types of the slot's columns, which its identity is built from
@@ -600,6 +620,7 @@ class SourceNodeBase(TraceableBase, ABC):
         content_hash: str | None,
         saved_types: Mapping[str, Mapping[str, str]],
         nullable: Mapping[str, Collection[str]],
+        inherited_types: bool,
     ) -> None:
         """Keep what a saved job recorded for this slot (ITL-1138, ITL-640).
 
@@ -617,11 +638,13 @@ class SourceNodeBase(TraceableBase, ABC):
             content_hash: The saved content hash text, or ``None`` if not saved.
             saved_types: The saved type texts, ``{"tag": {...}, "data": {...}}``.
             nullable: The saved nullable column names per role.
+            inherited_types: The saved types came from an upstream result.
         """
         if pipeline_hash is not None:
             self._saved_pipeline_hash = ContentHash.from_string(pipeline_hash)
         if content_hash is not None:
             self._saved_content_hash = ContentHash.from_string(content_hash)
+        self._inherited_types = inherited_types
         if self._given_arrow_schemas is None or self._pending_columns():
             # One state: the texts hold the types, and the Arrow pair and the Python
             # types are both derived from them by ``_resolve``, together.
@@ -643,6 +666,7 @@ class SourceNodeBase(TraceableBase, ABC):
         name.
         """
         self._saved_pipeline_hash = other._saved_pipeline_hash
+        self._inherited_types = other._inherited_types
         self._given_arrow_schemas = other._given_arrow_schemas
         if self._name == other._name:
             self._label = other._label
@@ -690,7 +714,12 @@ class SourceNodeBase(TraceableBase, ABC):
         arrow: list[pa.Schema] = []
         for role in ("tag", "data"):
             names = texts["nullable"][role]
-            python[role] = deserialize_schema(texts[role], converter, nullable=names)
+            python[role] = deserialize_schema(
+                texts[role],
+                converter,
+                nullable=names,
+                inherited_types=self._inherited_types,
+            )
             if any(isinstance(value, str) for value in python[role].values()):
                 return False
             try:
@@ -1571,6 +1600,7 @@ class SourceNode(SourceNodeBase):
                 if isinstance(stream, SourceNodeBase)
                 else typed_arrow_schemas(stream)
             ),
+            _inherited_types=True,
         )
         if isinstance(stream, SourceNodeBase):
             # A loaded job's slot keeps all its saved state (ITL-1138, ITL-640),
@@ -1622,6 +1652,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         bound_source: StreamProtocol | None = None,
         data_context: str | contexts.DataContext | None = None,
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
+        *,
+        _inherited_types: bool = False,
     ) -> None:
         if tag_schema is None or data_schema is None:
             if bound_source is None:
@@ -1649,12 +1681,14 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                 tag_schema = derived_tag
             if data_schema is None:
                 data_schema = derived_data
+            _inherited_types = True
         super().__init__(
             name=name,
             tag_schema=tag_schema,
             data_schema=data_schema,
             data_context=data_context,
             arrow_schemas=arrow_schemas,
+            _inherited_types=_inherited_types,
         )
         self._bound_source: StreamProtocol | None = None
         self._declared_form: _DeclaredForm | None = None
@@ -2181,6 +2215,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                     data_schema=stream.data_schema,
                     arrow_schemas=stream._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
                     bound_source=stream.bound_source,
+                    _inherited_types=True,
                 )
                 node._take_saved_state_of(stream)
                 return node
@@ -2192,6 +2227,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                     data_schema=stream.data_schema,
                     arrow_schemas=stream._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
                     bound_source=None,
+                    _inherited_types=True,
                 )
                 node._take_saved_state_of(stream)
                 return node
@@ -2220,6 +2256,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                     data_schema=data_schema,
                     arrow_schemas=typed_arrow_schemas(stream),
                     bound_source=stream,
+                    _inherited_types=True,
                 )
 
     @classmethod
@@ -2244,6 +2281,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             tag_schema=slot.tag_schema,
             data_schema=slot.data_schema,
             arrow_schemas=slot._given_arrow_schemas,  # pyright: ignore[reportPrivateUsage]  # one slot copied into another
+            _inherited_types=True,
         )
         node._take_saved_state_of(slot)
         if bound_source is not None:
@@ -2261,6 +2299,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             tag_schema=self._tag_schema,
             data_schema=self._data_schema,
             arrow_schemas=self._given_arrow_schemas,
+            _inherited_types=True,
         )
         node._take_saved_state_of(self)
         return node

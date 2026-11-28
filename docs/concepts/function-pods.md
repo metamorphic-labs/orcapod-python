@@ -285,6 +285,13 @@ output (ITL-1150). The same types are faithful as a column, inside a list, and a
 dataclass, an `orcapod.dataclass` or a pydantic model: hold such a value in a dataclass
 field, or declare the plain type (`dict[str, list[int]]`).
 
+A dictionary key and a set element cannot be `np.float32` or `np.float16`
+(`dict[np.float32, int]`, `set[np.float32]`, at any depth): a float stored under such a type
+is narrowed, two distinct floats can become one stored value, and the dictionary or set would
+lose an entry. Such a parameter or output raises `NarrowFloatKeyError` when the pod is
+defined (ITL-1591). Declare the key or element as `float`. `np.float32` remains valid as a
+plain value, a list element and a dictionary value.
+
 Outputs are validated against the declared storage schema immediately, and accepted numeric
 exceptions are normalized so downstream pods, hashes and stored rows see the same value.
 Eager validation never replaces a compatible user-class object; stored reads keep their

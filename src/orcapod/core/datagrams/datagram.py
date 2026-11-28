@@ -37,9 +37,13 @@ from orcapod.errors import CanonicalOrderError
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.semantic_types.canonical_order import canonical_python_value
+from orcapod.semantic_types.narrow_float_keys import (
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
+from orcapod.utils.schema_utils import require_python_schema_without_narrow_float_keys
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +192,10 @@ class Datagram(ContentIdentifiableBase):
             if python_schema
             else inferred
         )
+        if python_schema:
+            require_python_schema_without_narrow_float_keys(
+                python_schema, self.converter
+            )
         self._data_dict = self._canonical_dict_values(
             data_columns, self._data_python_schema
         )
@@ -237,7 +245,6 @@ class Datagram(ContentIdentifiableBase):
             )
 
         table = arrow_utils.normalize_table_to_large_types(table)
-
         # Extract context from table if not provided externally
         if constants.CONTEXT_KEY in table.column_names and data_context is None:
             data_context = table[constants.CONTEXT_KEY].to_pylist()[0]
@@ -1064,11 +1071,6 @@ class Datagram(ContentIdentifiableBase):
             if name not in updates:
                 continue
             if isinstance(declared, pa.Field):
-                if updates[name] is None and not declared.nullable:
-                    raise ValueError(
-                        f"Column {name!r} is declared non-nullable"
-                        + f" ({declared}) but its value is None"
-                    )
                 arrow_fields[name] = declared.with_name(name)
             elif isinstance(declared, pa.DataType):
                 arrow_fields[name] = pa.field(
@@ -1076,6 +1078,14 @@ class Datagram(ContentIdentifiableBase):
                 )
             else:
                 python_schema[name] = declared
+        arrow_schema = pa.schema(list(arrow_fields.values()))
+        require_schema_without_narrow_float_keys(arrow_schema)
+        for name, field in arrow_fields.items():
+            if updates[name] is None and not field.nullable:
+                raise ValueError(
+                    f"Column {name!r} is declared non-nullable"
+                    f" ({column_types[name]}) but its value is None"
+                )
         inferred_names = [n for n in updates if n not in column_types]
         if inferred_names:
             python_schema.update(
@@ -1096,7 +1106,7 @@ class Datagram(ContentIdentifiableBase):
             tables.append(
                 self.converter.python_dicts_to_arrow_table(
                     [{n: updates[n] for n in arrow_fields}],
-                    arrow_schema=pa.schema(list(arrow_fields.values())),
+                    arrow_schema=arrow_schema,
                 )
             )
         return arrow_utils.hstack_tables(*tables).select(list(updates))
@@ -1149,6 +1159,16 @@ class Datagram(ContentIdentifiableBase):
                 f"Use update() to modify existing columns."
             )
 
+        if column_types:
+            require_python_schema_without_narrow_float_keys(
+                {
+                    name: declared
+                    for name, declared in column_types.items()
+                    if name in updates
+                    and not isinstance(declared, (pa.DataType, pa.Field))
+                },
+                self.converter,
+            )
         has_arrow_types = column_types is not None and any(
             isinstance(t, (pa.DataType, pa.Field)) for t in column_types.values()
         )
