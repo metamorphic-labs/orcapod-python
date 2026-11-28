@@ -1,8 +1,8 @@
 """Function-node tag tables store each input row's own source info (ITL-845).
 
-A ``FunctionJobNode`` writes one tag-table (pipeline DB, ``pdb_v2``) row per input,
+A ``FunctionJobNode`` writes one tag-table (pipeline DB, ``pdb_v3``) row per input,
 carrying that input's source-info tokens. A source-info token is the provenance
-value a row holds for one data column: the value of its ``_source_<column>``
+value a row holds for one data column: the value of its ``_input_source_<column>``
 column, as ``Data.source_info()`` returns it (for example ``S::row_0::x``).
 "Token" below always means a source-info token.
 
@@ -127,9 +127,12 @@ def _function_node(job: PipelineJob, label: str) -> FunctionJobNode:
 
 
 def _tag_rows(job: PipelineJob, label: str) -> list[dict[str, Any]]:
-    """The node's stored records (tag-table rows joined to results), sorted by tag."""
-    table = _function_node(job, label).get_all_records(
-        columns={"source": True, "meta": True, "system_tags": True}
+    """Read the node's pipeline rows directly, sorted by tag."""
+    database = job.database
+    assert database is not None
+    node = _function_node(job, label)
+    table = database.get_all_records(
+        (_JOB, *node.node_identity_path, PIPELINE_DB_SCHEMA_VERSION)
     )
     assert table is not None
     return sorted(table.to_pylist(), key=lambda row: str(row["id"]))
@@ -168,22 +171,22 @@ class TestFreshRunStoresPerRowSourceInfo:
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
         rows = _tag_rows(job, "direct")
-        assert _column(rows, "_source_x") == _input_source_info_tokens("x")
-        assert _column(rows, "_source_y") == _input_source_info_tokens("y")
+        assert _column(rows, "_input_source_x") == _input_source_info_tokens("x")
+        assert _column(rows, "_input_source_y") == _input_source_info_tokens("y")
 
     def test_operator_into_function(self, orchestrator: str):
         """A function fed through an operator stores each row's source-info tokens."""
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
         assert _column(
-            _tag_rows(job, "via_op"), "_source_x"
+            _tag_rows(job, "via_op"), "_input_source_x"
         ) == _input_source_info_tokens("x")
 
     def test_function_into_function(self, orchestrator: str):
         """A function fed by a function stores each upstream source-info token."""
         job = _job(InMemoryArrowDatabase())
         _run(job, orchestrator)
-        stored = _column(_tag_rows(job, "second"), "_source_z")
+        stored = _column(_tag_rows(job, "second"), "_input_source_z")
         expected = _output_source_info_tokens(job, "direct", "z")
         assert len(set(expected)) == 3
         assert stored == expected
@@ -227,7 +230,7 @@ class TestStoreWrittenBeforeFix:
             _run(old_job)
         before = {label: _tag_rows(old_job, label) for label in _FUNCTION_NODES}
         row_zero = _input_source_info_tokens("x")[0]
-        assert _column(before["direct"], "_source_x") == [row_zero] * 3
+        assert _column(before["direct"], "_input_source_x") == [row_zero] * 3
         assert sorted(CALLS) == sorted(["add_xy", "times_two", "add_one"] * 3)
 
         CALLS.clear()
@@ -244,11 +247,11 @@ class TestStoreWrittenBeforeFix:
         }
         for label in ("direct", "via_op"):
             assert (
-                _column(added[label], "_source_x")
+                _column(added[label], "_input_source_x")
                 == (_input_source_info_tokens("x")[1:])
             )
         assert (
-            _column(added["second"], "_source_z")
+            _column(added["second"], "_input_source_z")
             == (_output_source_info_tokens(new_job, "direct", "z")[1:])
         )
         # The run's own output carries correct source-info tokens downstream regardless.
@@ -280,7 +283,7 @@ class TestDropOnlyTagTables:
         return store, before
 
     def _drop_tag_table(self, tmp_path: Path, label: str) -> None:
-        """Delete the node's ``pdb_v2`` tag table on disk."""
+        """Delete the node's ``pdb_v3`` tag table on disk."""
         node = _function_node(_job(InMemoryArrowDatabase()), label)
         path = tmp_path.joinpath(
             _JOB, *node.node_identity_path, PIPELINE_DB_SCHEMA_VERSION
@@ -303,9 +306,13 @@ class TestDropOnlyTagTables:
 
         assert CALLS == []
         after = {label: _tag_rows(job, label) for label in _FUNCTION_NODES}
-        assert _column(after["direct"], "_source_x") == _input_source_info_tokens("x")
-        assert _column(after["via_op"], "_source_x") == _input_source_info_tokens("x")
-        assert len(set(_column(after["second"], "_source_z"))) == 3
+        assert _column(after["direct"], "_input_source_x") == _input_source_info_tokens(
+            "x"
+        )
+        assert _column(after["via_op"], "_input_source_x") == _input_source_info_tokens(
+            "x"
+        )
+        assert len(set(_column(after["second"], "_input_source_z"))) == 3
         for label in _FUNCTION_NODES:
             for old, new in zip(before[label], after[label], strict=True):
                 assert _ids(new) == _ids(old)
@@ -330,7 +337,7 @@ class TestDropOnlyTagTables:
 
         assert CALLS == []
         assert _column(
-            _tag_rows(job, "direct"), "_source_x"
+            _tag_rows(job, "direct"), "_input_source_x"
         ) == _input_source_info_tokens("x")
         for label in ("second", "via_op"):
             added = _corrected_instances(before[label], _tag_rows(job, label))

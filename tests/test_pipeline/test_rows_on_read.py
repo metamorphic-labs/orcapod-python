@@ -1352,11 +1352,11 @@ def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
     ]
     database = after._pipeline_database  # pyright: ignore[reportPrivateUsage]  # the stored rows
     database.flush()
-    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v2"]
+    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v3"]
     stored = database.get_all_records(path)
     assert stored is not None and stored.num_rows == 2
-    assert stored.schema.field("_source_x").type == _UNCONVERTIBLE
-    assert stored.column("_source_x").to_pylist() == [[None, [[]]], [None, [[]]]]
+    assert stored.schema.field("_input_source_x").type == _UNCONVERTIBLE
+    assert stored.column("_input_source_x").to_pylist() == [[None, [[]]], [None, [[]]]]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])

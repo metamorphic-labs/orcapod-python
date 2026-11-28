@@ -2,7 +2,7 @@
 
 Orcapod v0.3 writes the data context key ``std:v1:default`` into the column
 ``__data_context`` of every table it stores, and every table moved to a new layout
-(the last path component): ``pdb_v2``, ``rdb_v1``, ``tdb_v2``, ``odb_v2``, ``sdb_v1``.
+(the last path component): ``pdb_v3``, ``rdb_v1``, ``tdb_v2``, ``odb_v2``, ``sdb_v1``.
 
 - Rows of the current data context are the current entries. Rows of another data context
   in the same table are never returned or reused, are left unchanged, and are reported
@@ -205,7 +205,7 @@ def old_layout_path(path: tuple[str, ...]) -> tuple[str, ...]:
     no revision component (``rev1``, ITL-1259).
     """
     layout = path[-1]
-    renamed = {"pdb_v2": "pdb_v1", "rdb_v1": "rdb_v2", "tdb_v2": "tdb_v1"}
+    renamed = {"pdb_v3": "pdb_v1", "rdb_v1": "rdb_v2", "tdb_v2": "tdb_v1"}
     if layout == "rdb_v1":
         assert path[-2] == "rev1", path
         return path[:-2] + ("rdb_v2",)
@@ -340,7 +340,7 @@ def table_path(store: Store, layout: str) -> tuple[str, ...]:
     return path
 
 
-LAYOUTS = ("pdb_v2", "rdb_v1", "odb_v2", "sdb_v1", "tdb_v2")
+LAYOUTS = ("pdb_v3", "rdb_v1", "odb_v2", "sdb_v1", "tdb_v2")
 
 
 # ---------------------------------------------------------------------------
@@ -833,7 +833,7 @@ class TestRowsOfAnotherDataContext:
             for r in caplog.records
             if "another data context" in r.getMessage()
         ]
-        for layout in ("pdb_v2", "odb_v2"):
+        for layout in ("pdb_v3", "odb_v2"):
             path = "/".join(table_path(store, layout))
             (report,) = [r for r in reports if repr(path) in r]
             assert report.startswith("Skipped 2 rows of stored table")
@@ -1035,7 +1035,7 @@ class TestSideEffectFunctionNodes:
         assert snapshot(store) == before
         assert info.value.found_context == OTHER
         assert sorted(path[-1] for path in info.value.record_paths) == [
-            "pdb_v2",
+            "pdb_v3",
             "rdb_v1",
         ]
 
@@ -1468,7 +1468,7 @@ class TestStoredDataContexts:
         path = table_path(store, layout)
         assert stored_data_contexts(reopened(store), path) == {CURRENT: 2}
 
-    @pytest.mark.parametrize("layout", ["pdb_v2", "rdb_v1", "odb_v2", "sdb_v1"])
+    @pytest.mark.parametrize("layout", ["pdb_v3", "rdb_v1", "odb_v2", "sdb_v1"])
     def test_table_holding_two_data_contexts(
         self, new_store: Callable[[], Store], layout: str
     ):

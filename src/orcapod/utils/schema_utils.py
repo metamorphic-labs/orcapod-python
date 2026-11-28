@@ -901,6 +901,8 @@ def _column_role(
         return "tag"
     if name in system_tag_columns or name.startswith(constants.SYSTEM_TAG_PREFIX):
         return "system-tag"
+    if name.startswith(constants.INPUT_SOURCE_PREFIX):
+        return "input source-info"
     if name.startswith(constants.SOURCE_PREFIX):
         return "source-info"
     if name == constants.CONTEXT_KEY:
@@ -1043,22 +1045,23 @@ def require_names_not_system(names: Collection[str]) -> None:
     (``_tag_``) as a system tag, one that starts with the source-info prefix
     (``_source_``) as source info, and the context key column (``_context_key``)
     as the data context, so a tag or data column renamed to such a name stops
-    being one (ITL-1160). The meta prefix has its own check,
+    being one (ITL-1160). Function pipeline tables also reserve a prefix for
+    input source info. The meta prefix has its own check,
     ``require_names_not_meta``.
 
     Args:
         names: Tag or data column names.
 
     Raises:
-        InputValidationError: If a name starts with the system-tag or the
-            source-info prefix, or is the context key column. The message names
-            the column.
+        InputValidationError: If a name starts with a reserved prefix or is the
+            context key column. The message names the column.
     """
     from orcapod.system_constants import constants
 
     reserved_prefixes = {
         constants.SYSTEM_TAG_PREFIX: "system tags",
         constants.SOURCE_PREFIX: "source info",
+        constants.INPUT_SOURCE_PREFIX: "input source info",
     }
     for name in sorted(names):
         for prefix, kind in reserved_prefixes.items():

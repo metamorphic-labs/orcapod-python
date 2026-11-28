@@ -14,6 +14,11 @@ from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.types import NodeConfig
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import ArrowTableSource
+from orcapod.system_constants import (
+    PIPELINE_DB_SCHEMA_VERSION,
+    RESULT_DB_SCHEMA_VERSION,
+    constants,
+)
 
 
 @function_pod(output_keys=["x", "y", "w"])
@@ -162,14 +167,15 @@ def test_a_downstream_node_reuses_its_original_instances_and_records(mode: str) 
     [path] = [
         path
         for path in database.list_table_paths()
-        if path[1:] == (*consumer.node_identity_path, "pdb_v2")
+        if path[1:] == (*consumer.node_identity_path, PIPELINE_DB_SCHEMA_VERSION)
     ]
     stored = database.get_all_records(path)
     assert stored is not None
-    columns = ["subject", "_source_x", INSTANCE_ID_COL, RECORD_ID_COL]
+    input_token = constants.INPUT_SOURCE_PREFIX + "x"
+    columns = ["subject", input_token, INSTANCE_ID_COL, RECORD_ID_COL]
     original = stored.select(columns).sort_by("subject")
     delivered = _node(first, "collide").as_table(columns={"source": True})
-    assert original.column("_source_x").equals(
+    assert original.column(input_token).equals(
         delivered.sort_by("subject").column("_source_x")
     )
 
@@ -182,3 +188,57 @@ def test_a_downstream_node_reuses_its_original_instances_and_records(mode: str) 
     stored = database.get_all_records(path)
     assert stored is not None
     assert stored.select(columns).sort_by("subject").equals(original)
+
+
+def test_previous_pipeline_layout_is_reported_and_left_intact(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database = InMemoryArrowDatabase()
+    first = _job(database)
+    _run(first, "sync")
+    [path] = [
+        path
+        for path in database.list_table_paths()
+        if path[-1] == PIPELINE_DB_SCHEMA_VERSION
+    ]
+    old_path = (*path[:-1], "pdb_v2")
+    assert old_path != path
+    records = database.get_all_records(path)
+    assert records is not None
+    previous = records.rename_columns(
+        [
+            constants.SOURCE_PREFIX + name.removeprefix(constants.INPUT_SOURCE_PREFIX)
+            if name.startswith(constants.INPUT_SOURCE_PREFIX)
+            else name
+            for name in records.column_names
+        ]
+    )
+
+    old_database = InMemoryArrowDatabase()
+    old_database.add_records(old_path, previous, record_id_column=RECORD_ID_COL)
+    [result_path] = [
+        path
+        for path in database.list_table_paths()
+        if path[-1] == RESULT_DB_SCHEMA_VERSION
+    ]
+    results = database.get_all_records(
+        result_path, record_id_column=constants.DATA_RECORD_ID
+    )
+    assert results is not None
+    old_database.add_records(
+        result_path, results, record_id_column=constants.DATA_RECORD_ID
+    )
+    seeded = old_database.get_all_records(old_path)
+    assert seeded is not None
+    fresh = _job(old_database)
+    _run(fresh, "sync", load_only=True)
+    assert _node(fresh, "collide").get_all_records() is None
+    assert "/".join(old_path) in caplog.text
+    assert "older table layout" in caplog.text
+
+    _run(fresh, "sync")
+    current = old_database.get_all_records(path)
+    assert current is not None
+    assert current.column("__computed").to_pylist() == [False] * current.num_rows
+    old = old_database.get_all_records(old_path)
+    assert old is not None and old.equals(seeded)

@@ -137,7 +137,7 @@ print(double.pod.uri)
 # ('double', 'ba1e0a0db33c4ca8ffd67ba2b02ce05a00f0fd5b9d16ab8153cc540fd67e55be', 'v0', 'python.function.v1')
 pipeline_table = next(p for p in rule_store.list_sources() if "_result" not in p)
 print("/".join(pipeline_table))
-# my_pipeline/double/ba1e0a0db33c4ca8ffd67ba2b02ce05a00f0fd5b9d16ab8153cc540fd67e55be/v0/python.function.v1/schema:c5017a4872a8f16b99ae544571d5f0459d59cb001451bde11021825f4c2c020f/pdb_v2
+# my_pipeline/double/ba1e0a0db33c4ca8ffd67ba2b02ce05a00f0fd5b9d16ab8153cc540fd67e55be/v0/python.function.v1/schema:c5017a4872a8f16b99ae544571d5f0459d59cb001451bde11021825f4c2c020f/pdb_v3
 
 # Stored columns hold labelled hashes; the system-tag column name holds a bare digest.
 stored = rule_store.get_all_records(pipeline_table)
@@ -1261,7 +1261,7 @@ preimage = tag.as_table(columns={"system_tags": True})
 
 | Field | Value |
 |---|---|
-| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order (`data.source_info_table()`): one per data column, a data column with no token having a null token, the type of each column today: a null token is a `large_string` null whatever type its column declares; a non-null token of a row read from an Arrow table keeps the type that table declares for it (nullable field); a token given as a Python value has the type its value infers. A token column's type is fixed by the pipeline and is not meant to be taken from values; today a declared type is, in some places, inferred again from the value (`Data.as_table(columns={"source": True})` and so `_rows_to_table`, the row-built form, and `with_columns_of`), a stopgap that ITL-1491 removes. The pipeline row stores this same table (`FunctionJobNode._add_pipeline_record`), so a stored row gives its instance id again from its own columns |
+| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_input_source_*` columns of the input data in name order (`row_ids.input_source_info_table`, built from `data.source_info_table()`): one per data column, a data column with no token having a null token, the type of each column today: a null token is a `large_string` null whatever type its column declares; a non-null token of a row read from an Arrow table keeps the type that table declares for it (nullable field); a token given as a Python value has the type its value infers. A token column's type is fixed by the pipeline and is not meant to be taken from values; today a declared type is, in some places, inferred again from the value (`Data.as_table(columns={"source": True})` and so `_rows_to_table`, the row-built form, and `with_columns_of`), a stopgap that ITL-1491 removes. The pipeline row stores this same table (`FunctionJobNode._add_pipeline_record`), so a stored row gives its instance id again from its own columns |
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage)` |
 | **Output format** | `ContentHash`; stored in `__pipeline_instance_id` as `b"{method}:{digest}"` |
 | **Uniqueness guarantee** | Unique per `(entry, source-info tokens)`; the in-memory cache key and the lookup column of the pipeline table |
@@ -1870,7 +1870,7 @@ Every row Orcapod stores names its data context in the column `__data_context`:
 
 | Table | Layout (last path component) |
 |---|---|
-| Function-node pipeline table | `pdb_v2` |
+| Function-node pipeline table | `pdb_v3` |
 | Function result table | `rdb_v1`, after the revision of the data function type's record (`.../python.function.v1/rev1/rdb_v1`; see [Data function types](data-function-types.md)) |
 | Operator-node cache table | `odb_v2` |
 | Cached-source table | `sdb_v1` |
@@ -1959,7 +1959,7 @@ context_job.run()
 for path in sorted(context_store.list_sources()):
     print(path[-1], stored_data_contexts(context_store, path))
 # rdb_v1 {'std:v1:default': 2}
-# pdb_v2 {'std:v1:default': 2}
+# pdb_v3 {'std:v1:default': 2}
 ```
 
 ```python

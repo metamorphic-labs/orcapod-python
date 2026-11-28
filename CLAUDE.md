@@ -1005,7 +1005,7 @@ current data context are the current entries.
 
 | Table | Layout (last path component) | Constant |
 |---|---|---|
-| Function pipeline | `pdb_v2` | `PIPELINE_DB_SCHEMA_VERSION` |
+| Function pipeline | `pdb_v3` | `PIPELINE_DB_SCHEMA_VERSION` |
 | Function result | `rdb_v1` (after the type's revision, `rev1`) | `RESULT_DB_SCHEMA_VERSION` |
 | Side-effect log | `tdb_v2` | `TRACKING_DB_SCHEMA_VERSION` |
 | Operator cache | `odb_v2` | `OPERATOR_DB_SCHEMA_VERSION` |
@@ -1014,7 +1014,9 @@ current data context are the current entries.
 - Every layout marker started at `v1` for the first release, 0.4.0 (developer, November 18,
   2026, ITL-1259; 0.3.0 was withdrawn). The pipeline, side-effect log and operator cache
   layouts moved to `v2` before that release, with the three row ids (developer, November 25,
-  2026, ITL-1471; below, "Row ids"). A change to the common
+  2026, ITL-1471; below, "Row ids"). The function pipeline layout moved to `pdb_v3`
+  when its stored input-token columns became `_input_source_<column>` (ITL-1524).
+  A change to the common
   bookkeeping columns of a table kind moves its layout version, so the table gets a new path.
   Never add, rename or retype a stored column without it.
 - A function result table is at
@@ -1033,7 +1035,7 @@ current data context are the current entries.
     correct result for the same input? No: a new major. Yes: a new revision (the type's
     columns) or a new `rdb` version (the common columns). Components are delimited, never
     parsed out of one string; the major is not repeated.
-  - Pipeline tables carry no revision (`.../python.function.v1/schema:<pipeline hash>/pdb_v2`).
+  - Pipeline tables carry no revision (`.../python.function.v1/schema:<pipeline hash>/pdb_v3`).
     A saved job names the type and major only (`data_function_type_id`); the revision comes
     from the installed library's declaration (`declaration_for(type id)`).
 - A data function type's declaration (`PYTHON_FUNCTION`, beside its class in
@@ -1132,8 +1134,10 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   result in the result store by the input hash, calls nothing and writes no pipeline row
   (developer, November 26, 2026; `FunctionJobNode._empty_data_cache_hit` is the one place
   that holds that choice, to be reconsidered in ITL-1475).
-- The instance id reads a row's tokens through `DataProtocol.source_info_table()`: one column
-  per data column, a data column with no token having a null token. THE INTENDED RULE
+- The instance id reads a row's tokens through `row_ids.input_source_info_table`: one
+  `_input_source_<column>` per data column, with a null token when the column has no
+  token. That helper takes the fields and values from `DataProtocol.source_info_table()`.
+  Output tokens in result tables and streams use `_source_<column>` (ITL-1524). THE INTENDED RULE
   (developer, November 27, 2026): the type of every source-info token column is fixed by the
   pipeline, like every other column type, and is not meant to be taken from values: each
   source and operator determines its output token columns' types from its inputs' types, by

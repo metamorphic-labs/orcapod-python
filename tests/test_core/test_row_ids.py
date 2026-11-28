@@ -123,17 +123,17 @@ class TestInstanceId:
         preimage = row_ids.instance_id_preimage(entry, data)
         assert preimage.column_names == [
             "__pipeline_entry_id",
-            "_source_length",
-            "_source_note",
-            "_source_weight",
+            "_input_source_length",
+            "_input_source_note",
+            "_input_source_weight",
         ]
         assert preimage.schema.field("__pipeline_entry_id").type == pa.large_binary()
         assert preimage.to_pylist() == [
             {
                 "__pipeline_entry_id": entry.to_prefixed_digest(),
-                "_source_length": TOKENS["length"],
-                "_source_note": TOKENS["note"],
-                "_source_weight": TOKENS["weight"],
+                "_input_source_length": TOKENS["length"],
+                "_input_source_note": TOKENS["note"],
+                "_input_source_weight": TOKENS["weight"],
             }
         ]
 
@@ -144,7 +144,7 @@ class TestInstanceId:
             {
                 "__pipeline_entry_id": _binary(entry.to_prefixed_digest()),
                 **{
-                    f"_source_{name}": pa.array([TOKENS[name]], pa.large_string())
+                    f"_input_source_{name}": pa.array([TOKENS[name]], pa.large_string())
                     for name in sorted(TOKENS)
                 },
             }
@@ -285,10 +285,10 @@ class TestPlaceholder:
         by_hand = pa.table(
             {
                 "__pipeline_entry_id": _binary(entry.to_prefixed_digest()),
-                "_source_y": pa.array(
+                "_input_source_y": pa.array(
                     [f"{source}::EPHEMERAL_RESULT_GONE::y"], pa.large_string()
                 ),
-                "_source_z": pa.array(
+                "_input_source_z": pa.array(
                     [f"{source}::EPHEMERAL_RESULT_GONE::z"], pa.large_string()
                 ),
             }
@@ -427,9 +427,12 @@ class TestTokensAreReadAsTheRowCarriesThem:
             by_hand = pa.table(
                 {"__pipeline_entry_id": _binary(entry.to_prefixed_digest())}
             )
-            for name in ("_source_a", "_source_b"):
+            for name in ("a", "b"):
+                stream_name = constants.SOURCE_PREFIX + name
+                stored_name = constants.INPUT_SOURCE_PREFIX + name
                 by_hand = by_hand.append_column(
-                    own.schema.field(name), own.column(name)
+                    own.schema.field(stream_name).with_name(stored_name),
+                    own.column(stream_name),
                 )
             assert row_ids.instance_id(HASHER, tag, data) == HASHER.hash_table(by_hand)
             ids.add(row_ids.instance_id(HASHER, tag, data))
@@ -449,10 +452,10 @@ class TestTokensAreReadAsTheRowCarriesThem:
             )
             assert preimage.column_names == [
                 "__pipeline_entry_id",
-                "_source_a",
-                "_source_b",
+                "_input_source_a",
+                "_input_source_b",
             ]
-            assert preimage.schema.field("_source_a").type == self.NESTED
+            assert preimage.schema.field("_input_source_a").type == self.NESTED
             ids.add(row_ids.instance_id(HASHER, tag, data))
             if index < 2:
                 # Typing this token again from its value is what fails.
@@ -686,7 +689,7 @@ class TestARenameMovesTheToken:
                 row_ids.entry_id(HASHER, _tag(), renamed), renamed
             )
             for name, token in expected.items():
-                assert preimage.column(f"_source_{name}").to_pylist() == [token]
+                assert preimage.column(f"_input_source_{name}").to_pylist() == [token]
             ids.add(row_ids.instance_id(HASHER, _tag(), renamed))
             # Renaming back gives the first row's tokens again.
             back = renamed.rename({new: old for old, new in mapping.items()})

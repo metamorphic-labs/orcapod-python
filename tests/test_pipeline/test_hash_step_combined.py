@@ -123,7 +123,7 @@ class TestStoredPathsAndKeys:
         _ = _operator_job(store).run()
 
         paths = sorted(store.list_sources())
-        assert sorted(path[-1] for path in paths) == ["odb_v2", "pdb_v2", "rdb_v1"]
+        assert sorted(path[-1] for path in paths) == ["odb_v2", "pdb_v3", "rdb_v1"]
         for path in paths:
             for component in path:
                 assert "semantic_v" not in component, path
@@ -258,7 +258,7 @@ class TestSideEffectNodeChecksEveryRun:
         _ = job.run()  # nothing new in the database: runs, and delivers nothing again
         assert delivered == []
 
-        old_path = _add_table_written_before_v03(store, "pdb_v2", "pdb_v1")
+        old_path = _add_table_written_before_v03(store, "pdb_v3", "pdb_v1")
 
         job.nodes["notify"].clear_cache()
         with pytest.raises(SideEffectLogDataContextError) as info:

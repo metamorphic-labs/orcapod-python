@@ -228,7 +228,7 @@ def test_a_job_writes_its_result_and_pipeline_tables_at_the_declared_paths(
     # The pipeline table carries no revision.
     assert pipeline[0][-(len(uri) + 2) : -2] == uri[:-1] + ("python.function.v1",)
     assert pipeline[0][-2].startswith("schema:")
-    assert pipeline[0][-1] == PIPELINE_DB_SCHEMA_VERSION == "pdb_v2"
+    assert pipeline[0][-1] == PIPELINE_DB_SCHEMA_VERSION == "pdb_v3"
     assert "rev1" not in pipeline[0]
     assert _stored_columns(database, result[0]) == _expected_result_columns(
         PythonDataFunction(fn, output_keys=keys)

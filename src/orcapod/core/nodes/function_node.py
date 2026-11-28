@@ -138,7 +138,7 @@ _PIPELINE_RECORDING_FIELDS = (
 
 
 def _pipeline_meta_schema() -> pa.Schema:
-    """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
+    """The bookkeeping columns of a function node's pipeline record (``pdb_v3``).
 
     The record holds the tags, system tags and input source-info columns, then
     these. The instance id is the plain column a run looks a row up by, and the
@@ -434,9 +434,12 @@ class FunctionNodeBase(StreamBase):
                     f"{expected_data_schema}: {reason}"
                 )
 
+            output_keys = function_pod.data_function.output_data_schema.keys()
+            schema_utils.require_names_not_system(
+                {*incoming_tag_types, *incoming_data_types, *output_keys}
+            )
             schema_utils.require_output_keys_not_tags(
-                incoming_tag_types.keys(),
-                function_pod.data_function.output_data_schema.keys(),
+                incoming_tag_types.keys(), output_keys
             )
 
         self._input_stream = input_stream
@@ -1312,15 +1315,13 @@ def _joined_from_stored(
     matched: "pl.DataFrame",
     taginfo: "pa.Table",
     parts: Sequence[tuple[str, "pa.Table"]],
-    output_source_columns: set[str],
 ) -> "pa.Table":
     """Build the joined records from the stored tables, by the rows Polars matched.
 
     Pipeline columns come first, followed by result columns in order of first
     appearance across ``parts``. The result's copy of the record id is skipped.
-    Output tokens come from the result table under their original names.
-    Other overlaps take the suffix ``_right``. A column a part lacks is null
-    in that part's rows.
+    Overlaps take the suffix ``_right``. Input and output tokens already have
+    distinct names. A column a part lacks is null in that part's rows.
 
     Args:
         matched: The matched rows, in output order: a ``_TAGINFO_ROW`` column and,
@@ -1329,13 +1330,12 @@ def _joined_from_stored(
         taginfo: The stored pipeline table.
         parts: Per result table, in concatenation order: its row-number column in
             ``matched`` and the table.
-        output_source_columns: Token column names for the function's own outputs.
 
     Returns:
         The joined table, every value taken from the stored tables.
     """
     taginfo_rows = matched.get_column(_TAGINFO_ROW).to_arrow()
-    names = [name for name in taginfo.column_names if name not in output_source_columns]
+    names = list(taginfo.column_names)
     columns: list[Any] = [taginfo.column(name).take(taginfo_rows) for name in names]
     # Output name -> stored column name, per part.
     result_names: dict[str, str] = {}
@@ -1581,7 +1581,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         since the last run are found before anything is delivered (ITL-1408). Other
         nodes read their current tables the first time only.
 
-        A pipeline table at another layout than this version's (``pdb_v2``) was written
+        A pipeline table at another layout than this version's (``pdb_v3``) was written
         by another version of Orcapod: its rows are not read as results and are left
         unchanged, and their number is reported (ITL-944). Such tables are looked for
         at this node's own path and, because the hashes in a path can differ between
@@ -3274,7 +3274,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # (``row_ids.instance_id_preimage`` takes the same table): a stored row
         # gives its instance id again from its own columns, whatever their types
         # (ITL-1471). Never typed again from the token values.
-        input_source_table = input_data.source_info_table()
+        input_source_table = row_ids.input_source_info_table(input_data)
 
         # Build the meta columns table.
         meta_table = pa.Table.from_pydict(
@@ -3383,7 +3383,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._token_column_types = {
             field.name: arrow_utils.normalize_to_large_types(field.type, keep_null=True)
             for field in existing or ()
-            if field.name.startswith(constants.SOURCE_PREFIX)
+            if field.name.startswith(constants.INPUT_SOURCE_PREFIX)
         }
         self._pipeline_preflight_checked = True
 
@@ -3886,12 +3886,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             parts.append((_EPHEMERAL_RESULT_ROW, cast("pa.Table", eph_results)))
         if persistent_df.height > 0:
             parts.append((_RESULT_ROW, cast("pa.Table", results)))
-        output_source_columns = {
-            f"{constants.SOURCE_PREFIX}{key}"
-            for key in self.keys()[1]
-            if key not in data_tags
-        }
-        joined = _joined_from_stored(merged_df, taginfo, parts, output_source_columns)
+        joined = _joined_from_stored(merged_df, taginfo, parts)
         # The table is built from arrays, with no field flags: restore them from the
         # pipeline table in every case (its data-tag marker included), and from the
         # result table when one was read.
@@ -3902,6 +3897,21 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 if results_schema is None
                 else (taginfo_schema, results_schema)
             ),
+        )
+        # Only a fall-through data-tag keeps an input token in the output.
+        # Expose it under the usual stream prefix and discard other input tokens.
+        fall_through_tokens = {
+            constants.INPUT_SOURCE_PREFIX + name: constants.SOURCE_PREFIX + name
+            for name in data_tags
+        }
+        presented_columns = [
+            name
+            for name in joined.column_names
+            if not name.startswith(constants.INPUT_SOURCE_PREFIX)
+            or name in fall_through_tokens
+        ]
+        joined = joined.select(presented_columns).rename_columns(
+            [fall_through_tokens.get(name, name) for name in presented_columns]
         )
         # In memory, each row names its data context in the datagram context column.
         joined = joined.append_column(
@@ -3945,7 +3955,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         return {
             key: gone[key]
             if key in gone
-            else row.get(f"{constants.SOURCE_PREFIX}{key}")
+            else row.get(f"{constants.INPUT_SOURCE_PREFIX}{key}")
             for key in data_keys
         }
 
@@ -4000,7 +4010,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             c
             for c in fetched.taginfo_columns
             if not c.startswith(constants.META_PREFIX)
-            and not c.startswith(constants.SOURCE_PREFIX)
+            and not c.startswith(constants.INPUT_SOURCE_PREFIX)
             and not c.startswith(constants.SYSTEM_TAG_PREFIX)
             and c != RECORD_ID_COL
             and c != constants.NODE_CONTENT_HASH_COL

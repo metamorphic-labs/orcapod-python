@@ -159,7 +159,7 @@ def test_two_nodes_sharing_a_table_each_keep_their_row_of_a_shared_instance(
         assert stored is not None
         assert sorted(_values(stored, "total")) == TOTALS[session], session
 
-    (table_path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v2"]
+    (table_path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v3"]
     table = database.get_all_records(table_path, record_id_column=KEY)
     assert table is not None
     assert table.num_rows == 6
@@ -318,7 +318,7 @@ def test_a_trace_over_the_source_finds_the_record_of_the_rows_own_instance(
     assert stored is not None and stored.num_rows == 6
 
     # The stored instance id of every record id, read from the pipeline table.
-    (path,) = [p for p in database.list_sources() if p[-1] == "pdb_v2"]
+    (path,) = [p for p in database.list_sources() if p[-1] == "pdb_v3"]
     pipeline_rows = database.get_all_records(path)
     assert pipeline_rows is not None
     instance_of_record = {
@@ -544,7 +544,7 @@ def _token_stream(kind: str, session: str = "first") -> ArrowTableStream:
 
 def _pipeline_table(database: InMemoryArrowDatabase) -> pa.Table:
     database.flush()
-    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v2"]
+    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v3"]
     table = database.get_all_records(path)
     assert table is not None
     return table
@@ -583,7 +583,7 @@ def test_sessions_whose_null_tokens_are_typed_differently_share_a_table(
         assert sorted(_values(stored, "total")) == TOTALS[session]
     table = _pipeline_table(database)
     assert table.num_rows == 6
-    assert table.schema.field("_source_a").type == pa.large_string()
+    assert table.schema.field("_input_source_a").type == pa.large_string()
 
 
 @pytest.mark.parametrize("tokens", ["null_typed_list", "null_typed_string"])
@@ -601,8 +601,8 @@ def test_a_null_tokens_instance_id_does_not_follow_its_columns_type(
             preimage = row_ids.instance_id_preimage(
                 row_ids.entry_id(HASHER, tag, data), data
             )
-            assert preimage.schema.field("_source_a").type == pa.large_string()
-            assert preimage.column("_source_a").to_pylist() == [None]
+            assert preimage.schema.field("_input_source_a").type == pa.large_string()
+            assert preimage.column("_input_source_a").to_pylist() == [None]
     assert ids["null_typed_list"] == ids["null_typed_string"]
     assert len(set(ids[tokens])) == 3
 
@@ -656,7 +656,7 @@ def test_sessions_whose_tokens_differ_in_type_are_refused_naming_the_column(
     with pytest.raises((OrcapodDatabaseWriteError, ExceptionGroup)) as raised:
         _run_node(later, second, path)
     message = _refusal(raised.value)
-    assert "_source_a" in message
+    assert "_input_source_a" in message
     assert "large_string" in message and "large_list<" in message
     assert _pipeline_table(database).equals(before)
 
@@ -680,7 +680,7 @@ def test_a_session_mixing_null_and_list_tokens_in_one_column_is_refused(
     with pytest.raises((OrcapodDatabaseWriteError, ExceptionGroup)) as raised:
         _run_node(node, stream, path)
     message = _refusal(raised.value)
-    assert "_source_a" in message
+    assert "_input_source_a" in message
     assert "large_string" in message and "large_list<" in message
 
 
@@ -867,13 +867,15 @@ def test_both_routes_record_one_instance_per_row_in_a_shared_store(
         (path,) = [
             p
             for p in database.list_sources()
-            if p[-1] == "pdb_v2" and p[0] == "doubled"
+            if p[-1] == "pdb_v3" and p[0] == "doubled"
         ]
         table = database.get_all_records(path)
         assert table is not None
         assert table.num_rows == 3, (index, route)
-        assert table.schema.field("_source_d").type == pa.large_list(pa.large_string())
-        assert table.column("_source_e").null_count == 1
+        assert table.schema.field("_input_source_d").type == pa.large_list(
+            pa.large_string()
+        )
+        assert table.column("_input_source_e").null_count == 1
         stored.append(
             tuple(
                 sorted(
