@@ -1118,9 +1118,9 @@ class ConnectorArrowDatabase:
         if flush:
             self.flush()
         pairs = (
-            list(column_values.items())
+            list(cast(Mapping[str, Any], column_values).items())
             if isinstance(column_values, Mapping)
-            else list(column_values)
+            else list(cast(Collection[tuple[str, Any]], column_values))
         )
 
         if columns is None:
