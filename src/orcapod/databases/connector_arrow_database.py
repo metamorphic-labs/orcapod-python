@@ -939,6 +939,11 @@ class ConnectorArrowDatabase:
             pending = self._pending_batches[record_key]
             filtered = pending.filter(pc.field(self.RECORD_ID_COLUMN) == record_id)
             if filtered.num_rows > 0:
+                if self._sql_store is not None:
+                    full_path = self._path_prefix + record_path
+                    _ = self._find_committed_table(
+                        self._path_to_table_name(full_path), full_path
+                    )
                 return self._handle_record_id_column(filtered, record_id_column)
 
         # Check committed

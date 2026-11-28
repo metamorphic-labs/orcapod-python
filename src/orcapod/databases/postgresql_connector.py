@@ -274,6 +274,16 @@ def _coerce_pg_value(value: Any, arrow_type: "pa.DataType") -> Any:
     return value
 
 
+def _require_persistent_store_schema(schema: str, temporary: object) -> None:
+    """Refuse a store namespace that would disappear with a PostgreSQL session."""
+    # PostgreSQL's namespace checks omit the current session's temporary
+    # TOAST namespace, whose name uses this reserved system prefix.
+    if temporary or schema.startswith("pg_toast_temp_"):
+        raise OrcapodDatabaseError(
+            f"Cannot use temporary PostgreSQL schema {schema!r} for a connector store"
+        )
+
+
 def _resolve_column_type_lookup(
     query: str,
     connector: "PostgreSQLConnector",
@@ -460,11 +470,13 @@ class PostgreSQLConnector:
         ):
             _ = cur.execute(
                 """
-                SELECT ns.nspname, ns.oid
+                SELECT ns.nspname, ns.oid,
+                       ns.oid = pg_my_temp_schema() OR pg_is_other_temp_schema(ns.oid),
+                       rel.oid IS NOT NULL
                 FROM pg_catalog.pg_namespace AS ns
-                JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = ns.oid
-                WHERE ns.nspname = current_schema() AND rel.relname = %s
-                  AND rel.relkind = 'r'
+                LEFT JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = ns.oid
+                  AND rel.relname = %s AND rel.relkind = 'r'
+                WHERE ns.nspname = current_schema()
                 """,
                 (STORE_PATH_CATALOG,),
             )
@@ -472,6 +484,9 @@ class PostgreSQLConnector:
             if row is None:
                 return []
             schema = cast(str, row[0])
+            _require_persistent_store_schema(schema, row[2])
+            if not row[3]:
+                return []
             # Psycopg scans percent signs even inside quoted identifiers when
             # the statement also has bound parameters.
             catalog = pg_sql.Identifier(schema.replace("%", "%%"), STORE_PATH_CATALOG)
@@ -517,7 +532,8 @@ class PostgreSQLConnector:
                     # catalog does not exist yet. 0x4F524341 is the Orcapod lock key.
                     _ = cur.execute(
                         """
-                        SELECT nspname, pg_advisory_xact_lock(%s, oid::integer)
+                        SELECT nspname, oid = pg_my_temp_schema() OR pg_is_other_temp_schema(oid),
+                               pg_advisory_xact_lock(%s, oid::integer)
                         FROM pg_catalog.pg_namespace WHERE nspname = current_schema()
                         """,
                         (0x4F524341,),
@@ -526,6 +542,7 @@ class PostgreSQLConnector:
                     if location is None or location[0] is None:
                         raise OrcapodDatabaseError("PostgreSQL has no current schema")
                     schema = cast(str, location[0])
+                    _require_persistent_store_schema(schema, location[1])
                     catalog = pg_sql.Identifier(schema, STORE_PATH_CATALOG)
                     fields = pg_sql.SQL(STORE_PATH_CATALOG_FIELDS).format(
                         layout_version=pg_sql.Literal(STORE_PATH_LAYOUT_VERSION)

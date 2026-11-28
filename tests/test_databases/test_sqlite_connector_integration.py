@@ -73,14 +73,16 @@ class TestConnectorArrowDatabaseWithSQLite:
         with SQLiteConnector(location) as first, SQLiteConnector(location) as second:
             _check_pending_collision(first, second)
 
-    @pytest.mark.parametrize("operation", ["list", "read", "queue", "flush"])
+    @pytest.mark.parametrize(
+        "operation", ["list", "read", "pending_point", "queue", "flush"]
+    )
     def test_unsupported_catalog_layout_is_refused(self, operation: str) -> None:
         path = ("versioned",)
         one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
         with SQLiteConnector() as connector:
             db = ConnectorArrowDatabase(connector)
             db.add_record(path, b"id", one, flush=True)
-            if operation == "flush":
+            if operation in ("flush", "pending_point"):
                 db.add_record(path, b"id", two)
             conn = connector._require_open()
             _ = conn.execute("PRAGMA ignore_check_constraints=ON")
@@ -321,7 +323,11 @@ def _check_pending_collision(
     one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
     queued.add_record(pending, b"id", two)
     winner.add_record(committed, b"id", one, flush=True)
-    for check in (queued.list_table_paths, lambda: queued.flush_batch(pending)):
+    for check in (
+        queued.list_table_paths,
+        lambda: queued.get_record_by_id(pending, b"id"),
+        lambda: queued.flush_batch(pending),
+    ):
         with pytest.raises(OrcapodDatabaseError, match="name-part.*name:part"):
             check()
     rows = winner.get_all_records(committed)
@@ -335,6 +341,8 @@ def _check_catalog_operation(
         db.list_table_paths()
     elif operation == "read":
         db.get_all_records(path)
+    elif operation == "pending_point":
+        db.get_record_by_id(path, b"id")
     elif operation == "queue":
         db.add_record(path, b"id", table)
     else:

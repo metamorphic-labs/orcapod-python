@@ -745,9 +745,7 @@ def test_a_table_dropped_and_written_again_by_the_same_handle_takes_the_new_orde
 
 
 def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
-    """A point lookup of a queued row answers from memory, in the order the row is
-    queued, with no lookup of the stored table (as main): the stored table is not
-    even listed. Presentation order is a reader's business (ITL-1370)."""
+    """Check catalog ownership before returning a queued row in its queued order."""
     with open_database("SQLite", tmp_path) as db:
         rows = pa.table(
             {
@@ -759,10 +757,18 @@ def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
         db.add_records(PATH, rows, record_id_column="rid", flush=True)
         second = rows.set_column(0, "rid", pa.array([bytes([2])], pa.large_binary()))
         db.add_records(PATH, second, record_id_column="rid")
-        with patch.object(
-            db._connector, "get_store_table_paths", side_effect=AssertionError("listed")
+        with (
+            patch.object(
+                db._connector,
+                "get_store_table_paths",
+                wraps=db._connector.get_store_table_paths,
+            ) as catalog,
+            patch.object(
+                db._connector, "iter_batches", side_effect=AssertionError("read rows")
+            ),
         ):
             queued = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
+        catalog.assert_called_once()
         assert queued is not None
         assert queued.column_names == ["rid", "z", "a"]
         db.flush()

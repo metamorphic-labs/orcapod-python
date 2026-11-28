@@ -25,6 +25,7 @@ import datetime
 import os
 import uuid
 from collections.abc import Iterator
+from typing import cast
 
 import psycopg
 import pyarrow as pa
@@ -743,7 +744,9 @@ def test_catalog_uses_the_first_schema_on_the_search_path(
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize("operation", ["list", "read", "queue", "flush"])
+@pytest.mark.parametrize(
+    "operation", ["list", "read", "pending_point", "queue", "flush"]
+)
 def test_unsupported_catalog_layout_is_refused(
     connector: PostgreSQLConnector, operation: str
 ) -> None:
@@ -751,7 +754,7 @@ def test_unsupported_catalog_layout_is_refused(
     path = ("versioned",)
     one, two = pa.table({"value": [1]}), pa.table({"value": [2]})
     db.add_record(path, b"id", one, flush=True)
-    if operation == "flush":
+    if operation in ("flush", "pending_point"):
         db.add_record(path, b"id", two)
         connector._require_open().commit()
     catalog = sql.Identifier(STORE_PATH_CATALOG)
@@ -797,6 +800,41 @@ def test_store_writes_to_the_verified_schema_when_a_temp_table_shadows_its_name(
     )
     rows = db.get_all_records(path)
     assert rows is not None and rows.to_pylist() == [{"value": 2}]
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("operation", ["list", "queue", "flush"])
+@pytest.mark.parametrize("toast", [False, True], ids=["pg_temp", "temporary_toast"])
+def test_store_refuses_a_temporary_schema(
+    connector: PostgreSQLConnector, operation: str, toast: bool
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("temporary",)
+    data = pa.table({"value": [1]})
+    if operation == "flush":
+        db.add_record(path, b"id", data)
+    conn = connector._require_open()
+    _ = conn.execute("CREATE TEMP TABLE seed (value INTEGER)")
+    schema = "pg_temp"
+    if toast:
+        (temporary_schema,) = conn.execute(
+            "SELECT nspname FROM pg_catalog.pg_namespace WHERE oid = pg_my_temp_schema()"
+        ).fetchone()
+        schema = cast(str, temporary_schema).replace("pg_temp_", "pg_toast_temp_", 1)
+    _ = conn.execute(
+        sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema))
+    )
+    conn.commit()
+
+    with pytest.raises(OrcapodDatabaseError, match="temporary PostgreSQL schema"):
+        _check_catalog_operation(db, path, data, operation)
+
+    assert conn.execute(
+        """
+        SELECT relname FROM pg_catalog.pg_class
+        WHERE relnamespace = pg_my_temp_schema() AND relkind = 'r'
+        """
+    ).fetchall() == [("seed",)]
 
 
 @pytest.mark.postgres
