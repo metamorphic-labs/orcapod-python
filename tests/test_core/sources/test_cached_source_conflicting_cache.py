@@ -17,6 +17,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.config import HashingConfig, OrcapodConfig
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import CachedSourceChangedRowError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -59,7 +60,12 @@ def _reset() -> None:
 
 
 def _source(
-    rows: list[Row], arrangement: str = "as_declared", *, keyed: bool = True
+    rows: list[Row],
+    arrangement: str = "as_declared",
+    *,
+    keyed: bool = True,
+    extra: bool = False,
+    config: OrcapodConfig | None = None,
 ) -> Any:
     cells = {
         "subject": pa.array([r[0] for r in rows], pa.large_string()),
@@ -70,11 +76,16 @@ def _source(
     names = ARRANGEMENTS[arrangement]["table"]
     kwargs: dict[str, Any] = {"record_id_columns": KEYS} if keyed else {}
     table = pa.table({name: cells[name] for name in names})
+    if extra:
+        table = table.append_column("extra", pa.nulls(len(rows), pa.int32()))
     return ArrowTableSource(
-        table.cast(pa.schema([f.with_nullable(False) for f in table.schema])),
+        table.cast(
+            pa.schema([f.with_nullable(f.name == "extra") for f in table.schema])
+        ),
         tag_columns=ARRANGEMENTS[arrangement]["tags"],
         tag_only_columns=True,
         source_id="readings",
+        config=config,
         **kwargs,
     )
 
@@ -150,6 +161,56 @@ def test_every_read_of_a_cache_with_two_contents_for_a_record_id_is_refused(
     assert "2 record ids" in message
     assert '{"subject":"s1","session":2}, {"subject":"s2","session":1}' in message
     assert _stored(source, cache) == before
+
+
+@pytest.mark.parametrize("arrangement", list(ARRANGEMENTS))
+@pytest.mark.parametrize("read", ["head", "get_all_records"])
+@pytest.mark.parametrize("change", ["hash_length", "declared_schema"])
+def test_a_conflicting_cache_uses_its_stored_record_id_column(
+    arrangement: str, read: str, change: str
+) -> None:
+    cache = InMemoryArrowDatabase()
+    path = ("fixed",) if change == "declared_schema" else None
+    seed = _source(ROWS, arrangement).cached(cache, cache_path=path)
+    _ = seed.as_table()
+    write_outside_the_rule(_source(_changed(ROWS, ("s1", 2)), arrangement), cache, path)
+
+    config = (
+        OrcapodConfig(hashing=HashingConfig(schema_n_char=16))
+        if change == "hash_length"
+        else None
+    )
+    source = _source(
+        ROWS, arrangement, extra=change == "declared_schema", config=config
+    ).cached(cache, cache_path=path)
+    assert source.cache_path == seed.cache_path
+    before = _stored(source, cache)
+
+    with pytest.raises(CachedSourceChangedRowError, match="1 record id"):
+        READS[read](source)
+
+    assert _stored(source, cache) == before
+
+
+@pytest.mark.parametrize("arrangement", list(ARRANGEMENTS))
+def test_a_changed_delivery_compares_record_ids_across_declared_schemas(
+    tmp_path: Path, arrangement: str
+) -> None:
+    cache = DeltaTableDatabase(tmp_path)
+    path = ("fixed",)
+    seed = _source(ROWS[:1], arrangement).cached(cache, cache_path=path)
+    _ = seed.as_table()
+    before = _stored(seed, cache)
+    source = _source(_changed(ROWS, ("s1", 1)), arrangement, extra=True).cached(
+        cache, cache_path=path
+    )
+
+    with pytest.raises(
+        CachedSourceChangedRowError, match=r'\{"subject":"s1","session":1\}'
+    ):
+        source.as_table()
+
+    assert _stored(seed, cache) == before
 
 
 @pytest.mark.parametrize("arrangement", list(ARRANGEMENTS))

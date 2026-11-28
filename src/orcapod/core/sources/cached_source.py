@@ -577,15 +577,18 @@ class CachedSource(RootSource):
             return
         records = keep_rows_of_data_context(records, self.data_context_key)
         id_column = self._record_id_column_among(live_with_hash.schema)
-        if (
-            id_column is None
-            or id_column not in live_with_hash.column_names
-            or id_column not in records.column_names
-        ):
+        if id_column is None:
+            return
+        stored_id_column = (
+            id_column
+            if id_column in records.column_names
+            else self._record_id_column_among(records.schema)
+        )
+        if stored_id_column is None:
             return
         cached: dict[str, set[bytes | None]] = {}
         for record_id, record_hash in zip(
-            cast("list[str]", records.column(id_column).to_pylist()),
+            cast("list[str]", records.column(stored_id_column).to_pylist()),
             records.column(self.HASH_COLUMN_NAME).to_pylist(),
             strict=True,
         ):
@@ -618,11 +621,16 @@ class CachedSource(RootSource):
     def _record_id_column_among(self, schema: pa.Schema) -> str | None:
         """Find the generated record id without relying on stored column order."""
         declared = typed_zero_row_table(self._source)
+        declared_names: Sequence[str] = ()
         if declared is not None:
-            return _record_id_column(declared.column_names)
-        if not schema_requires_io(self._source, ColumnConfig(system_tags=True)):
+            declared_names = declared.column_names
+            record_id = _record_id_column(declared_names)
+            if record_id is None or record_id in schema.names:
+                return record_id
+        elif not schema_requires_io(self._source, ColumnConfig(system_tags=True)):
             declared_names = self._source.keys(columns={"system_tags": True})[0]
-            if record_id := _record_id_column(declared_names):
+            record_id = _record_id_column(declared_names)
+            if record_id is not None and record_id in schema.names:
                 return record_id
 
         from orcapod.core.sources.derived_source import DerivedSource
@@ -636,7 +644,13 @@ class CachedSource(RootSource):
             ):
                 return None
 
-        candidates = _paired_record_id_columns(schema.names)
+        # A different declaration can name the generated pair differently.
+        # Skip known custom names and use the full field name from this schema.
+        candidates = [
+            name
+            for name in _paired_record_id_columns(schema.names)
+            if name not in declared_names
+        ]
         if len(candidates) < 2:
             return candidates[0] if candidates else None
 
