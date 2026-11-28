@@ -203,3 +203,11 @@ def test_optional_logical_item_is_refused_at_construction():
     """The return checker must not silently bypass the ITL-1144 codec guard."""
     with pytest.raises(ValueError, match=r"Column 'y'.*ITL-1144"):
         make_pod(list[Path | None], [None])
+
+
+def test_an_iterable_cannot_bypass_set_output_validation():
+    """An iterable that Arrow can encode as a set is still the wrong output type."""
+    pod = make_pod(set[int], [None])
+    data = Data({"x": 1}, python_schema={"x": int})
+    with pytest.raises(OutputTypeError, match="Return a set"):
+        pod.pod.data_function.direct_call(data)
