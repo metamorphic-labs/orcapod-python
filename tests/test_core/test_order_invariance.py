@@ -279,6 +279,8 @@ def identity(stream: Any) -> dict[str, Any]:
     return {
         "content_hash": stream.content_hash().to_string(),
         "pipeline_hash": stream.pipeline_hash().to_string(),
+        "chain_content_hash": stream._chain_content_hash().to_string(),
+        "node_hash": stream.node_hash().to_string(),
         "system_tag_names": sorted(k for k in all_tags if k not in tag_keys),
         "output_schema": (
             sorted((k, repr(t)) for k, t in tag_schema.items()),
@@ -1125,6 +1127,8 @@ def _job(
         out[f"{label}.hashes"] = (
             node.content_hash().to_string(),
             node.pipeline_hash().to_string(),
+            node._chain_content_hash().to_string(),
+            node.node_hash().to_string(),
         )
         out[f"{label}.rows"] = row_identity(list(node.iter_data()))
     derived = job.nodes["pod" if pod else "join"].as_source()

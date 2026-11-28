@@ -74,6 +74,7 @@ from orcapod.types import ColumnConfig, ContentHash, Schema
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from orcapod.protocols.hashing_protocols import IdentityChains, IdentityWalkProtocol
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
 
 
@@ -1662,6 +1663,26 @@ class RowsOnRead:
         source = self._stream if self._stream is not None else self._node
         return getattr(source, "last_modified", None)
 
+    def _identity_chains(self, walk: IdentityWalkProtocol) -> IdentityChains:
+        """Use the stream this output describes without building its rows."""
+        return walk.visit(self._node)
+
+    def source_chain(self) -> ContentHash | None:
+        """Return the underlying node's source chain."""
+        return self._node.source_chain()
+
+    def name_chain(self) -> ContentHash:
+        """Return the underlying node's name chain."""
+        return self._node.name_chain()
+
+    def _chain_content_hash(self) -> ContentHash:
+        """Return the underlying node's chain-based content hash."""
+        return self._node._chain_content_hash()  # pyright: ignore[reportPrivateUsage]  # Transparent stream wrapper.
+
+    def node_hash(self) -> ContentHash:
+        """Return the underlying node's node hash."""
+        return self._node.node_hash()
+
     def __getattr__(self, name: str) -> Any:
         # Every other member (``join``, ``as_polars_df``, ...) is the built stream's.
         return getattr(self.built(), name)
@@ -1772,6 +1793,10 @@ class _RowsOfStream(ArrowTableStream):
             data_context=data_context,
         )
         self._input_pipeline_hash: ContentHash = pipeline_hash
+
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """Preserve the restored node's lineage even without its pod."""
+        return self.upstreams
 
     def pipeline_hash(
         self, hasher: SemanticHasherProtocol | None = None

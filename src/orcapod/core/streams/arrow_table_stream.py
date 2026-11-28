@@ -273,6 +273,10 @@ class ArrowTableStream(StreamBase):
             table, self._tag_columns, self.data_context.arrow_hasher
         )
 
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """A table without a producer hashes as a root."""
+        return self.upstreams if self.producer is not None else ()
+
     def pipeline_identity_structure(self) -> Any:
         if self._producer is None or not isinstance(
             self._producer, PipelineElementProtocol

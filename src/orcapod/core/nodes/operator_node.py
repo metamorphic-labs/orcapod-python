@@ -295,6 +295,10 @@ class OperatorNodeBase(StreamBase):
     def identity_structure(self) -> Any:
         return self.pipeline_identity_structure()
 
+    def _identity_leaf(self) -> None:
+        """An operator remains a computation when its pod is unavailable."""
+        return None
+
     def pipeline_identity_structure(self) -> Any:
         return (self._operator, self._operator.argument_symmetry(self._input_streams))
 
@@ -627,6 +631,14 @@ class OperatorNode(OperatorNodeBase):
     and serialized to disk via ``Pipeline.save()``.
     """
 
+    _saved_identity_inputs: tuple[StreamProtocol, ...] | None = None
+
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """Retain a restored blueprint node's inputs for its identity walk."""
+        if self._saved_identity_inputs is not None:
+            return self._saved_identity_inputs
+        return super()._identity_inputs()
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Raise ``PipelineJobRequiredError`` — blueprint nodes cannot produce data.
 
@@ -782,6 +794,7 @@ class OperatorNode(OperatorNodeBase):
         # From OperatorNodeBase
         node._operator = None
         node._input_streams = ()
+        node._saved_identity_inputs = tuple(input_streams)
         node.tracker_manager = DEFAULT_TRACKER_MANAGER
 
         # Descriptor metadata for read-only access

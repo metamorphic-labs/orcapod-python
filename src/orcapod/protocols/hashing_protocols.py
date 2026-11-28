@@ -3,12 +3,57 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from orcapod.types import ContentHash, PathLike, Schema
 
 if TYPE_CHECKING:
     import pyarrow as pa
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityChains:
+    """The three chains of one element. An unbound slot leaves sources absent."""
+
+    structure: ContentHash
+    sources: ContentHash | None
+    names: ContentHash
+
+
+class IdentityWalkProtocol(Protocol):
+    """One traversal with a common structural hasher and live slot bindings."""
+
+    hasher: SemanticHasherProtocol
+    unbound_slots: set[str]
+
+    def visit(self, element: IdentityChainProtocol) -> IdentityChains:
+        """Compute the element's chains or reuse them from this walk."""
+        ...
+
+
+class IdentityChainProtocol(Protocol):
+    """Identity accessors shared by streams, nodes and recorded invocations."""
+
+    def source_chain(self) -> ContentHash | None:
+        """Return the source chain, absent if any contributing slot is unbound."""
+        ...
+
+    def name_chain(self) -> ContentHash:
+        """Return the chain of source-slot names."""
+        ...
+
+    def _chain_content_hash(self) -> ContentHash:
+        """Combine structure and sources, raising for unbound slots."""
+        ...
+
+    def node_hash(self) -> ContentHash:
+        """Combine structure and slot names, independently of binding."""
+        ...
+
+    def _identity_chains(self, walk: IdentityWalkProtocol) -> IdentityChains:
+        """Compute the three chains together in an existing walk."""
+        ...
 
 
 @runtime_checkable

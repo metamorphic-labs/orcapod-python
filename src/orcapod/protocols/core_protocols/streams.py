@@ -13,7 +13,10 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from orcapod.protocols.core_protocols.datagrams import DataProtocol, TagProtocol
 from orcapod.protocols.core_protocols.traceable import TraceableProtocol
-from orcapod.protocols.hashing_protocols import PipelineElementProtocol
+from orcapod.protocols.hashing_protocols import (
+    IdentityChainProtocol,
+    PipelineElementProtocol,
+)
 from orcapod.types import ColumnConfig, Condition, Schema
 
 if TYPE_CHECKING:
@@ -80,7 +83,9 @@ class StreamViewProtocol(Protocol):
 
 
 @runtime_checkable
-class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
+class StreamProtocol(
+    TraceableProtocol, PipelineElementProtocol, IdentityChainProtocol, Protocol
+):
     """
     Base protocol for all streams in Orcapod.
 

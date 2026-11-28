@@ -988,6 +988,18 @@ class FunctionNode(FunctionNodeBase):
     and serialized to disk via ``Pipeline.save()``.
     """
 
+    _saved_identity_inputs: tuple[StreamProtocol, ...] | None = None
+
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """Retain a restored blueprint node's input for its identity walk."""
+        if self._saved_identity_inputs is not None:
+            return self._saved_identity_inputs
+        return super()._identity_inputs()
+
+    def _identity_leaf(self) -> None:
+        """A blueprint function remains a computation when its pod is unavailable."""
+        return None
+
     def __init__(
         self,
         function_pod: FunctionPodProtocol,
@@ -1118,6 +1130,7 @@ class FunctionNode(FunctionNodeBase):
         node._function_pod = None
         node._data_function = None
         node._input_stream = None
+        node._saved_identity_inputs = () if input_stream is None else (input_stream,)
         node.tracker_manager = DEFAULT_TRACKER_MANAGER
 
         # Blueprint-level table caches
