@@ -1299,6 +1299,61 @@ def test_standalone_tied_join_keeps_custom_tags_with_ids(arity: int) -> None:
         assert tag.system_tags() == expected
 
 
+@pytest.mark.parametrize("arity", [2, 3])
+def test_standalone_tied_join_keeps_custom_field_metadata_by_position(
+    arity: int,
+) -> None:
+    inputs = []
+    for position in range(arity):
+        schema = pa.schema(
+            [
+                pa.field("k", pa.int64(), nullable=False),
+                pa.field("_tag_source_id", pa.large_string(), nullable=False),
+                pa.field("_tag_record_id", pa.large_string(), nullable=False),
+                pa.field(
+                    "_tag_rev",
+                    pa.large_string(),
+                    nullable=False,
+                    metadata={"owner": str(position)},
+                ),
+            ]
+        )
+        source_ids = [f"source-{position}", f"source-{arity - position - 1}"]
+        table = pa.Table.from_pydict(
+            {
+                "k": [0, 1],
+                "_tag_source_id": source_ids,
+                "_tag_record_id": [f"record-{source_id}" for source_id in source_ids],
+                "_tag_rev": ["shared", "shared"],
+            },
+            schema=schema,
+        )
+        inputs.append(ArrowTableStream(table, tag_columns=["k"], data_tags=["k"]))
+
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    columns = {"system_tags": True}
+    hasher = get_default_arrow_hasher()
+    for order in (inputs, inputs[::-1]):
+        join = Join()
+        result = join(*order)
+        expected = result.as_table(columns=columns).schema
+        assert {field.metadata[b"owner"] for field in expected if field.metadata} == {
+            str(position).encode() for position in range(arity)
+        }
+        async_output = async_rows(join, *order)
+        assert len(async_output) == 2
+        for (async_tag, async_data), (sync_tag, sync_data) in _paired(
+            list(result.iter_data()), async_output
+        ):
+            actual = async_tag.as_table(columns=columns).schema
+            assert actual.names == expected.names
+            for field in expected:
+                assert actual.field(field.name).equals(field, check_metadata=True)
+            assert entry_id(hasher, async_tag, async_data) == entry_id(
+                hasher, sync_tag, sync_data
+            )
+
+
 @pytest.mark.parametrize("arity", [2, 3, 4])
 @pytest.mark.parametrize("mode", ["sync", "rows", "batches"])
 @pytest.mark.parametrize("missing", ["_tag_source_id", "_tag_record_id", "_tag_rev"])

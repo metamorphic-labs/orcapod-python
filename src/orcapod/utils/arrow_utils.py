@@ -8,6 +8,7 @@ from typing import Any, TYPE_CHECKING, cast
 
 import pyarrow as pa
 
+from orcapod.hashing.schema_cleaner import clean_schema_for_hashing
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, SourceInfoValue
 
@@ -1868,8 +1869,10 @@ def sort_system_tag_values(
     Sort the (source_id, record_id) pairs per row within each provenance path. A printed path can include a shortened hash,
     so matching paths alone never make positions eligible to exchange IDs.
     Tied operands must declare the same system-tag names. Standalone row
-    channels pass a one-row table and keep custom fields on the same path
-    with their IDs, as in the original row sorter.
+    channels pass a one-row table and keep custom values on the same path
+    with their IDs, as in the original row sorter. A custom field keeps the
+    declaration at its output position when the declarations differ only
+    in metadata ignored by hashing.
     """
     assert not keep_custom_with_ids or table.num_rows == 1
     if not tied_positions:
@@ -1953,7 +1956,16 @@ def sort_system_tag_values(
                     if kind in (source_id_field, record_id_field):
                         continue
                     column = from_fields[kind]
-                    field = original.schema.field(column).with_name(name)
+                    source_field = original.schema.field(column).with_name(name)
+                    declared_field = original.schema.field(name)
+                    field = source_field
+                    if not source_field.equals(
+                        declared_field, check_metadata=True
+                    ) and clean_schema_for_hashing(pa.schema([source_field])).equals(
+                        clean_schema_for_hashing(pa.schema([declared_field])),
+                        check_metadata=True,
+                    ):
+                        field = declared_field
                     table = table.set_column(
                         table.schema.get_field_index(name), field, original[column]
                     )
