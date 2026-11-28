@@ -384,11 +384,12 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 deserialize_output_schema,
             )
 
+            node_type = descriptor.get("node_type")
             # Every node records its nullability (ITL-1043), and every function node
             # names its data-tags (ITL-1019).
             try:
                 require_nullability_records(descriptor)
-                if descriptor.get("node_type") == "function":
+                if node_type in ("function", "side_effect_function"):
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(
                         saved_fall_through_tags(descriptor)
                     )
@@ -416,7 +417,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     exc,
                 )
 
-            node_type = descriptor.get("node_type")
             source_config = descriptor.get("source_config") or {}
 
             if node_type == "source":
@@ -494,7 +494,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     )
                 reconstructed[node_hash] = node
 
-            elif node_type == "function":
+            elif node_type in ("function", "side_effect_function"):
                 up_hashes = upstream_map.get(node_hash, [])
                 upstream_node = reconstructed.get(up_hashes[0]) if up_hashes else None
                 node = FunctionNode.from_descriptor(

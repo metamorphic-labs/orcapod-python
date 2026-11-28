@@ -11,4 +11,6 @@ node over the same slot, even though one receives an invocation context.
 
 **Fix:** Use the same structure for the pod's content and pipeline identities. Include
 the context parameter name when configured so the pod and its downstream steps have
-distinct pipeline hashes.
+distinct pipeline hashes. When an existing completion table is at a different path under
+the same name, the stale-table check refuses delivery. A saved job restores its
+context-taking function nodes and reads their results using its recorded identities.
