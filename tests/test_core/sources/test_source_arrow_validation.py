@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 from collections.abc import Collection
 from pathlib import Path
 from typing import Any, TypedDict
+from uuid import UUID
 
 import deltalake
 import polars as pl
@@ -17,6 +17,7 @@ import pytest
 from orcapod import PipelineJob
 from orcapod.contexts.stored import with_data_context
 from orcapod.core.nodes.operator_node import OperatorJobNode
+from orcapod.core.row_ids import entry_id, instance_id, record_id
 from orcapod.core.sources import (
     ArrowTableSource,
     CachedSource,
@@ -120,6 +121,13 @@ def _source(
         deltalake.write_deltalake(path / "delta", table)
         return DeltaTableSource(path / "delta", **options)
     if kind == "sqlite":
+        if any(field.metadata for field in table.schema):
+            # SQLite cannot store Arrow field metadata. Supply it at the reader boundary.
+            monkeypatch.setattr(
+                "orcapod.core.sources.sqlite_table_source.SQLiteConnector",
+                lambda *_: _Connector(table),
+            )
+            return SQLiteTableSource(path / "rows.db", "rows", **options)
         file = path / "rows.db"
         types = {pa.string(): "TEXT", pa.int64(): "INTEGER"}
         cols = ", ".join(
@@ -213,6 +221,81 @@ def test_refuses_missing_custom_system_tag_columns(
 
 
 @pytest.mark.parametrize("kind", SOURCE_KINDS)
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {b"owner": b"research"},
+        {b"ARROW:extension:name": b"user.opaque", b"ARROW:extension:metadata": b""},
+    ],
+    ids=["ordinary", "extension"],
+)
+@pytest.mark.parametrize("names", [("extra",), ("extra", "rev"), ("rev", "extra")])
+def test_refuses_field_metadata_on_custom_system_tags(
+    kind: str,
+    metadata: dict[bytes, bytes],
+    names: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = _table(
+        pa.field("extra", pa.string(), nullable=False, metadata=metadata), ["a", "b"]
+    )
+    with pytest.raises(
+        InputValidationError, match=r"'extra'.*[Rr]emove.*field metadata"
+    ):
+        _source(kind, table, tmp_path, monkeypatch, system_tag_columns=names)
+
+
+def test_metadata_free_custom_system_tag_keeps_its_existing_row_ids() -> None:
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("g", pa.large_string(), False),
+            pa.field("x", pa.int64(), False),
+            pa.field("y", pa.large_string(), False),
+            pa.field("custom", pa.large_string(), False),
+        ]
+    )
+    raw = pa.Table.from_pydict(
+        {
+            "k": [1, 2],
+            "g": ["a", "b"],
+            "x": [3, 4],
+            "y": ["v", "w"],
+            "custom": ["p", "q"],
+        },
+        schema=schema,
+    )
+    source = ArrowTableSource(
+        raw,
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        system_tag_columns=["custom"],
+        source_id="meta",
+    )
+    hasher = source.data_context.arrow_hasher
+    actual = []
+    for tag, data in source.iter_data():
+        entry = entry_id(hasher, tag, data)
+        instance = instance_id(hasher, tag, data)
+        record = record_id(hasher, source.content_hash(), instance, UUID(int=40))
+        actual.append((entry.to_hex(), instance.to_hex(), record.to_hex()))
+    # The metadata-free source's hashes at 969ed093.
+    assert actual == [
+        (
+            "00000266ff2e58dd5c1cb957ac9ff249ae13e17918a263847f8e2f65d756f746b3f561",
+            "000002e9be964a36d499b5a1efe697c53d9b7e2e0103b79be7b0e2d489c1be8f7b8636",
+            "00000279f295215ecb6c92fc49cf4ec41df41327a43c3b351f0baac467b4f45a0f33d2",
+        ),
+        (
+            "0000029689a4a738cf93bbcfde75085dc43bac31570b0b368eff34b0f3d0fa427769c1",
+            "000002b6b64a14a2bb8cc662759a15839f8e4e730c89a03230bb8cac2f951fbe8f2002",
+            "000002fb3fc3affffe0e390dcfb5695db61b332eb2d38f83c2cfab5570c8a956371e18",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("kind", SOURCE_KINDS)
 def test_accepts_two_non_nullable_string_system_tags(
     kind: str,
     tmp_path: Path,
@@ -227,37 +310,6 @@ def test_accepts_two_non_nullable_string_system_tags(
         "_tag_extra": str,
         "_tag_rev": str,
     }
-
-
-@pytest.mark.parametrize("kind", [kind for kind in SOURCE_KINDS if kind != "spiral"])
-def test_source_rows_keep_the_streams_nullable_token_fields(
-    kind: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    table = _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"])
-    _assert_token_fields_match_rows(_source(kind, table, tmp_path, monkeypatch))
-
-
-def _assert_token_fields_match_rows(stream: StreamProtocol) -> None:
-    """Every row carries the source's token declarations."""
-    table = stream.as_table(columns={"source": True, "system_tags": True})
-    fields = {
-        field.name: field for field in table.schema if field.name.startswith("_source_")
-    }
-    assert fields and all(field.nullable for field in fields.values())
-
-    async def token_schemas() -> list[pa.Schema]:
-        return [
-            data.source_info_table().schema
-            async for _, data in stream.async_iter_data()
-        ]
-
-    sync = [data.source_info_table().schema for _, data in stream.iter_data()]
-    for schemas in (sync, asyncio.run(token_schemas())):
-        assert len(schemas) == table.num_rows
-        for schema in schemas:
-            assert {field.name: field for field in schema} == fields
 
 
 @pytest.mark.parametrize("kind", [kind for kind in SOURCE_KINDS if kind != "sqlite"])
@@ -424,10 +476,10 @@ def test_cached_source_refuses_an_existing_stored_null_column() -> None:
 
 
 @pytest.mark.parametrize("stored_flag", [False, True])
-def test_cached_source_presents_older_token_fields_as_nullable(
+def test_cached_source_presents_stored_token_fields_as_nullable(
     stored_flag: bool,
 ) -> None:
-    """A cache read presents nullable tokens even when its source is unavailable."""
+    """A cache read presents nullable token fields when its source is unavailable."""
     source = ArrowTableSource(
         _table(pa.field("extra", pa.string(), False), ["a", "b"]),
         tag_columns=TAGS,
@@ -534,11 +586,13 @@ def test_derived_source_checks_reserved_columns_before_filtering_storage(
         derived.as_table()
 
 
-def test_spiral_can_nominate_a_tag_copy_as_a_custom_system_tag(
+@pytest.mark.parametrize("metadata", [None, {b"owner": b"research"}])
+def test_spiral_validates_field_metadata_on_a_tag_copy_nominated_as_a_system_tag(
     tmp_path: Path,
+    metadata: dict[bytes, bytes] | None,
 ) -> None:
     schema = pa.schema(
-        [pa.field("k", pa.string(), False), pa.field("x", pa.int8(), False)]
+        [pa.field("k", pa.string(), False, metadata), pa.field("x", pa.int8(), False)]
     )
     table = pa.Table.from_pylist([{"k": "a", "x": 1}, {"k": "b", "x": 2}], schema)
     with fake_spiral_sdk.install(tmp_path):
@@ -547,14 +601,24 @@ def test_spiral_can_nominate_a_tag_copy_as_a_custom_system_tag(
         )
         external.write(table)
         external.record(schema)
-        source = SpiralDBTableSource(
-            "project",
-            "rows",
-            tag_columns=["k"],
-            tag_only_columns=True,
-            tags_as_data={"k": "copy"},
-            system_tag_columns=["copy"],
-        )
+
+        def build() -> SpiralDBTableSource:
+            return SpiralDBTableSource(
+                "project",
+                "rows",
+                tag_columns=["k"],
+                tag_only_columns=True,
+                tags_as_data={"k": "copy"},
+                system_tag_columns=["copy"],
+            )
+
+        if metadata is not None:
+            with pytest.raises(
+                InputValidationError, match=r"'copy'.*[Rr]emove.*field metadata"
+            ):
+                build()
+            return
+        source = build()
         columns = {"system_tags": True}
         assert source.as_table(columns=columns).column("_tag_copy").to_pylist() == [
             "a",
@@ -564,7 +628,6 @@ def test_spiral_can_nominate_a_tag_copy_as_a_custom_system_tag(
             "a",
             "b",
         ]
-        _assert_token_fields_match_rows(source)
 
 
 def test_spiral_validates_reserved_null_in_an_empty_scan_batch(

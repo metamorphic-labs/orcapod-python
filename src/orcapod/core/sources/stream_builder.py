@@ -36,24 +36,12 @@ if TYPE_CHECKING:
     from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
 
 
-def _contains_null_type(arrow_type: pa.DataType) -> bool:
-    """Return whether an Arrow type contains the Null type at any depth."""
-    if isinstance(arrow_type, pa.BaseExtensionType):
-        return _contains_null_type(arrow_type.storage_type)
-    if pa.types.is_dictionary(arrow_type):
-        return _contains_null_type(arrow_type.value_type)
-    return pa.types.is_null(arrow_type) or any(
-        _contains_null_type(arrow_type.field(i).type)
-        for i in range(arrow_type.num_fields)
-    )
-
-
 def require_supported_nullable_types(schema: pa.Schema) -> None:
     """Refuse source columns containing the Arrow Null type, even with zero rows."""
     columns = sorted(
         (field.name, str(field.type))
         for field in schema
-        if _contains_null_type(field.type)
+        if arrow_utils.contains_null_type(field.type)
     )
     if columns:
         names = ", ".join(f"{name!r} ({arrow_type})" for name, arrow_type in columns)
@@ -69,7 +57,7 @@ def require_custom_system_tags(
     *,
     schema: pa.Schema | None = None,
 ) -> None:
-    """Validate custom system-tag names, types, field flags and values.
+    """Validate custom system-tag declarations and values.
 
     Args:
         table: The source's Arrow columns.
@@ -78,7 +66,8 @@ def require_custom_system_tags(
 
     Raises:
         ValueError: If a nominated column is missing from the source table.
-        InputValidationError: If a nominated column is not non-nullable text.
+        InputValidationError: If a nominated column has field metadata, can
+            hold nulls or is not text.
     """
     if not names:
         return
@@ -91,6 +80,13 @@ def require_custom_system_tags(
         )
     for name in names:
         field = fields.field(name)
+        # ITL-1561: Re-evaluate which Arrow field metadata a system tag may carry.
+        # Extension metadata reaches the row hash now that rows use stream fields.
+        if field.metadata or table.schema.field(name).metadata:
+            raise InputValidationError(
+                f"Custom system-tag column {name!r} has Arrow field metadata. "
+                "Remove the field metadata before building the source."
+            )
         has_nulls = table.column(name).null_count > 0
         if (
             field.nullable
