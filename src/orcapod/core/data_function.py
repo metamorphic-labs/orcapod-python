@@ -41,6 +41,7 @@ from orcapod.protocols.core_protocols.executor import (
     PythonFunctionReturnCheckProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.semantic_types.float_narrowing import skip_float_checks
 from orcapod.semantic_types.output_conformance import (
     check_conformance,
     normalize_output_numbers,
@@ -1059,22 +1060,23 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                 python_schema=output_schema,
                 data_context=self.data_context,
             )
-        # Validate storage eagerly, but retain compatible user-class instances. Reading
-        # the table back here would rebind structural objects to the registry's class.
-        self._convert_outputs(output_data, output_schema)
-        normalized = {
-            key: typing.cast(
-                DataValue, normalize_output_numbers(value, output_schema[key])
+        with skip_float_checks():
+            # Validate storage eagerly, but retain compatible user-class instances. Reading
+            # the table back here would rebind structural objects to the registry's class.
+            self._convert_outputs(output_data, output_schema)
+            normalized = {
+                key: typing.cast(
+                    DataValue, normalize_output_numbers(value, output_schema[key])
+                )
+                for key, value in output_data.items()
+            }
+            return Data(
+                normalized,
+                python_schema=output_schema,
+                source_info=source_info,
+                record_uuid=new_record_uuid,
+                data_context=self.data_context,
             )
-            for key, value in output_data.items()
-        }
-        return Data(
-            normalized,
-            python_schema=output_schema,
-            source_info=source_info,
-            record_uuid=new_record_uuid,
-            data_context=self.data_context,
-        )
 
     def _output_container_error(
         self, error: UnexpectedOutputContainer

@@ -140,14 +140,18 @@ it, with no check of the value: one that `float32` cannot hold exactly is stored
 type and the declaration. Pass `numpy.float32` values, or declare the column `float`, to
 avoid it. `numpy.float32` values and
 an Arrow column that is already `float32` never warn. The same holds at every depth: a list
-element, a dict key or value, a set element, a field of a class. For a dict-backed
-datagram the warning can occur when dict keys are put in canonical order, including at
-construction, or when the Arrow table is built for `as_table()` or a hash. Updates and
-additions that use an already materialized table convert the affected columns immediately.
-One case is refused, because data would be lost: dict keys, or
-set elements, that differ as Python floats and are one `float32` value (`1e-50` and `2e-50`
-are both `0.0`) raise `CanonicalOrderError`, naming the column and both. A function's output
-has its own, stricter rule: a Python `float` returned for a declared `numpy.float32` is
+element, a dict key or value, a set element, or a field of a class. A dict-backed
+datagram can warn while putting dict keys in canonical order or when building its
+Arrow table for `as_table()` or hashing. Adding a column declared with a Python
+type can also warn. Once a datagram has an Arrow table, updates use its Arrow
+schema through the data context's table converter. For plain floats, that path
+has no Python float32 declaration for the diagnostic.
+
+With a Python declaration, distinct Python float keys or set elements that become
+one `float32` value (`1e-50` and `2e-50` both become `0.0`) raise
+`CanonicalOrderError`, naming the column and both inputs. This check leaves
+custom NumPy scalar conversion to Arrow. Function outputs follow the existing
+conformance rule. A Python `float` returned for a declared `numpy.float32` is
 rejected ([Function pods](function-pods.md)).
 
 Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A

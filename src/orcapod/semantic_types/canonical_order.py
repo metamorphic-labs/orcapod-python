@@ -21,11 +21,8 @@ The order is defined on storage values (what the converter produces):
 Keys or elements that cannot be ordered against each other, and two keys or elements
 with the same storage value, raise ``CanonicalOrderError``.
 
-A dict key and a set element are compared as they are stored (ITL-924): a Python
-``float`` key of a ``dict[np.float32, V]``, or element of a ``set[np.float32]``, is
-narrowed to ``float32`` first (``float_narrowing.stored_key_converter``), so ``1e-50``
-and ``2e-50``, both stored as ``0.0``, have the same storage value and raise, naming
-both.
+For a declared float32 input, a separate collision check compares rounded keys or
+elements (ITL-924). The original values still determine the order and go to Arrow.
 """
 
 from __future__ import annotations
@@ -40,20 +37,26 @@ from itertools import pairwise
 from typing import Any, TypeVar, cast, get_args, get_origin
 
 from orcapod.errors import CanonicalOrderError
-from orcapod.semantic_types.float_narrowing import stored_key_converter
+from orcapod.semantic_types.float_narrowing import (
+    checking_input_floats,
+    float32_key_check,
+)
 
 _T = TypeVar("_T")
 _V = TypeVar("_V")
 
 # A sort key: ``(0,)`` for None, ``(1, value)`` otherwise.
 _Rank = tuple[Any, ...]
+_KeyCheck = Callable[[object], float | None]
 
 
 class _DuplicateRank(CanonicalOrderError):
     """Two entries have the same rank, at their original positions."""
 
-    def __init__(self, first: int, second: int, stored: object) -> None:
-        super().__init__(f"duplicate key or set element: {stored!r}")
+    def __init__(
+        self, first: int, second: int, stored: object, payload: object
+    ) -> None:
+        super().__init__(f"duplicate key or set element: {payload!r}")
         self.positions: tuple[int, int] = first, second
         self.stored: object = stored
 
@@ -96,11 +99,14 @@ def _is_nan(value: object) -> bool:
     return False
 
 
-def _sorted_by_rank(items: list[tuple[_Rank, _T]]) -> list[_T]:
+def _sorted_by_rank(
+    items: list[tuple[_Rank, _T]], key_check: _KeyCheck | None = None
+) -> list[_T]:
     """Sort ``(rank, payload)`` pairs by rank and return the payloads.
 
     Args:
         items: The pairs to sort.
+        key_check: An optional projection used only to detect stored collisions.
 
     Raises:
         CanonicalOrderError: If two ranks cannot be compared.
@@ -113,7 +119,16 @@ def _sorted_by_rank(items: list[tuple[_Rank, _T]]) -> list[_T]:
     for first, second in pairwise(order):
         if items[first][0] == items[second][0]:
             stored: object = items[first][0][-1] if len(items[first][0]) > 1 else None
-            raise _DuplicateRank(first, second, stored)
+            raise _DuplicateRank(first, second, stored, items[second][1])
+    if key_check is not None and checking_input_floats():
+        seen: dict[float, int] = {}
+        for index in order:
+            rank, payload = items[index]
+            rounded = key_check(rank[-1]) if len(rank) > 1 else None
+            if rounded is not None:
+                first = seen.setdefault(rounded, index)
+                if first != index:
+                    raise _DuplicateRank(first, index, rounded, payload)
     return [items[index][1] for index in order]
 
 
@@ -121,6 +136,7 @@ def sort_dict_entries(
     value: dict[_T, _V],
     convert_key: Callable[[_T], object],
     convert_value: Callable[[_V], object],
+    key_check: _KeyCheck | None = None,
 ) -> list[dict[str, object]]:
     """Convert a dict into entries in canonical order of their stored keys.
 
@@ -128,6 +144,7 @@ def sort_dict_entries(
         value: The original dict.
         convert_key: Converts a key to its stored value.
         convert_value: Converts a value to its stored value.
+        key_check: An optional projection for stored-key collision detection.
 
     Returns:
         A list of entries ``{"key": ..., "value": ...}``, sorted by key.
@@ -141,19 +158,26 @@ def sort_dict_entries(
         for key, item in value.items()
     ]
     try:
-        return _sorted_by_rank([(_key_rank(entry["key"]), entry) for entry in entries])
+        return _sorted_by_rank(
+            [(_key_rank(entry["key"]), entry) for entry in entries], key_check
+        )
     except _DuplicateRank as exc:
+        if key_check is None or not checking_input_floats():
+            raise
         raise _collision_error(exc, value, "key") from exc
 
 
 def sort_set_elements(
-    elements: Collection[_T], convert: Callable[[_T], _T] | None = None
+    elements: Collection[_T],
+    convert: Callable[[_T], _T] | None = None,
+    key_check: _KeyCheck | None = None,
 ) -> list[_T]:
     """Return the storage elements of one set value in canonical order.
 
     Args:
         elements: The elements of a set.
         convert: Converts an element to its stored value, if it is still a Python value.
+        key_check: An optional projection for stored-element collision detection.
 
     Returns:
         A new list holding the same elements, sorted.
@@ -164,9 +188,11 @@ def sort_set_elements(
     """
     stored = elements if convert is None else [convert(element) for element in elements]
     try:
-        return _sorted_by_rank([(_key_rank(element), element) for element in stored])
+        return _sorted_by_rank(
+            [(_key_rank(element), element) for element in stored], key_check
+        )
     except _DuplicateRank as exc:
-        if convert is None:
+        if key_check is None or not checking_input_floats():
             raise
         raise _collision_error(exc, elements, "set element") from exc
 
@@ -207,7 +233,8 @@ def canonical_python_value(
         return canonical_python_value(value, non_none[0], key_converter)
     if origin is dict and len(args) == 2 and isinstance(value, dict):
         original = cast(dict[object, object], value)
-        to_storage = stored_key_converter(args[0], key_converter(args[0]))
+        to_storage = key_converter(args[0])
+        key_check = float32_key_check(args[0])
         items = [
             (
                 _key_rank(to_storage(k)),
@@ -216,8 +243,10 @@ def canonical_python_value(
             for k, v in original.items()
         ]
         try:
-            ordered = _sorted_by_rank(items)
+            ordered = _sorted_by_rank(items, key_check)
         except _DuplicateRank as exc:
+            if key_check is None or not checking_input_floats():
+                raise
             raise _collision_error(exc, original, "key") from exc
         unchanged = all(
             new_k is old_k and new_v is old_v

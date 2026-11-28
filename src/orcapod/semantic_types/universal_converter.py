@@ -33,14 +33,14 @@ from orcapod.errors import (
     SubMicrosecondDatetimeError,
     UnsupportedValueError,
 )
+from orcapod.semantic_types.canonical_order import sort_dict_entries, sort_set_elements
 from orcapod.semantic_types.float_narrowing import (
+    checked_float_columns,
+    checking_input_floats,
+    float32_key_check,
     narrower_float_width,
     noting_narrowed_floats,
-    stored_key_converter,
-)
-from orcapod.semantic_types.canonical_order import (
-    sort_dict_entries,
-    sort_set_elements,
+    skip_float_checks,
 )
 from orcapod.semantic_types.nested_none import (
     NestedNoneNotRestorableError,
@@ -1292,13 +1292,24 @@ class UniversalTypeConverter:
             for field_name, python_type in python_schema.items()
         }
 
+        checked = (
+            checked_float_columns(converters)
+            if checking_input_floats()
+            else frozenset()
+        )
         converted_data = []
         for record in python_dicts:
             converted_record = {}
             for field_name, converter in converters.items():
                 if field_name in record:
                     try:
-                        converted_record[field_name] = converter(record[field_name])
+                        if field_name in checked:
+                            with skip_float_checks():
+                                converted_record[field_name] = converter(
+                                    record[field_name]
+                                )
+                        else:
+                            converted_record[field_name] = converter(record[field_name])
                     except CanonicalOrderError as exc:
                         # The ordering rule cannot say which column it was in.
                         raise CanonicalOrderError(
@@ -1917,8 +1928,7 @@ class UniversalTypeConverter:
 
         elif origin is list:
             element_converter = self.get_python_to_arrow_converter(args[0])
-            # A set's elements are compared as they are stored (ITL-924).
-            set_element_converter = stored_key_converter(args[0], element_converter)
+            key_check = float32_key_check(args[0])
 
             def convert_list(value: Any) -> list[Any]:
                 """Convert list storage, preserving set order independence on updates."""
@@ -1927,17 +1937,14 @@ class UniversalTypeConverter:
                 # An Arrow schema remembers a plain set only as a list. Python set
                 # inputs still need canonical storage order; actual lists keep theirs.
                 if isinstance(value, set):
-                    return sort_set_elements(value, set_element_converter)
+                    return sort_set_elements(value, element_converter, key_check)
                 return [element_converter(item) for item in value]
 
             return convert_list
 
         elif origin is dict:
-            # Each key as it is stored, so keys that become one stored key are seen
-            # as duplicates (ITL-924).
-            key_converter = stored_key_converter(
-                args[0], self.get_python_to_arrow_converter(args[0])
-            )
+            key_converter = self.get_python_to_arrow_converter(args[0])
+            key_check = float32_key_check(args[0])
             value_converter = self.get_python_to_arrow_converter(args[1])
 
             # A dict is order independent: entries are stored in canonical key order
@@ -1945,23 +1952,22 @@ class UniversalTypeConverter:
             def convert_dict(value: Any) -> list[dict[str, Any]]:
                 if value is None:
                     raise _none_not_admitted(python_type)
-                return sort_dict_entries(value, key_converter, value_converter)
+                return sort_dict_entries(
+                    value, key_converter, value_converter, key_check
+                )
 
             return convert_dict
 
         elif origin is set:
             # A set has no order: elements are stored sorted, never in iteration
             # order, which depends on PYTHONHASHSEED for str and bytes (ITL-905).
-            # Each element as it is stored, so elements that become one stored
-            # element are seen as duplicates (ITL-924).
-            element_converter = stored_key_converter(
-                args[0], self.get_python_to_arrow_converter(args[0])
-            )
+            element_converter = self.get_python_to_arrow_converter(args[0])
+            key_check = float32_key_check(args[0])
 
             def convert_set(value: Any) -> list[Any]:
                 if value is None:
                     raise _none_not_admitted(python_type)
-                return sort_set_elements(value, element_converter)
+                return sort_set_elements(value, element_converter, key_check)
 
             return convert_set
 

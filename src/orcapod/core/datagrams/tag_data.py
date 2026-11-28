@@ -26,6 +26,7 @@ import pyarrow as pa
 from orcapod import contexts
 from orcapod.core.datagrams.datagram import Datagram, context_key_field
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
+from orcapod.semantic_types.float_narrowing import skip_float_checks
 from orcapod.system_constants import constants
 from orcapod.types import (
     ColumnConfig,
@@ -847,9 +848,15 @@ class Data(Datagram):
     ) -> Datagram:
         data = self.as_dict(columns=columns, all_info=all_info)
         python_schema = self.schema(columns=columns, all_info=all_info)
-        return Datagram(
-            data=data, python_schema=python_schema, data_context=self._data_context
+        checked = (
+            frozenset(self._data_table.column_names)
+            if self._data_table is not None
+            else self._checked_float_columns
         )
+        with skip_float_checks(checked):
+            return Datagram(
+                data=data, python_schema=python_schema, data_context=self._data_context
+            )
 
     def with_columns_of(self, other: "DataProtocol", names: "Sequence[str]") -> Self:
         """Return a copy with ``other``'s columns ``names`` placed first (ITL-1023).
@@ -905,17 +912,6 @@ class Data(Datagram):
                 **self._ensure_python_schema(),
             }
         )
-        if isinstance(other, Datagram):
-            new_p._declared_data_types = Schema(
-                {
-                    **{
-                        name: other._declared_data_types[name]
-                        for name in names
-                        if name in other._declared_data_types
-                    },
-                    **self._declared_data_types,
-                }
-            )
         new_p._data_arrow_schema = None
         # The added columns' source info is ``other``'s; an entry this data holds for
         # one of them (it does not hold the column) does not override it.

@@ -37,13 +37,15 @@ from orcapod.errors import CanonicalOrderError
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.semantic_types.canonical_order import canonical_python_value
-from orcapod.semantic_types.float_narrowing import keep_float32_declaration
+from orcapod.semantic_types.float_narrowing import (
+    checked_float_columns,
+    skip_float_checks,
+)
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
 
 logger = logging.getLogger(__name__)
-_EMPTY_DECLARATIONS = Schema()
 
 
 def _data_and_meta_tables(table: pa.Table) -> tuple[pa.Table, pa.Table | None]:
@@ -190,18 +192,7 @@ class Datagram(ContentIdentifiableBase):
             if python_schema
             else inferred
         )
-        # Keep declarations independently of the Python schema and value caches.
-        self._declared_data_types = (
-            Schema(
-                {
-                    name: python_schema[name]
-                    for name in data_columns
-                    if name in python_schema
-                }
-            )
-            if python_schema
-            else _EMPTY_DECLARATIONS
-        )
+        self._checked_float_columns = checked_float_columns(data_columns)
         self._data_dict = self._canonical_dict_values(
             data_columns, self._data_python_schema
         )
@@ -227,13 +218,15 @@ class Datagram(ContentIdentifiableBase):
         (dataclass or pydantic fields) are left as given.
         """
         out: dict[str, DataValue] = {}
+        checked = checked_float_columns(columns)
         for name, value in columns.items():
             try:
-                out[name] = canonical_python_value(
-                    value,
-                    schema.get(name),
-                    self.converter.get_python_to_arrow_converter,
-                )
+                with skip_float_checks(None if name in checked else frozenset()):
+                    out[name] = canonical_python_value(
+                        value,
+                        schema.get(name),
+                        self.converter.get_python_to_arrow_converter,
+                    )
             except CanonicalOrderError as exc:
                 raise CanonicalOrderError(f"Column {name!r}: {exc}") from exc
         return out
@@ -286,9 +279,9 @@ class Datagram(ContentIdentifiableBase):
         self._datagram_uuid = record_uuid
 
         self._data_table = data_table
+        self._checked_float_columns = frozenset()
         self._data_dict = None
         self._data_python_schema = None  # computed lazily
-        self._declared_data_types = _EMPTY_DECLARATIONS
         self._data_arrow_schema = None  # computed lazily
 
         # Build meta table
@@ -424,10 +417,11 @@ class Datagram(ContentIdentifiableBase):
         """
         if self._data_table is None:
             assert self._data_dict is not None
-            self._data_table = self.converter.python_dicts_to_arrow_table(
-                [self._data_dict],
-                self._data_python_schema,
-            )
+            with skip_float_checks(self._checked_float_columns):
+                self._data_table = self.converter.python_dicts_to_arrow_table(
+                    [self._data_dict],
+                    self._data_python_schema,
+                )
         return self._data_table
 
     def _ensure_python_schema(self) -> Schema:
@@ -863,6 +857,11 @@ class Datagram(ContentIdentifiableBase):
                 if self._data_python_schema is not None and self._data_dict is not None
                 else None
             )
+            new_d._checked_float_columns = self._checked_float_columns.intersection(
+                column_names
+            )
+            new_d._data_arrow_schema = None
+            return new_d
         else:
             assert self._data_dict is not None
             missing = set(column_names) - set(self._data_dict.keys())
@@ -873,15 +872,11 @@ class Datagram(ContentIdentifiableBase):
             # In the order given, as documented and as the Arrow branch does.
             new_d._data_dict = {k: self._data_dict[k] for k in column_names}
             new_d._data_python_schema = Schema({k: schema[k] for k in column_names})
-        new_d._declared_data_types = Schema(
-            {
-                k: self._declared_data_types[k]
-                for k in column_names
-                if k in self._declared_data_types
-            }
-        )
-        new_d._data_arrow_schema = None
-        return new_d
+            new_d._checked_float_columns = self._checked_float_columns.intersection(
+                column_names
+            )
+            new_d._data_arrow_schema = None
+            return new_d
 
     def drop(self, *column_names: str, ignore_missing: bool = False) -> Self:
         """Return a copy without the given data columns.
@@ -927,6 +922,11 @@ class Datagram(ContentIdentifiableBase):
             else:
                 new_d._data_dict = None
                 new_d._data_python_schema = None
+            new_d._checked_float_columns = self._checked_float_columns.difference(
+                column_names
+            )
+            new_d._data_arrow_schema = None
+            return new_d
         else:
             assert self._data_dict is not None
             missing = set(column_names) - set(self._data_dict.keys())
@@ -945,15 +945,11 @@ class Datagram(ContentIdentifiableBase):
             new_d._data_python_schema = Schema(
                 {k: v for k, v in schema.items() if k in new_data}
             )
-        new_d._declared_data_types = Schema(
-            {
-                k: v
-                for k, v in self._declared_data_types.items()
-                if k not in column_names
-            }
-        )
-        new_d._data_arrow_schema = None
-        return new_d
+            new_d._checked_float_columns = self._checked_float_columns.difference(
+                column_names
+            )
+            new_d._data_arrow_schema = None
+            return new_d
 
     def rename(self, column_mapping: Mapping[str, str]) -> Self:
         """Return a copy with data columns renamed.
@@ -971,20 +967,13 @@ class Datagram(ContentIdentifiableBase):
         """
         if not column_mapping:
             return self
-        new_d = self.copy(include_cache=False)
-        renamed_from = {column_mapping.get(k, k): k for k in Datagram.keys(self)}
-        new_d._declared_data_types = Schema(
-            {
-                k: self._declared_data_types[old]
-                for k, old in renamed_from.items()
-                if old in self._declared_data_types
-            }
-        )
         if self._data_table is not None:
             new_names = [
                 column_mapping.get(k, k) for k in self._data_table.column_names
             ]
+            new_d = self.copy(include_cache=False)
             new_d._data_table = self._data_table.rename_columns(new_names)
+            new_d._checked_float_columns = frozenset()
             new_d._data_dict = None
             new_d._data_python_schema = None
             new_d._data_arrow_schema = None
@@ -992,9 +981,18 @@ class Datagram(ContentIdentifiableBase):
         else:
             assert self._data_dict is not None
             schema = self._ensure_python_schema()
+            new_d = self.copy(include_cache=False)
             new_d._data_dict = {
                 column_mapping.get(k, k): v for k, v in self._data_dict.items()
             }
+            # A rename can overwrite a column. Follow the same last value as the dict.
+            checked = {
+                column_mapping.get(k, k): k in self._checked_float_columns
+                for k in self._data_dict
+            }
+            new_d._checked_float_columns = frozenset(
+                k for k, keep in checked.items() if keep
+            )
             new_d._data_python_schema = Schema(
                 {column_mapping.get(k, k): v for k, v in schema.items()}
             )
@@ -1039,22 +1037,16 @@ class Datagram(ContentIdentifiableBase):
             sub_schema = arrow_utils.schema_select(
                 self._data_table.schema, list(updates.keys())
             )
-            conversion_types = dict(
-                self.converter.arrow_schema_to_python_schema(sub_schema)
+            update_table = self.converter.python_dicts_to_arrow_table(
+                [updates], arrow_schema=sub_schema
             )
-            for name in updates.keys() & self._declared_data_types.keys():
-                conversion_types[name] = keep_float32_declaration(
-                    conversion_types[name], self._declared_data_types[name]
-                )
-            records = self.converter.python_dicts_to_struct_dicts(
-                [updates], conversion_types
-            )
-            update_table = pa.Table.from_pylist(records, schema=sub_schema)
             new_d = self.copy(include_cache=False)
             new_d._data_table = arrow_utils.hstack_tables(
                 self._data_table.drop_columns(list(updates.keys())), update_table
             ).select(self._data_table.column_names)
+            new_d._checked_float_columns = frozenset()
             new_d._data_dict = None
+            new_d._data_python_schema = None
             new_d._data_arrow_schema = None
             return new_d
         else:
@@ -1065,6 +1057,9 @@ class Datagram(ContentIdentifiableBase):
                 updates, self._ensure_python_schema()
             )
             new_d = self.copy(include_cache=False)
+            new_d._checked_float_columns = self._checked_float_columns.difference(
+                updates
+            )
             new_d._data_dict = {**self._data_dict, **canonical_updates}
             new_d._data_table = None
             return new_d
@@ -1191,48 +1186,47 @@ class Datagram(ContentIdentifiableBase):
         has_arrow_types = column_types is not None and any(
             isinstance(t, (pa.DataType, pa.Field)) for t in column_types.values()
         )
-        python_types = {
-            k: t
-            for k, t in (column_types or {}).items()
-            if not isinstance(t, (pa.DataType, pa.Field))
-        }
-        new_d = self.copy(include_cache=False)
         if self._data_table is not None or has_arrow_types:
             # Arrow-native path whenever an Arrow type is known — the table is
             # loaded (even if the dict cache is too) or the caller declared an
             # Arrow type. Existing columns keep their Arrow fields (converted
             # from the Python schema if the table was not loaded); only the new
             # columns are typed (declared) or inferred (undeclared).
+            new_d = self.copy(include_cache=False)
             new_d._data_table = arrow_utils.hstack_tables(
                 self._ensure_data_table(),
                 self._new_columns_table(updates, column_types or {}),
             )
             new_d._data_dict = None
             new_d._data_python_schema = None
-            declared_names = updates.keys()
+            new_d._data_arrow_schema = None
+            return new_d
         else:
             assert self._data_dict is not None
             new_data = {**self._data_dict, **updates}
             schema = dict(self._ensure_python_schema())
-            schema.update(python_types)
+            if column_types:
+                # No Arrow types reach this branch (they take the Arrow path).
+                schema.update(
+                    {
+                        k: t
+                        for k, t in column_types.items()
+                        if not isinstance(t, (pa.DataType, pa.Field))
+                    }
+                )
             inferred = infer_python_schema_from_pylist_data([new_data])
             new_schema = Schema(
                 {k: schema.get(k, inferred.get(k, str)) for k in new_data}
             )
+            new_d = self.copy(include_cache=False)
             # New dict values are held in canonical key order, as at construction
             # (ITL-905); the caller's dicts are copied, not mutated.
-            new_d._data_dict = self._canonical_dict_values(new_data, new_schema)
+            with skip_float_checks(self._checked_float_columns):
+                new_d._data_dict = self._canonical_dict_values(new_data, new_schema)
             new_d._data_python_schema = new_schema
             new_d._data_table = None
-            declared_names = new_data.keys()
-        new_d._declared_data_types = Schema(
-            {
-                **self._declared_data_types,
-                **{k: t for k, t in python_types.items() if k in declared_names},
-            }
-        )
-        new_d._data_arrow_schema = None
-        return new_d
+            new_d._data_arrow_schema = None
+            return new_d
 
     # ------------------------------------------------------------------
     # 8. Utility Operations
@@ -1278,7 +1272,7 @@ class Datagram(ContentIdentifiableBase):
             else None
         )
         new_d._data_arrow_schema = self._data_arrow_schema
-        new_d._declared_data_types = self._declared_data_types
+        new_d._checked_float_columns = self._checked_float_columns
 
         # Meta — always dict
         new_d._meta = dict(self._meta)

@@ -7,13 +7,8 @@ cannot hold exactly is stored changed (``0.1`` as ``0.10000000149011612``, ``1e-
 ``orcapod.errors.ValueConversionWarning`` per process and declared type. Whether a
 value is narrowed is decided from its type and the declared type, never from its value.
 
-Dict keys and set elements are where narrowing can lose data: two that differ as
-Python floats can be one ``float32`` value. ``stored_key_converter`` gives a key or
-element as it is stored, so the duplicate check of ``canonical_order`` sees stored
-values.
-
-A leaf module: the function-output check (``output_conformance``) takes its
-float-narrowing predicate from here.
+Dict keys and set elements can collide when narrowing makes distinct inputs equal.
+The collision check preserves the legacy key order and the values passed to Arrow.
 """
 
 from __future__ import annotations
@@ -24,13 +19,14 @@ import threading
 import types
 import typing
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, cast, get_args, get_origin
 
 import numpy as np
 
 from orcapod.errors import ValueConversionWarning, type_text
-from orcapod.types import DataType
 from orcapod.utils.warning_utils import (
     error_filter_active,
     outside_orcapod_stacklevel,
@@ -46,6 +42,35 @@ _issued: set[type] = set()
 _issuing: set[type] = set()
 # Snapshot of the last filter list known to contain no applicable error action.
 _non_escalating_filters = warnings.filters[:0]
+# None excludes every column, while a set excludes only named columns.
+_float_check_exclusions: ContextVar[frozenset[str] | None] = ContextVar(
+    "float_check_exclusions", default=frozenset()
+)
+
+
+def checking_input_floats() -> bool:
+    """Whether the current value is eligible for float input diagnostics."""
+    return _float_check_exclusions.get() is not None
+
+
+def checked_float_columns(names: Iterable[str]) -> frozenset[str]:
+    """Find columns already validated by a function or stored as Arrow."""
+    excluded = _float_check_exclusions.get()
+    return frozenset(names) if excluded is None else excluded.intersection(names)
+
+
+@contextmanager
+def skip_float_checks(columns: frozenset[str] | None = None) -> Iterator[None]:
+    """Suppress input diagnostics for checked columns in the current conversion."""
+    prior = _float_check_exclusions.get()
+    if prior is None or columns == frozenset():
+        yield
+        return
+    token = _float_check_exclusions.set(None if columns is None else prior | columns)
+    try:
+        yield
+    finally:
+        _float_check_exclusions.reset(token)
 
 
 def _after_fork() -> None:
@@ -77,48 +102,6 @@ def narrows_float(value: object, declared_width: int) -> bool:
     if isinstance(value, np.floating):
         return np.dtype(type(value)).itemsize > declared_width
     return isinstance(value, float) and _PYTHON_FLOAT_WIDTH > declared_width
-
-
-def keep_float32_declaration(storage: DataType, declared: DataType) -> DataType:
-    """Restore declared float32 leaves in an Arrow-derived conversion type.
-
-    The Arrow-derived type controls every other conversion, including the
-    container shape, nullability and conversion of booleans to integers.
-    Registered classes already use their own field declarations.
-    """
-    if storage is float and declared is np.float32:
-        return np.float32
-    if storage == declared:
-        return storage
-
-    declared_origin = get_origin(declared)
-    declared_args = cast(tuple[DataType, ...], get_args(declared))
-    if declared_origin in (typing.Union, types.UnionType) and len(declared_args) == 2:  # pyright: ignore[reportDeprecated]  # detects Optional[T]
-        if type(None) in declared_args:
-            inner = next(arg for arg in declared_args if arg is not type(None))
-            return keep_float32_declaration(storage, inner)
-
-    storage_origin = get_origin(storage)
-    storage_args = cast(tuple[DataType, ...], get_args(storage))
-    if storage_origin in (typing.Union, types.UnionType) and len(storage_args) == 2:  # pyright: ignore[reportDeprecated]  # detects Optional[T]
-        if type(None) in storage_args:
-            inner = next(arg for arg in storage_args if arg is not type(None))
-            return keep_float32_declaration(inner, declared) | None
-
-    if (
-        storage_origin is declared_origin
-        and storage_origin in (dict, list, set, tuple)
-        and len(storage_args) == len(declared_args)
-    ):
-        args = tuple(
-            keep_float32_declaration(base, annotation)
-            for base, annotation in zip(storage_args, declared_args)
-        )
-        if args != storage_args:
-            return cast(
-                DataType, cast(object, types.GenericAlias(storage_origin, args))
-            )
-    return storage
 
 
 def narrower_float_width(python_type: object) -> int | None:
@@ -198,6 +181,7 @@ def noting_narrowed_floats(declared: type, width: int) -> Callable[[Any], Any]:
         if (
             type(value) is not declared
             and (declared not in _issued or warnings.filters != _non_escalating_filters)
+            and checking_input_floats()
             and narrows_float(value, width)
         ):
             _warn_narrowing(declared, message)
@@ -206,46 +190,35 @@ def noting_narrowed_floats(declared: type, width: int) -> Callable[[Any], Any]:
     return convert
 
 
-def stored_key_converter(
-    key_type: object, convert: Callable[[Any], Any]
-) -> Callable[[Any], Any]:
-    """Return a converter giving a dict key or set element as it is stored.
+def float32_key_check(
+    key_type: object,
+) -> Callable[[object], float | None] | None:
+    """Return a collision check for supported float32 keys and elements.
 
-    For a key type that is a narrower float, a wider float key is narrowed here as
-    Arrow narrows it, so two keys that become one stored key are seen as duplicates.
-    For every other key type ``convert`` is returned as it is.
-
-    Args:
-        key_type: The declared Python type of the keys or elements.
-        convert: The Python-to-storage converter of ``key_type``.
-
-    Returns:
-        The converter of a key to its stored value.
+    The rounded value is only used to find collisions. Canonical ordering and
+    Arrow still receive the original key. Skip NumPy subclasses whose conversion
+    can invoke a user-defined method.
     """
     if get_origin(key_type) in (typing.Union, types.UnionType):  # pyright: ignore[reportDeprecated]  # detects Optional[T]
         members = cast(tuple[object, ...], get_args(key_type))
         non_none = [member for member in members if member is not type(None)]
         if len(non_none) == 1 and len(members) == 2:
             key_type = non_none[0]
-    width = narrower_float_width(key_type)
-    if width is None:
-        return convert
-    declared: type[np.floating[Any]] = key_type  # pyright: ignore[reportAssignmentType]  # narrower_float_width checked it
+    if key_type is not np.float32:
+        return None
+    return _float32_key
 
-    def to_stored_key(key: Any) -> Any:
-        key = convert(key)
-        if type(key) is not declared and narrows_float(key, width):
-            # Arrow reads a Python float's payload directly, even for a
-            # subclass overriding __float__.
-            if isinstance(key, float):
-                key = float.__float__(key)
-            # A value too large becomes an infinity, as in Arrow; NumPy's overflow
-            # warning would be a second report of the same narrowing.
-            with np.errstate(over="ignore"):
-                return declared(key)
-        return key
 
-    return to_stored_key
+def _float32_key(key: object) -> float | None:
+    if isinstance(key, float):
+        # Arrow reads the payload of Python floats and their subclasses directly.
+        value = float.__float__(key)
+    elif type(key) in (np.float16, np.float32, np.longdouble):
+        value = float(cast(np.floating[Any], key))
+    else:
+        return None
+    with np.errstate(over="ignore"):
+        return float(np.float32(value))
 
 
 def reset_float_narrowing_warnings() -> None:
