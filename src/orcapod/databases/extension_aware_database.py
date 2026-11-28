@@ -198,6 +198,11 @@ class ExtensionAwareDatabase:
         if isinstance(self._db, RecordValidatingDatabaseProtocol):
             self._db.validate_records(records)
 
+    @property
+    def _pending_commits(self) -> object | None:
+        """Forward the identity of the shared pending queue for write tracking."""
+        return getattr(self._db, "_pending_commits", None)
+
     def flush(self) -> None:
         self._db.flush()
 

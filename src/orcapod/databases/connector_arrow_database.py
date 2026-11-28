@@ -33,6 +33,7 @@ from orcapod.databases._sql_store import (
     require_store_table_owner,
     stored_path,
 )
+from orcapod.databases._write_tracking import note_queued_write
 from orcapod.databases.store_table_names import (
     STORE_TABLE_NAME_PREFIX,
     store_table_name,
@@ -674,6 +675,7 @@ class ConnectorArrowDatabase:
         self._pending_record_ids[record_key].update(
             cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
         )
+        note_queued_write(self._pending_commits)
 
         if flush:
             self.flush()

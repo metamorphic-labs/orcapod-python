@@ -7,7 +7,7 @@ import enum
 import logging
 import sys
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import orcapod
@@ -19,6 +19,7 @@ from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
+from orcapod.databases._write_tracking import collect_database_writes, database_queue
 from orcapod.errors import (
     OrcapodDatabaseError,
     OrcapodDatabaseReadError,
@@ -52,6 +53,7 @@ from orcapod.utils.database_errors import database_write_path, flush_best_effort
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from orcapod.databases._write_tracking import DatabaseWrites
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.pipeline.execution_context import ExecutionContext
     from orcapod.pipeline.graph import Pipeline
@@ -89,6 +91,8 @@ class _PreparedRun:
         pipeline_uri: ``<job name>@<snapshot hash>``, passed to the observer.
         pipeline_db: The job's view of the database.
         result_db: The job's function-result view of the database.
+        owned_queues: The pending queues already covered by the job's commit.
+        pending_node_writes: The node writes left for the job to commit.
         plan: What the run runs and holds (``plan_run``, ITL-1095).
         unchecked_sources: The sources the start-of-run check could not check
             (``check_sources``, ITL-1102).
@@ -101,6 +105,20 @@ class _PreparedRun:
     result_db: "ArrowDatabaseProtocol"
     plan: "RunPlan"
     unchecked_sources: tuple[str, ...]
+    owned_queues: tuple[object, ...]
+    pending_node_writes: "DatabaseWrites" = field(default_factory=dict)
+
+    def additional_databases(self) -> "Iterator[ArrowDatabaseProtocol]":
+        """Yield additional database objects with writes left for the job to commit."""
+        databases = {
+            identity: database
+            for (identity, _), database in self.pending_node_writes.items()
+        }
+        for database in databases.values():
+            queue = database_queue(database)
+            if all(queue is not owned for owned in self.owned_queues):
+                # Every node's write path supplies an ArrowDatabaseProtocol.
+                yield cast("ArrowDatabaseProtocol", database)
 
 
 def _with_counter(
@@ -177,6 +195,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         super().__init__(name=name, tracker_manager=tracker_manager)
         self._database = database
         self._result_database: "ArrowDatabaseProtocol | None" = result_database
+        self._node_database_views: "tuple[ArrowDatabaseProtocol, ...]" = ()
         # For a loaded job whose file names a separate result database that is not
         # available (it could not be rebuilt, or it was in memory) and none was given:
         # that saved configuration. Its function nodes get no database rather than the
@@ -667,6 +686,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 )
             elif isinstance(node, SideEffectJobNode):
                 node.attach_databases(pipeline_database=pipeline_db)
+        self._node_database_views = (pipeline_db, result_db)
 
     # ------------------------------------------------------------------
     # _iter_function_job_nodes() / apply_node_config()
@@ -1430,6 +1450,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             result_db=result_db,
             plan=plan,
             unchecked_sources=unchecked,
+            owned_queues=tuple(
+                database_queue(database)
+                for database in (pipeline_db, result_db, *self._node_database_views)
+            ),
         )
 
     @contextlib.contextmanager
@@ -1454,7 +1478,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             load_only: As for ``run``.
         """
         try:
-            with contextlib.ExitStack() as batched:
+            with (
+                collect_database_writes(prepared.pending_node_writes),
+                contextlib.ExitStack() as batched,
+            ):
                 # Function nodes commit every commit_every_rows rows (ITL-919).
                 for node in plan.to_run:
                     if isinstance(node, FunctionJobNode):
@@ -1477,6 +1504,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                         if self._result_database is not None
                         else ()
                     ),
+                    *prepared.additional_databases(),
                 )
             clear_run_rows(plan.to_run)
             raise
@@ -1535,6 +1563,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     # A separate result database (ITL-1408): records the result flush
                     # just released are still queued in the pipeline database.
                     database = pipeline_db
+                    database.flush()
+                # Node writes can target their own database objects (ITL-1383).
+                for database in prepared.additional_databases():
                     database.flush()
         except OrcapodDatabaseReadError as exc:
             # A stored table could not be read: report the read failure itself.

@@ -66,6 +66,7 @@ from orcapod.core.streams.view import (
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.core.nodes.staleness import RunHoldingNode
+from orcapod.databases._write_tracking import track_database_write
 from orcapod.errors import (
     InputValidationError,
     PipelineJobRequiredError,
@@ -1504,23 +1505,23 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         # deduplicates exact re-runs of the same node within a single run.
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.
+        path = self._stored_table_path
         try:
-            pipeline_database.add_records(
-                self._stored_table_path,
-                with_data_context(
-                    mark_data_tags(stored_table, stream_data_tags(self)),
-                    self.data_context_key,
-                ),
-                record_id_column=self.HASH_COLUMN_NAME,
-                skip_duplicates=True,
-            )
+            with track_database_write(pipeline_database, path, has_rows=n_rows > 0):
+                pipeline_database.add_records(
+                    path,
+                    with_data_context(
+                        mark_data_tags(stored_table, stream_data_tags(self)),
+                        self.data_context_key,
+                    ),
+                    record_id_column=self.HASH_COLUMN_NAME,
+                    skip_duplicates=True,
+                )
         except OrcapodDatabaseReadError:
             # The stored table could not be read: report the read failure itself.
             raise
         except Exception as exc:
-            raise OrcapodDatabaseWriteError(
-                self._stored_table_path, node_label=self.label
-            ) from exc
+            raise OrcapodDatabaseWriteError(path, node_label=self.label) from exc
 
         self._cached_output_table = output_table.drop(
             [self.HASH_COLUMN_NAME, constants.NODE_CONTENT_HASH_COL]

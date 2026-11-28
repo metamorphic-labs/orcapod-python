@@ -72,6 +72,10 @@ import orcapod.core.row_ids as row_ids
 from orcapod.core.data_function import output_source_info
 from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
 from orcapod.core.row_ids import INSTANCE_ID_COL, RECORD_ID_COL
+from orcapod.databases._write_tracking import (
+    finish_database_table_write,
+    track_database_write,
+)
 from orcapod.errors import (
     EphemeralResultMissingError,
     InputValidationError,
@@ -2438,6 +2442,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 flush=True,
                 table_flush=True,
             ) from exc
+        finish_database_table_write(database, path)
 
     def _commit_pending_writes(self) -> None:
         """Commit results before publishing any records that depend on them."""
@@ -2502,7 +2507,11 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if dependency is None
             else database.guard_record(path, row_key, dependency)
         )
-        with database.guard_table_schema(path, check), result_guard:
+        with (
+            database.guard_table_schema(path, check),
+            result_guard,
+            track_database_write(database, path),
+        ):
             database.add_record(path, row_key, record, skip_duplicates=True)
 
     def _row_processed(self) -> None:

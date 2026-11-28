@@ -38,6 +38,7 @@ from orcapod.core.streams.view import (
     StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
+from orcapod.databases._write_tracking import track_database_write
 from orcapod.errors import (
     OrcapodDatabaseError,
     OrcapodDatabaseReadError,
@@ -560,12 +561,13 @@ def _write_invocation_row(
         schema=_invocation_log_schema(),
     )
     try:
-        pipeline_database.add_record(
-            table_path,
-            entry_id,
-            with_data_context(record, data_context_key),
-            skip_duplicates=True,
-        )
+        with track_database_write(pipeline_database, table_path):
+            pipeline_database.add_record(
+                table_path,
+                entry_id,
+                with_data_context(record, data_context_key),
+                skip_duplicates=True,
+            )
     except OrcapodDatabaseReadError:
         # The stored table could not be read: report the read failure itself.
         raise

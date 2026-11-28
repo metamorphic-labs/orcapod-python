@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 from orcapod.core.data_function_types import StoredColumn
+from orcapod.databases._write_tracking import track_database_write
 from orcapod.errors import (
     InputValidationError,
     OrcapodDatabaseReadError,
@@ -477,18 +478,20 @@ class ResultCache:
         )
         data_table = with_data_context(data_table, data_context_key)
 
+        path = self._versioned_record_path
         try:
-            self._result_database.add_record(
-                self._versioned_record_path,
-                output_data.datagram_uuid.bytes,
-                data_table,
-                skip_duplicates=skip_duplicates,
-            )
+            with track_database_write(self._result_database, path):
+                self._result_database.add_record(
+                    path,
+                    output_data.datagram_uuid.bytes,
+                    data_table,
+                    skip_duplicates=skip_duplicates,
+                )
         except OrcapodDatabaseReadError:
             # The stored table could not be read: report the read failure itself.
             raise
         except Exception as exc:
-            raise OrcapodDatabaseWriteError(self._versioned_record_path) from exc
+            raise OrcapodDatabaseWriteError(path) from exc
         if self._auto_flush:
             try:
                 self._result_database.flush()
