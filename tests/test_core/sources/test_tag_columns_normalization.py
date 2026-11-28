@@ -13,6 +13,7 @@ import sqlite3
 from collections.abc import Iterator
 from typing import Any
 
+import polars as pl
 import pyarrow as pa
 import pytest
 
@@ -170,7 +171,7 @@ class TestDataFrameSourceTagColumns:
     def test_bare_string_same_as_list(self):
         from orcapod.core.sources import DataFrameSource
 
-        data = {"session_id": ["s1", "s2"], "value": [10, 20]}
+        data = pl.DataFrame({"session_id": ["s1", "s2"], "value": [10, 20]})
         src_str = DataFrameSource(
             data=data, tag_columns="session_id", tag_only_columns=True
         )
@@ -185,7 +186,7 @@ class TestDataFrameSourceTagColumns:
         from orcapod.core.sources import DataFrameSource
 
         src = DataFrameSource(
-            data={"session_id": ["s1"], "value": [10]},
+            data=pl.DataFrame({"session_id": ["s1"], "value": [10]}),
             tag_columns=("session_id",),
             tag_only_columns=True,
         )
@@ -197,7 +198,7 @@ class TestDataFrameSourceTagColumns:
 
         with pytest.raises(TypeError):
             DataFrameSource(
-                data={"session_id": ["s1"], "value": [1]},
+                data=pl.DataFrame({"session_id": ["s1"], "value": [1]}),
                 tag_columns=42,  # pyright: ignore[reportArgumentType]  # an invalid type on purpose
                 tag_only_columns=True,
             )

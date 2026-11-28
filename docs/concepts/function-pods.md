@@ -340,10 +340,9 @@ function:
 - The same rule holds for a `datetime` inside a list, a dict or a class field, and for the
   Python values of a `DictSource` or a `ListSource`. There it raises `NaiveDatetimeError`
   or `SubMicrosecondDatetimeError`, both `ValueError`s, and names the value. A
-  `DataFrameSource` given a plain dict or list is not covered yet: Polars converts the
-  values before Orcapod sees them, so a naive value is stored without a zone and
-  nanoseconds are dropped (ITL-1330). Over a real data frame, a `DataFrameSource` keeps
-  each timestamp column's unit and zone as given.
+  `DataFrameSource` takes data frames only: given a dict or a list of Python values it
+  raises `TypeError` and points to `DictSource` and `ListSource`. Over a data frame it
+  keeps each timestamp column's unit and zone as given.
 
 A function over a column without a zone therefore says which zone its wall times are in:
 

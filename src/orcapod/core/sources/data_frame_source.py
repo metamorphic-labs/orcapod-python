@@ -4,6 +4,7 @@ import logging
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow as pa
@@ -21,20 +22,84 @@ from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
-    from polars._typing import (
-        ArrowArrayExportable,
-        ArrowStreamExportable,
-        FrameInitTypes,
-    )
+    from polars._typing import ArrowArrayExportable, ArrowStreamExportable
 
 logger = logging.getLogger(__name__)
 
 
-class DataFrameSource(RootSource):
-    """A source backed by a Polars DataFrame (or any Polars-compatible data).
+def _exports_arrow(data: object) -> bool:
+    """Whether ``data`` exports an Arrow C stream or an Arrow C array."""
+    return hasattr(data, "__arrow_c_stream__") or hasattr(data, "__arrow_c_array__")
 
-    The DataFrame is converted to an Arrow table and enriched by
+
+def _type_name(kind: type) -> str:
+    """The name a refusal gives a type: ``dict``, ``polars.Series``, ``numpy.ndarray``.
+
+    A builtin is its own name; any other type is its top-level package and its
+    qualified name, since the module a library keeps a class in changes between its
+    versions.
+    """
+    package = kind.__module__.partition(".")[0]
+    if package == "builtins":
+        return kind.__qualname__
+    return f"{package}.{kind.__qualname__}"
+
+
+def _require_data_frame(data: object) -> None:
+    """Refuse an input that is not a data frame (ITL-1330).
+
+    A data frame is a pandas ``DataFrame``, a Polars ``DataFrame``, or an object that
+    exports an Arrow C stream or an Arrow C array (a pyarrow ``Table``, ``RecordBatch``
+    or ``RecordBatchReader``, a struct array, a frame of another library). Nothing else
+    is: a Polars ``Series`` exports an Arrow C stream and is refused all the same.
+
+    Nothing of ``data`` is read: the decision is made from its type.
+
+    Raises:
+        TypeError: When ``data`` is not a data frame. The message names the type given
+            and the remedy.
+    """
+    if isinstance(data, (pd.DataFrame, pl.DataFrame)):
+        return
+    if not isinstance(data, pl.Series) and _exports_arrow(data):
+        return
+    if isinstance(data, (pl.Series, pd.Series)):
+        remedy = "Make the series a data frame first: series.to_frame()."
+    elif isinstance(data, pl.LazyFrame):
+        remedy = "Collect the lazy frame first: frame.collect()."
+    elif isinstance(data, np.ndarray):
+        remedy = (
+            "Build a data frame that names the array's columns first: "
+            "pl.DataFrame(array, schema=[...])."
+        )
+    else:
+        remedy = (
+            "Python values go to DictSource (rows, as a list of dicts) or ListSource "
+            "(a list of values), which type them by Orcapod's rules. To have Polars "
+            "infer the types instead, build the data frame yourself and pass it: "
+            "DataFrameSource(pl.DataFrame(data), ...)."
+        )
+    raise TypeError(
+        "DataFrameSource accepts a data frame only (a pandas or Polars DataFrame, or "
+        "an object that exports an Arrow C stream or C array, such as a pyarrow "
+        f"Table); got {_type_name(type(data))}. {remedy}"
+    )
+
+
+class DataFrameSource(RootSource):
+    """A source backed by a data frame.
+
+    A data frame is a pandas ``DataFrame``, a Polars ``DataFrame``, or an object that
+    exports an Arrow C stream or an Arrow C array of a struct (a pyarrow ``Table``,
+    ``RecordBatch`` or ``RecordBatchReader``, a frame of another library). Its columns
+    keep the types they have. It is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
+
+    Data frames only (ITL-1330): a dict, a list or any other container of Python
+    values, a NumPy array, a Polars or pandas ``Series`` and a Polars ``LazyFrame``
+    are refused with a ``TypeError`` when the source is built. Python values go to
+    ``DictSource`` or ``ListSource``, which type them by Orcapod's rules; a caller who
+    wants Polars to infer the types passes ``pl.DataFrame(data)``.
 
     Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
@@ -58,7 +123,10 @@ class DataFrameSource(RootSource):
 
     def __init__(
         self,
-        data: FrameInitTypes,
+        data: pd.DataFrame
+        | pl.DataFrame
+        | ArrowStreamExportable
+        | ArrowArrayExportable,
         tag_columns: str | Collection[str] = (),
         system_tag_columns: Collection[str] = (),
         source_id: str | None = None,
@@ -69,14 +137,14 @@ class DataFrameSource(RootSource):
         hash_in_key_order: bool = False,
         **kwargs: Any,
     ) -> None:
+        # Before anything is built: only a data frame is accepted (ITL-1330).
+        _require_data_frame(data)
         super().__init__(source_id=source_id, **kwargs)
 
         arrow_system_tag_flags: dict[str, bool] = {}
         # Keep pandas and Polars on their native paths even if they export Arrow.
         # For Arrow inputs, materialize once before Polars drops field metadata.
-        if not isinstance(data, (pd.DataFrame, pl.DataFrame, pl.Series)) and (
-            hasattr(data, "__arrow_c_stream__") or hasattr(data, "__arrow_c_array__")
-        ):
+        if not isinstance(data, (pd.DataFrame, pl.DataFrame)):
             # Like Polars, prefer the array export when both are available.
             if hasattr(data, "__arrow_c_array__"):
                 batch = pa.record_batch(cast("ArrowArrayExportable", data))

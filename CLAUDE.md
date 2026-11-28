@@ -1487,8 +1487,13 @@ data. The rules:
 - `-> datetime` is an instant, stored as `timestamp[us, tz=UTC]` (developer, November 21,
   2026, ITL-1268; the mapping does not change in data context v1). Every Arrow timestamp
   type reads as `datetime`. One rule stores a Python `datetime` the type converter
-  converts (function outputs at any depth, `DictSource` and `ListSource` values; not a
-  `DataFrameSource` over a plain dict or list, ITL-1330): `universal_converter.storable_instant`.
+  converts (function outputs at any depth, `DictSource` and `ListSource` values): `universal_converter.storable_instant`. A
+  `DataFrameSource` takes data frames only (developer, November 28, 2026, ITL-1330: "we could
+  expand it in the future if we really need to"): a pandas or Polars `DataFrame`, or an
+  object exporting an Arrow C stream or C array, whose columns keep their types; a dict, a
+  list, any other container of Python values, a NumPy array, a `Series` and a `LazyFrame`
+  are refused when the source is built (`data_frame_source._require_data_frame`, a
+  `TypeError` naming the type and the remedy), never typed through Polars.
   An aware value of any zone is stored as its exact instant (an offset with a part below
   one second is converted to UTC first: Arrow drops that part; any other value is handed to
   Arrow as before, so no stored value moves); a naive value raises `NaiveDatetimeError` (strict policy); a

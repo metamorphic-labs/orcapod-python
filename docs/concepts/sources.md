@@ -29,9 +29,44 @@ hashing) and produces the final immutable stream.
 | `ArrowTableSource` | PyArrow `Table` | Accepts an Arrow table directly |
 | `DictSource` | `list[dict]` | Each dict becomes one (Tag, Data) pair |
 | `ListSource` | `list[Any]` | Each element stored under the data column given by `name`; the tag defaults to `element_index` |
-| `DataFrameSource` | Pandas or Polars `DataFrame` | Converts via Arrow |
+| `DataFrameSource` | Pandas or Polars `DataFrame`, or an Arrow-exporting object | Data frames only; columns keep their types |
 | `CSVSource` | File path (string) | Reads CSV into Arrow |
 | `DeltaTableSource` | Directory path | Reads Delta Lake table |
+
+`DataFrameSource` takes a data frame and nothing else: a pandas or Polars `DataFrame`, or an
+object that exports an Arrow C stream or C array (a pyarrow `Table`, `RecordBatch` or
+`RecordBatchReader`, a frame of another library). Its columns keep the types they have. A
+dict, a list or any other container of Python values is refused when the source is built, and
+so are a NumPy array, a pandas or Polars `Series` and a Polars `LazyFrame`: Python values go
+to `DictSource` or `ListSource`, which type them by Orcapod's rules (a naive `datetime` is
+refused there, and nanoseconds are never dropped). To have Polars infer the types instead,
+build the frame yourself and pass it.
+
+```python
+import polars as pl
+
+from orcapod.sources import DataFrameSource, DictSource
+
+columns = {"session": ["s1", "s2"], "trial": [1, 2], "rate": [0.5, 0.75]}
+try:
+    DataFrameSource(columns, tag_columns=["session", "trial"])
+except TypeError as error:
+    print(str(error).split(";")[1].split(".")[0].strip())
+# got dict
+
+rows = [
+    {"session": "s1", "trial": 1, "rate": 0.5},
+    {"session": "s2", "trial": 2, "rate": 0.75},
+]
+print(DictSource(rows, tag_columns=["session", "trial"], tag_only_columns=True).keys())
+# (('session', 'trial'), ('rate',))
+print(
+    DataFrameSource(
+        pl.DataFrame(columns), tag_columns=["session", "trial"], tag_only_columns=True
+    ).keys()
+)
+# (('session', 'trial'), ('rate',))
+```
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over

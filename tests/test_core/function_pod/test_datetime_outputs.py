@@ -641,13 +641,6 @@ def test_a_data_frame_source_keeps_its_timestamp_columns_as_given() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ITL-1330: DataFrameSource builds a Polars frame from plain Python values "
-        "before the converter sees them, so the datetime rule does not apply"
-    ),
-)
 @pytest.mark.parametrize(
     ("value", "error"),
     [
@@ -659,18 +652,25 @@ def test_a_data_frame_source_keeps_its_timestamp_columns_as_given() -> None:
     ],
     ids=["naive", "sub_microsecond"],
 )
-def test_a_data_frame_source_over_plain_values_follows_the_rule(
+def test_a_data_frame_source_refuses_plain_values_and_a_dict_source_follows_the_rule(
     value: Any, error: type[Exception]
 ) -> None:
-    """A DataFrameSource given a dict of plain values should refuse what a
-    DictSource declared ``datetime`` refuses; today it stores the value (ITL-1330)."""
+    """A DataFrameSource given a dict of plain values is refused (ITL-1330): Polars would
+    type the values before the datetime rule saw them. The rows go to a DictSource,
+    which applies the rule."""
     from orcapod.core.sources import DataFrameSource
 
-    with pytest.raises(error):
+    plain: Any = {"k": [1], "a": [value], "b": [value]}
+    with pytest.raises(TypeError, match=r"got dict.*DictSource"):
         _ = DataFrameSource(
-            {"k": [1], "a": [value], "b": [value]},
+            plain, tag_columns=["k"], tag_only_columns=True, source_id="plain"
+        )
+    with pytest.raises(error):
+        _ = DictSource(
+            [{"k": 1, "a": value, "b": value}],
             tag_columns=["k"],
             tag_only_columns=True,
+            data_schema={"k": int, "a": datetime, "b": datetime},
             source_id="plain",
         ).as_table()
 
