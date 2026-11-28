@@ -7,14 +7,17 @@ and real PipelineJob objects.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pyarrow as pa
 import pytest
 
 from orcapod.core.executors import LocalPythonFunctionExecutor
-from orcapod.core.function_pod import FunctionPod
+from orcapod.core.function_pod import FunctionPod, function_pod
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.sources.arrow_table_source import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import RowFailuresWarning
 from orcapod.pipeline import (
     AsyncPipelineOrchestrator,
     SyncPipelineOrchestrator,
@@ -110,6 +113,57 @@ class TestFailingDatasLogged:
             assert tb is not None
             assert "ValueError" in tb
             assert "boom" in tb
+
+
+@pytest.mark.parametrize(
+    "orchestrator_type", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+)
+@pytest.mark.parametrize(
+    "wrong_arity", [False, True], ids=["wrong-type", "wrong-arity"]
+)
+def test_rejected_output_logged_as_failure(
+    orchestrator_type: type[SyncPipelineOrchestrator] | type[AsyncPipelineOrchestrator],
+    wrong_arity: bool,
+) -> None:
+    """Log the validation failure alongside the captured function output."""
+    executor = LocalPythonFunctionExecutor()
+    if wrong_arity:
+
+        @function_pod(output_keys=("first", "second"), executor=executor)
+        def rejected_arity(x: int) -> tuple[int, int]:
+            print(f"returning output for {x}")
+            return cast("tuple[int, int]", (x,))
+
+        pod = rejected_arity.pod
+        error_text = "does not match number of values"
+    else:
+
+        @function_pod(output_keys="result", executor=executor)
+        def rejected_type(x: int) -> int:
+            print(f"returning output for {x}")
+            return cast(int, cast(object, str(x)))
+
+        pod = rejected_type.pod
+        error_text = "OutputTypeError"
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="test_rejected_output", database=database)
+    with job:
+        pod(_make_source(1), label="rejected")
+
+    observer = LoggingObserver(log_database=database)
+    with pytest.warns(RowFailuresWarning, match=error_text):
+        summary = job.run(orchestrator=orchestrator_type(), observer=observer)
+
+    assert summary.nodes["rejected"].computed == 0
+    assert summary.nodes["rejected"].failed == 1
+    logs = observer.get_logs()
+    assert logs is not None
+    assert logs.column("_log_success").to_pylist() == [False]
+    traceback_text = logs.column("_log_traceback")[0].as_py()
+    assert isinstance(traceback_text, str)
+    assert error_text in traceback_text
+    assert logs.column("_log_stdout_log").to_pylist() == ["returning output for 10\n"]
 
 
 # ---------------------------------------------------------------------------
