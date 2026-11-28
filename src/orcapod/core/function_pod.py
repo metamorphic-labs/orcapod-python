@@ -181,7 +181,8 @@ class _FunctionPodBase(TraceableBase):
         return self.data_function
 
     def pipeline_identity_structure(self) -> Any:
-        return self.data_function
+        """Include the parameter that receives the invocation context, when set."""
+        return self.identity_structure()
 
     def _build_invocation_context(
         self,

@@ -7,6 +7,8 @@ exercising @function_pod(ctx_arg=...) as the preferred side-effect pod entry poi
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import pyarrow as pa
 
@@ -34,6 +36,105 @@ def _make_pipeline_db():
     from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
 
     return InMemoryArrowDatabase()
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reverse_columns", [False, True])
+@pytest.mark.filterwarnings(
+    "ignore:Batch is provisional:orcapod.errors.ProvisionalHashWarning"
+)
+def test_context_parameter_distinguishes_job_branches(
+    async_path: bool, reverse_columns: bool
+) -> None:
+    """Two pods sharing a data function URI have separate identities and both run."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.operators import Batch
+    from orcapod.sources import DictSource
+    from orcapod.system_constants import constants
+
+    @function_pod(function_name="combine", output_keys=("sum", "difference"))
+    def plain(x: int, y: int) -> tuple[int, int]:
+        return x + y, x - y
+
+    @function_pod(
+        function_name="combine", output_keys=("sum", "difference"), ctx_arg="ctx"
+    )
+    def contextual(x: int, y: int, ctx: InvocationContext) -> tuple[int, int]:
+        assert isinstance(ctx, InvocationContext)
+        return x + y + 100, x - y
+
+    assert plain.pod.data_function.uri == contextual.pod.data_function.uri
+    assert plain.pod.pipeline_hash() != contextual.pod.pipeline_hash()
+
+    rows = [
+        {"id": 1, "x": 10, "group": "a", "y": 2},
+        {"id": 2, "x": 20, "group": "b", "y": 3},
+    ]
+    tags = ["id", "group"]
+    if reverse_columns:
+        rows = [dict(reversed(tuple(row.items()))) for row in rows]
+        tags.reverse()
+    source = DictSource(
+        rows, tag_columns=tags, tag_only_columns=True, source_id="input"
+    )
+    db = _make_pipeline_db()
+    with PipelineJob(name="context_identity", database=db) as job:
+        plain_stream = plain.pod(source, label="plain")
+        context_stream = contextual.pod(source, label="contextual")
+        Batch(batch_size=1).process(plain_stream, label="plain_batch")
+        Batch(batch_size=1).process(context_stream, label="context_batch")
+
+    plain_node = job.nodes["plain"]
+    context_node = job.nodes["contextual"]
+    assert plain_node.pipeline_hash() != context_node.pipeline_hash()
+    assert plain_node.content_hash() != context_node.content_hash()
+    assert plain_node.node_identity_path[-1] != context_node.node_identity_path[-1]
+
+    summary = asyncio.run(job.run_async()) if async_path else job.run()
+    assert summary.ok
+    stored_paths = {path[1:-1] for path in db.list_sources()}
+    assert {
+        plain_node.node_identity_path,
+        context_node.node_identity_path,
+    } <= stored_paths
+    assert sorted(plain_node.as_table()["sum"].to_pylist()) == [12, 23]
+    assert sorted(context_node.as_table()["sum"].to_pylist()) == [112, 123]
+
+    plain_batch = job.nodes["plain_batch"]
+    context_batch = job.nodes["context_batch"]
+    assert plain_batch.pipeline_hash() != context_batch.pipeline_hash()
+    plain_columns = {
+        col
+        for col in plain_batch.as_table(columns={"system_tags": True}).column_names
+        if col.startswith(constants.SYSTEM_TAG_PREFIX)
+    }
+    context_columns = {
+        col
+        for col in context_batch.as_table(columns={"system_tags": True}).column_names
+        if col.startswith(constants.SYSTEM_TAG_PREFIX)
+    }
+    assert len(plain_columns) == len(context_columns) == 2
+    assert plain_columns.isdisjoint(context_columns)
+
+
+def test_context_parameter_name_enters_pipeline_identity() -> None:
+    """Renaming the context parameter changes both hashes with the same pod URI."""
+    from orcapod import function_pod
+
+    @function_pod(function_name="combine", output_keys="sum", ctx_arg="ctx")
+    def original(x: int, y: int, ctx: InvocationContext) -> int:
+        assert isinstance(ctx, InvocationContext)
+        return x + y
+
+    @function_pod(function_name="combine", output_keys="sum", ctx_arg="invocation")
+    def renamed(x: int, y: int, invocation: InvocationContext) -> int:
+        assert isinstance(invocation, InvocationContext)
+        return x + y
+
+    assert original.pod.uri == renamed.pod.uri
+    assert original.pod.input_data_schema == renamed.pod.input_data_schema
+    assert original.pod.pipeline_hash() != renamed.pod.pipeline_hash()
+    assert original.pod.content_hash() != renamed.pod.content_hash()
 
 
 class TestCtxArgSchema:
