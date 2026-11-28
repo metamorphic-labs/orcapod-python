@@ -130,6 +130,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _source(**kwargs: Any) -> SpiralDBTableSource:
     """Return a source over ``ranges``, tags kept tag-only unless ``kwargs`` says."""
     kwargs.setdefault("tag_only_columns", True)
+    kwargs.setdefault("label", kwargs.get("source_id"))
     return SpiralDBTableSource(_PROJECT, "ranges", **kwargs)
 
 

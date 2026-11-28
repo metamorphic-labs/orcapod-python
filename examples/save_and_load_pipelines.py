@@ -15,12 +15,14 @@ source1 = DictSource(
     tag_columns=["id"],
     tag_only_columns=True,
     source_id="source1",
+    label="source1",
 )
 source2 = DictSource(
     [{"id": 0, "y": 3}, {"id": 2, "y": 6}, {"id": 4, "y": 9}],
     tag_columns=["id"],
     tag_only_columns=True,
     source_id="source2",
+    label="source2",
 )
 
 
