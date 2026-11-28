@@ -8,7 +8,6 @@ from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
     require_source_column_names,
-    require_source_row_names,
 )
 from orcapod.protocols.core_protocols import TagProtocol
 from orcapod.types import SchemaLike
@@ -111,9 +110,9 @@ class ListSource(RootSource):
             if hasattr(tag_fields, "as_dict"):
                 tag_fields = tag_fields.as_dict()
             row = dict(tag_fields)
+            require_source_column_names(row.keys())
             row[name] = element
             rows.append(row)
-        require_source_row_names(rows)
 
         tag_columns = (
             list(self._expected_tag_keys)

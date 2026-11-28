@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import datetime
 import json
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -82,20 +82,6 @@ def require_source_column_names(
         raise InputValidationError(
             f"{exc} To build the source, rename the reserved columns or drop them first."
         ) from exc
-
-
-def require_source_row_names(
-    rows: Iterable[Mapping[str, object]], system_tag_columns: Collection[str] = ()
-) -> None:
-    """Validate all row keys before an input schema can infer or project fields.
-
-    Args:
-        rows: Raw row mappings.
-        system_tag_columns: Columns nominated as custom system tags.
-    """
-    require_source_column_names(
-        {name for row in rows for name in row}, system_tag_columns
-    )
 
 
 def require_custom_system_tags(

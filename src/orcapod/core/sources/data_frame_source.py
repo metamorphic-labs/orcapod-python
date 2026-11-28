@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import (
     Callable,
     Collection,
@@ -11,6 +12,7 @@ from collections.abc import (
     Sized,
 )
 from dataclasses import fields, is_dataclass
+from enum import Enum
 from itertools import chain, repeat
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, cast
 
@@ -66,11 +68,13 @@ class _FrameModelRow(BaseModel):
         "_original",
         "_names",
         "_system_tag_columns",
+        "_dumped_fields",
     )
     if TYPE_CHECKING:
         _original: BaseModel
         _names: set[str]
         _system_tag_columns: Collection[str]
+        _dumped_fields: dict[str, object] | None
 
     @classmethod
     def from_model(
@@ -84,6 +88,7 @@ class _FrameModelRow(BaseModel):
         object.__setattr__(row, "_original", value)
         object.__setattr__(row, "_names", set(names))
         object.__setattr__(row, "_system_tag_columns", system_tag_columns)
+        object.__setattr__(row, "_dumped_fields", None)
         return row
 
     @override
@@ -117,7 +122,15 @@ class _FrameModelRow(BaseModel):
                 f"{sorted(self._names - names)!r}, extra "
                 f"{sorted(names - self._names)!r}. Use a mapping."
             )
-        return cast("dict[str, object]", fields)
+        result = cast("dict[str, object]", fields)
+        object.__setattr__(self, "_dumped_fields", result)
+        return result
+
+    def _frame_fields(self) -> Mapping[str, object]:
+        """Return the fields Polars read, including any serializer changes."""
+        if self._dumped_fields is not None:
+            return self._dumped_fields
+        return vars(self._original)
 
 
 def _describe_model_row(value: BaseModel) -> _FrameRow:
@@ -210,6 +223,19 @@ def _checked_frame_rows(
             names = set(row.exposed_names)
             if first is None:
                 first, expected = row, names
+            positional_tail = (
+                first.kind == "namedtuple"
+                and row.kind == "positional"
+                and isinstance(row.value, (tuple, list, np.ndarray))
+                and (
+                    not isinstance(row.value, np.ndarray)
+                    or (row.value.ndim == 1 and row.value.dtype.names is None)
+                )
+                and len(row.value) == len(first.names)
+            )
+            if positional_tail:
+                yield row
+                continue
             if names != expected:
                 raise InputValidationError(
                     f"Source row {index} has different field names. "
@@ -218,7 +244,7 @@ def _checked_frame_rows(
                     "fields with None where appropriate and remove unintended fields."
                 )
             if row.kind != first.kind or (
-                row.kind != "mapping" and row.names != first.names
+                row.kind == "namedtuple" and row.names != first.names
             ):
                 raise InputValidationError(
                     f"Source row {index} has a different layout "
@@ -227,6 +253,79 @@ def _checked_frame_rows(
                     f"{first.names!r}) or use mappings throughout."
                 )
         yield row
+
+
+def _same_frame_value(supplied: Any, converted: Any) -> bool:
+    """Compare converted values without rounding mixed numeric inputs."""
+    if supplied is converted:
+        return True
+    if isinstance(supplied, np.generic):
+        supplied = supplied.item()
+    if isinstance(supplied, Enum):
+        supplied = supplied.value
+    if is_dataclass(supplied) and not isinstance(supplied, type):
+        supplied = {
+            field.name: getattr(supplied, field.name) for field in fields(supplied)
+        }
+    if isinstance(supplied, BaseModel):
+        supplied = vars(supplied)
+    if isinstance(supplied, Mapping) and isinstance(converted, Mapping):
+        return all(
+            _same_frame_value(value, converted.get(name)) and name in converted
+            for name, value in supplied.items()
+        ) and all(
+            name in supplied or value is None for name, value in converted.items()
+        )
+    if isinstance(supplied, (list, tuple, np.ndarray)) and isinstance(converted, list):
+        return len(supplied) == len(converted) and all(
+            _same_frame_value(left, right) for left, right in zip(supplied, converted)
+        )
+    if isinstance(supplied, float):
+        if math.isnan(supplied):
+            return isinstance(converted, float) and math.isnan(converted)
+        if supplied == 0 and math.copysign(1, supplied) < 0:
+            return (
+                isinstance(converted, float)
+                and math.copysign(1, converted) < 0
+                and converted == 0
+            )
+    equal = supplied == converted
+    return isinstance(equal, (bool, np.bool_)) and bool(equal)
+
+
+def _require_exact_mixed_rows(
+    frame: pl.DataFrame,
+    rows: list[tuple[int, _FrameRow, Any]],
+) -> None:
+    """Check a mixed batch against the values each input column supplied."""
+    _, first, _ = rows[0]
+    if all(type(row.value) is type(first.value) for _, row, _ in rows):
+        return
+    names = frame.columns
+    values = [
+        column.to_list() if column.dtype == pl.Object else column.to_arrow().to_pylist()
+        for column in frame
+    ]
+    for (index, row, value), converted in zip(rows, zip(*values), strict=True):
+        if isinstance(value, _FrameModelRow):
+            supplied = value._frame_fields()
+        elif row.kind == "dataclass":
+            supplied = {name: getattr(value, name) for name in row.names}
+        else:
+            supplied = dict(zip(first.names, value, strict=True))
+        for name, item in zip(names, converted, strict=True):
+            if _same_frame_value(supplied[name], item):
+                continue
+            if row.kind == "dataclass" and row.names != first.names:
+                raise InputValidationError(
+                    f"Source row {index} has a different layout ({row.names!r}) "
+                    f"from the first row ({first.names!r}), and conversion changed "
+                    f"column {name!r}. Use mappings for these rows."
+                )
+            raise InputValidationError(
+                f"Source row {index} column {name!r} could not be converted "
+                "without losing its value. Use values that convert exactly to one type."
+            )
 
 
 def _require_materialized_row_names(
@@ -276,17 +375,20 @@ def _frame_from_rows(
         return pl.DataFrame(list(values) if materialized else values)
 
     null_positions: set[int] = set()
+    typed_rows: list[tuple[int, _FrameRow, Any]] = []
 
     def typed_values() -> Iterator[Any]:
         for index, row in enumerate(checked):
             if row is None:
                 null_positions.add(index)
-            elif isinstance(row.value, BaseModel):
-                yield _FrameModelRow.from_model(
+                continue
+            value = row.value
+            if isinstance(value, BaseModel):
+                value = _FrameModelRow.from_model(
                     row.value, row.exposed_names, system_tag_columns
                 )
-            else:
-                yield row.value
+            typed_rows.append((index, row, value))
+            yield value
 
     typed = typed_values()
     frame = pl.DataFrame(list(typed) if materialized else typed)
@@ -302,6 +404,7 @@ def _frame_from_rows(
             f"Source row {leading_nulls} declares fields {first.names!r}, "
             f"but Polars returned {frame.columns!r}. Use mappings for these rows."
         )
+    _require_exact_mixed_rows(frame, typed_rows)
     if null_positions:
         indices = iter(range(frame.height))
         positions = [
@@ -386,12 +489,11 @@ def source_dataframe(
 class DataFrameSource(RootSource):
     """A source backed by a Polars DataFrame or supported tabular or column input.
 
-    Named Python rows must supply the same fields. Namedtuple, dataclass and
-    Pydantic rows can use different classes of the same kind with the same field
-    layout. Names exposed by a model must be retained as columns, including when
-    the model is serialized. Positional and scalar inputs use Polars' column
-    names. A ``None`` row keeps its position as a null row. Named Series can be
-    passed as a sequence or iterator of columns.
+    Named Python rows must supply the same fields. Typed rows can use different
+    classes of the same kind when conversion keeps every field and value in its
+    intended column. A namedtuple can be followed by positional rows of the same
+    width. Entirely unnamed input uses Polars' column names. A ``None`` row keeps
+    its position as a null row. Named Series can be passed as columns.
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).

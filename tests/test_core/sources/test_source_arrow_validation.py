@@ -227,6 +227,41 @@ def test_dict_source_refuses_reserved_fields_omitted_from_schema(
         DictSource(rows, tag_columns=TAGS, tag_only_columns=True, data_schema=schema)
 
 
+class _UnreadableRows(Collection[dict[str, int]]):
+    def __init__(self, first: dict[str, int] | None = None) -> None:
+        self.first = first
+
+    def __contains__(self, value: object) -> bool:
+        return value == self.first
+
+    def __len__(self) -> int:
+        return 2 if self.first is not None else 1
+
+    def __iter__(self) -> Iterator[dict[str, int]]:
+        if self.first is not None:
+            yield self.first
+        raise AssertionError("the source read past a reserved name")
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        None,
+        {"_raw": int, "_also_raw": int},
+        pa.schema([("_raw", pa.int64()), ("_also_raw", pa.int64())]),
+    ],
+    ids=["row", "python-schema", "arrow-schema"],
+)
+def test_dict_source_reports_known_reserved_names_before_reading_further(
+    schema: dict[str, type] | pa.Schema | None,
+) -> None:
+    first = {"x": 1, "_raw": 2, "_also_raw": 3} if schema is None else None
+    with pytest.raises(
+        InputValidationError, match="'_also_raw'.*'_raw'.*rename.*drop them first"
+    ):
+        DictSource(_UnreadableRows(first), data_schema=schema)
+
+
 def test_csv_refuses_reserved_declared_columns_before_parsing_values(
     tmp_path: Path,
 ) -> None:
@@ -403,6 +438,23 @@ class _RenamedFrameRow:
 @dataclass
 class _ReorderedFrameRow:
     x: int
+    k: int
+
+
+@dataclass
+class _NestedFrameValue:
+    value: int
+
+
+@dataclass
+class _NestedFrameRow:
+    k: int
+    x: _NestedFrameValue
+
+
+@dataclass
+class _ReorderedNestedFrameRow:
+    x: _NestedFrameValue
     k: int
 
 
@@ -701,11 +753,7 @@ def test_list_source_refuses_reserved_value_name_even_without_arrow_field(
 
 def test_list_source_refuses_reserved_tags_omitted_from_schema() -> None:
     def tags(value: int, index: int) -> dict[str, int]:
-        return (
-            {"k": index, "g": value, "_foo": value}
-            if index
-            else {"k": index, "g": value, "_source_x": value}
-        )
+        return {"k": index, "g": value, "_foo": value, "_source_x": value}
 
     with pytest.raises(
         InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
@@ -725,6 +773,17 @@ def test_list_source_refuses_reserved_tags() -> None:
 
     with pytest.raises(
         InputValidationError, match="'_content_hash'.*'_foo'.*drop them first"
+    ):
+        ListSource("value", [10, 20], tag_function=tags)
+
+
+def test_list_source_reports_reserved_dict_tags_before_next_callback() -> None:
+    def tags(value: int, index: int) -> dict[str, int]:
+        assert index == 0, "the source called another callback after a reserved name"
+        return {"_raw": value, "_also_raw": value}
+
+    with pytest.raises(
+        InputValidationError, match="'_also_raw'.*'_raw'.*rename.*drop them first"
     ):
         ListSource("value", [10, 20], tag_function=tags)
 
@@ -1439,6 +1498,115 @@ def test_named_frame_inputs_keep_polars_conversion(kind: str, path: str) -> None
 
             assert asyncio.run(read()) == expected
     assert DumpOverride.calls == expected_dump_calls
+
+
+@pytest.mark.parametrize(
+    "kind", ["tuple", "list", "numpy", "reordered-model", "reordered-nested-dataclass"]
+)
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
+def test_frame_preserves_mixed_rows_with_the_same_columns(
+    kind: str, iterator: bool, path: str
+) -> None:
+    from collections import namedtuple
+
+    import numpy as np
+
+    class ReverseModel(BaseModel):
+        x: int
+        k: int
+
+    rows: list[Any]
+    if kind == "reordered-model":
+        rows = [_PlainFrameModel(k=1, x=2), ReverseModel(k=3, x=4)]
+    elif kind == "reordered-nested-dataclass":
+        rows = [
+            _NestedFrameRow(1, _NestedFrameValue(2)),
+            _ReorderedNestedFrameRow(_NestedFrameValue(4), 3),
+        ]
+    else:
+        record = namedtuple("Record", ["k", "x"])
+        rows = [
+            record(1, 2),
+            {"tuple": tuple, "list": list, "numpy": np.array}[kind]((3, 4)),
+        ]
+    frame = pl.DataFrame(iter(rows) if iterator else rows)
+    expected = [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
+    if kind == "reordered-nested-dataclass":
+        expected = [{"k": 1, "x": {"value": 2}}, {"k": 3, "x": {"value": 4}}]
+    assert frame.to_dicts() == expected
+    data = iter(rows) if iterator else rows
+    if path == "frame":
+        source = DataFrameSource(data, ["k"], tag_only_columns=True)
+        control = DataFrameSource(frame, ["k"], tag_only_columns=True)
+        assert source.as_table().equals(control.as_table(), check_metadata=True)
+        assert source.source_id == control.source_id
+        assert source.content_hash() == control.content_hash()
+        assert source.pipeline_hash() == control.pipeline_hash()
+    else:
+        poll = PollingSource(
+            _Poll(None, data), ["k"], source_id="poll", record_id_columns="k"
+        )
+        assert _read_frame_poll(poll, path, 2) == expected
+
+
+def _read_frame_poll(
+    poll: PollingSource[int], path: str, count: int
+) -> list[dict[str, Any]]:
+    if path == "poll-sync":
+        return poll.as_table().to_pylist()
+
+    async def read() -> list[dict[str, Any]]:
+        async with contextlib.aclosing(poll.async_iter_data()) as rows:
+            return [
+                {**tag.as_dict(), **data.as_dict()}
+                for tag, data in [await anext(rows) for _ in range(count)]
+            ]
+
+    return asyncio.run(read())
+
+
+@pytest.mark.parametrize("kind", ["dataclass", "model"])
+@pytest.mark.parametrize("value", [4.9, 4.0], ids=["lossy", "exact"])
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
+def test_frame_refuses_lossy_mixed_typed_values(
+    kind: str, value: float, iterator: bool, path: str
+) -> None:
+    @dataclass
+    class FloatRow:
+        k: int
+        x: float
+
+    class FloatModel(BaseModel):
+        k: int
+        x: float
+
+    rows = (
+        [_FrameRow(1, 2), FloatRow(3, value)]
+        if kind == "dataclass"
+        else [_PlainFrameModel(k=1, x=2), FloatModel(k=3, x=value)]
+    )
+    data = iter(rows) if iterator else rows
+    expected = [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
+
+    def read() -> list[dict[str, Any]]:
+        if path == "frame":
+            return (
+                DataFrameSource(data, ["k"], tag_only_columns=True)
+                .as_table()
+                .to_pylist()
+            )
+        poll = PollingSource(
+            _Poll(None, data), ["k"], source_id="poll", record_id_columns="k"
+        )
+        return _read_frame_poll(poll, path, 2)
+
+    if value == 4.0:
+        assert read() == expected
+    else:
+        with pytest.raises(InputValidationError, match=r"column 'x'.*without losing"):
+            read()
 
 
 @pytest.mark.parametrize("view", ["operator-replay", "operator-records", "derived"])
