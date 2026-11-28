@@ -9,6 +9,7 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
 )
 from orcapod.protocols.core_protocols import TagProtocol
+from orcapod.semantic_types.float_narrowing import warn_float32_narrowing
 from orcapod.types import SchemaLike
 from orcapod.utils import arrow_utils
 from orcapod.utils.tensor_conversions import warn_source_tensor_conversions
@@ -108,6 +109,7 @@ class ListSource(RootSource):
             else [k for k in (rows[0].keys() if rows else []) if k != name]
         )
 
+        warn_float32_narrowing(rows, data_schema)
         arrow_table = self.data_context.type_converter.python_dicts_to_arrow_table(
             rows, python_schema=data_schema
         )

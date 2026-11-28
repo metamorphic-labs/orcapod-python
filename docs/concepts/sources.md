@@ -140,6 +140,19 @@ For example, `pa.large_list(pa.field("item", pa.int64(), nullable=False))` decla
 required items. That field has a different Arrow schema identity from the default
 nullable item. Use matching nested flags when joining sources or binding a slot.
 
+When a Python source or datagram receives a Python `float` for a top-level
+column declared `numpy.float32`, Orcapod issues a `ValueConversionWarning`.
+Python shows the warning once per location by default. Arrow
+can round values such as `0.1` to `0.10000000149011612` or `1e-50` to `0.0`.
+Pass `numpy.float32` values to control the conversion, or declare the column
+`float` to retain Python float precision. A `ListSource` that reuses an
+Arrow-backed float32 tag passes its values on as Python floats, so it can warn
+even when the stored values are already representable as float32. Float32
+positions inside a list, dict value, or struct do not warn. Updates to
+dict-backed datagrams and columns added with an explicit `numpy.float32`
+declaration can warn. Conversions driven by an Arrow schema, including updates
+to materialized datagrams, can narrow silently.
+
 Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
 column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,
 a struct with a dictionary field), is refused with `InputValidationError` when the source or

@@ -12,6 +12,7 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
     require_supported_nullable_types,
 )
+from orcapod.semantic_types.float_narrowing import warn_float32_narrowing
 from orcapod.types import DataValue, SchemaLike
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -71,6 +72,7 @@ class DictSource(RootSource):
                 arrow_schema=data_schema,
             )
         else:
+            warn_float32_narrowing(rows, data_schema)
             arrow_table = self.data_context.type_converter.python_dicts_to_arrow_table(
                 rows,
                 python_schema=data_schema,

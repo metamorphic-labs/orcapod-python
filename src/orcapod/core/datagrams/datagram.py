@@ -37,6 +37,7 @@ from orcapod.errors import CanonicalOrderError
 from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.semantic_types.canonical_order import canonical_python_value
+from orcapod.semantic_types.float_narrowing import warn_float32_narrowing
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
@@ -139,6 +140,8 @@ class Datagram(ContentIdentifiableBase):
         record_uuid: uuid.UUID | None = None,
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
+        *,
+        _warn_on_float_narrowing: bool = True,
     ) -> None:
         if isinstance(data, pa.RecordBatch):
             data = pa.Table.from_batches([data])
@@ -149,6 +152,9 @@ class Datagram(ContentIdentifiableBase):
             self._init_from_dict(
                 data, python_schema, meta_info, data_context, record_uuid
             )
+            if _warn_on_float_narrowing and python_schema is not None:
+                assert self._data_dict is not None
+                warn_float32_narrowing((self._data_dict,), python_schema)
 
     def _init_from_dict(
         self,
@@ -1020,11 +1026,11 @@ class Datagram(ContentIdentifiableBase):
             return new_d
         else:
             assert self._data_dict is not None
+            schema = self._ensure_python_schema()
+            warn_float32_narrowing((updates,), schema)
             # Updated dict values are held in canonical key order, as at
             # construction (ITL-905); the caller's dicts are copied, not mutated.
-            canonical_updates = self._canonical_dict_values(
-                updates, self._ensure_python_schema()
-            )
+            canonical_updates = self._canonical_dict_values(updates, schema)
             new_d = self.copy(include_cache=False)
             new_d._data_dict = {**self._data_dict, **canonical_updates}
             new_d._data_table = None
@@ -1149,6 +1155,7 @@ class Datagram(ContentIdentifiableBase):
                 f"Use update() to modify existing columns."
             )
 
+        warn_float32_narrowing((updates,), column_types)
         has_arrow_types = column_types is not None and any(
             isinstance(t, (pa.DataType, pa.Field)) for t in column_types.values()
         )

@@ -280,7 +280,10 @@ class Tag(Datagram):
         data = self.as_dict(columns=columns, all_info=all_info)
         python_schema = self.schema(columns=columns, all_info=all_info)
         return Datagram(
-            data, python_schema=python_schema, data_context=self._data_context
+            data,
+            python_schema=python_schema,
+            data_context=self._data_context,
+            _warn_on_float_narrowing=False,
         )
 
     def copy(self, include_cache: bool = True, preserve_id: bool = False) -> Self:
@@ -848,7 +851,10 @@ class Data(Datagram):
         data = self.as_dict(columns=columns, all_info=all_info)
         python_schema = self.schema(columns=columns, all_info=all_info)
         return Datagram(
-            data=data, python_schema=python_schema, data_context=self._data_context
+            data=data,
+            python_schema=python_schema,
+            data_context=self._data_context,
+            _warn_on_float_narrowing=False,
         )
 
     def with_columns_of(self, other: "DataProtocol", names: "Sequence[str]") -> Self:

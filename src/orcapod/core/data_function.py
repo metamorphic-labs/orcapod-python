@@ -1074,6 +1074,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             source_info=source_info,
             record_uuid=new_record_uuid,
             data_context=self.data_context,
+            _warn_on_float_narrowing=False,
         )
 
     def _output_container_error(
