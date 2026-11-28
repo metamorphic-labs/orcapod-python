@@ -1149,7 +1149,9 @@ def _token_rows(rows: "Sequence[pa.Table]") -> pa.Table:
     for row in rows:
         for field in row.schema:
             _ = types.setdefault(field.name, field.type)
-    schema = pa.schema([pa.field(name, kind) for name, kind in types.items()])
+    schema = pa.schema(
+        [arrow_utils.source_info_field(name, kind) for name, kind in types.items()]
+    )
     return pa.concat_tables(
         [
             pa.Table.from_arrays(

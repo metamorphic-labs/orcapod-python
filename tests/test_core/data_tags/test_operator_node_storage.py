@@ -553,3 +553,82 @@ def test_operator_storage_keeps_one_declared_token_schema(
     node.attach_databases(pipeline_database=store, cache_mode=CacheMode.REPLAY)
     replayed = node.execute(stream_value).as_table(columns={"source": True})
     assert replayed.schema.field("_source_x") == schema.field("_source_x")
+
+
+@STORES
+@pytest.mark.parametrize("reverse", [False, True])
+def test_merge_join_cache_keeps_declared_system_tag_fields(
+    make_store: Callable[[Path], ArrowDatabaseProtocol], tmp_path: Path, reverse: bool
+) -> None:
+    """Every match subset stores the same fields and reproduces its record keys."""
+    from orcapod.operators import MergeJoin
+    from orcapod.streams import ArrowTableStream
+
+    left = ArrowTableStream(
+        pa.table({"k": [1, 2], "x": [3, 4], "_tag_custom": ["one", None]}),
+        tag_columns=["k"],
+    )
+    right = ArrowTableStream(pa.table({"k": [1, 2], "y": [5, 6]}), tag_columns=["k"])
+    subset = ArrowTableStream(right.as_table().slice(0, 1), tag_columns=["k"])
+    store = make_store(tmp_path)
+    node = OperatorJobNode(
+        MergeJoin(), [left, right], pipeline_database=store, cache_mode=CacheMode.LOG
+    )
+    [system_tag] = [
+        field for field in node.arrow_schema() if field.name.startswith("_tag_custom")
+    ]
+    assert system_tag.nullable
+    for delivery in (right, subset) if reverse else (subset, right):
+        node.clear_cache()
+        node.execute(left, delivery)
+        store.flush()
+    [path] = store.list_table_paths()
+    stored = store.get_all_records(path, record_id_column="_record_hash")
+    assert stored is not None
+    assert sorted(cast("list[int]", stored["k"].to_pylist())) == [1, 2]
+    assert stored.schema.field(system_tag.name).equals(system_tag, check_metadata=True)
+    preimage = stored.select(
+        [*node.arrow_schema().names, constants.NODE_CONTENT_HASH_COL]
+    )
+    assert [
+        node.data_context.arrow_hasher.hash_table(
+            preimage.slice(i, 1)
+        ).to_prefixed_digest()
+        for i in range(stored.num_rows)
+    ] == stored["_record_hash"].to_pylist()
+
+
+def test_operator_cache_refuses_output_field_that_disagrees_with_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cache must reject a changed field before writing record keys."""
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.operators import Filter
+    from orcapod.types import col
+
+    source = op.sources.DictSource([{"k": 1, "x": 2}], tag_columns=["k"])
+    store = InMemoryArrowDatabase()
+    node = OperatorJobNode(
+        Filter(col("x") > 0),
+        [source],
+        pipeline_database=store,
+        cache_mode=CacheMode.LOG,
+    )
+    original = StaticOutputOperatorPod._keep_output_table  # pyright: ignore[reportPrivateUsage]
+    declared = node.arrow_schema().field("x")
+
+    def wrong_flag(table, result):
+        pos = table.schema.get_field_index("x")
+        return original(
+            table.set_column(
+                pos, declared.with_nullable(not declared.nullable), table.column(pos)
+            ),
+            result,
+        )
+
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_keep_output_table", staticmethod(wrong_flag)
+    )
+    with pytest.raises(InputValidationError, match=r"output.*'x'.*nullab"):
+        node.run()
+    assert not store.list_table_paths()

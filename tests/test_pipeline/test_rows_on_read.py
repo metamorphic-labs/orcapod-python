@@ -1060,9 +1060,7 @@ def test_a_retained_output_keeps_only_its_rows_once_read(
 def test_an_operator_runs_once_over_an_undated_upstream(
     route: str, mode: CacheMode
 ) -> None:
-    """Over an upstream with no modified time, every read of the operator's result
-    wrapper runs the operator again; the node reads its table, keys and rows from the
-    one computation it captured, so the operator runs once, as on ``main``."""
+    """Capture one populated execution even when LOG derives a zero-row declaration."""
     from orcapod.core.nodes.operator_node import OperatorJobNode
     from orcapod.operators import SelectDataColumns
 
@@ -1078,7 +1076,7 @@ def test_an_operator_runs_once_over_an_undated_upstream(
 
     class Counting(SelectDataColumns):
         def unary_static_process(self, stream: Any) -> Any:
-            calls.append(1)
+            calls.append(stream.as_table().num_rows)
             out: Any = super().unary_static_process(stream)
             if route == "eager":
                 return out
@@ -1095,7 +1093,7 @@ def test_an_operator_runs_once_over_an_undated_upstream(
     )
     output: Any = node.execute(upstream)
     assert len(list(output.iter_data())) == 2
-    assert len(calls) == 1
+    assert calls == ([2, 0] if mode == CacheMode.LOG else [2])
 
 
 @pytest.mark.parametrize(

@@ -63,8 +63,8 @@ How a kernel stays equal to the sync path:
   with the sync path's helpers. Each of them works row by row, so applying them per
   batch of pairs gives the sync rows.
 - **Field flags.** Source-info fields are always nullable. The input layouts open
-  system tags to nullable where needed to admit batches. Join's sorted system tags
-  keep their declared nullability when the kernel emits them.
+  system tags to nullable where needed to admit batches. Join and MergeJoin
+  preserve the declared system-tag nullability when emitting batches.
 
 A kernel holds only what can still match: a side's rows are dropped when the other side
 closes (nothing can arrive to match them), and an arriving row is not kept once the
@@ -97,10 +97,11 @@ from orcapod.core.operators.join import (
     null_token_list_error,
 )
 from orcapod.core.operators.base import require_shared_arrow_type
-from orcapod.core.operators.key_nullability import key_nullable
 from orcapod.core.operators.merge_join import (
     MergeJoin,
     _merged_list,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
+    _output_nullability,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
+    _output_schema,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
     _output_types,  # pyright: ignore[reportPrivateUsage]  # MergeJoin's one rule
 )
 from orcapod.core.operators.rejoin import (
@@ -601,7 +602,8 @@ class StreamingJoinKernel(ABC):
         The schema is the input's row-built form (``null`` columns as ``large_string``,
         ITL-1319), with nullable source-info fields and system-tag flags from the
         input layout. A batch with no rows may also carry a column in the type of the
-        input's zero-row form (``null``): it holds no value.
+        input's zero-row form (``null``). A token field can use that exception only
+        when the stream declares that token field as ``null``.
         """
         layout = self._layouts[input_index]
         # Tokens that cannot make one table with the input's earlier batches are
@@ -624,7 +626,13 @@ class StreamingJoinKernel(ABC):
             ):
                 continue
             if not table.num_rows and pa.types.is_null(actual.type):
-                continue
+                if not field.name.startswith(constants.SOURCE_PREFIX):
+                    continue
+                declared = self.inputs[input_index].arrow_schema()
+                if field.name in declared.names and pa.types.is_null(
+                    declared.field(field.name).type
+                ):
+                    continue
             # A source-info column is held to its stream's type like any other
             # column: the pipeline determines it, and a batch never brings its own
             # (ITL-1491).
@@ -852,6 +860,7 @@ class StreamingMergeJoin(StreamingJoinKernel):
     """
 
     ARITY: ClassVar[int | None] = 2
+    KEEP_SYSTEM_TAG_FLAGS: ClassVar[bool] = True
 
     def __init__(self, operator: MergeJoin, inputs: Sequence[StreamProtocol]) -> None:
         super().__init__(operator, inputs)
@@ -873,9 +882,6 @@ class StreamingMergeJoin(StreamingJoinKernel):
             if f"{constants.SOURCE_PREFIX}{name}" in right_names
         }
         self._colliding = (set(left_data) & set(right_data)) - merged
-        self._captured = (
-            set(left_tags) | set(left_data) | set(right_tags) | set(right_data)
-        )
         # The left input's converter, as the sync path takes it.
         self._type_converter = StaticOutputOperatorPod._upstream_context(  # pyright: ignore[reportPrivateUsage]  # the operators' one rule
             left
@@ -944,24 +950,9 @@ class StreamingMergeJoin(StreamingJoinKernel):
             {f.name: f.type for f in left_schema},
             {f.name: f.type for f in right_schema},
         )
-        left_nullable = {
-            f.name: f.nullable for f in left_schema if f.name in self._captured
-        }
-        right_nullable = {
-            f.name: f.nullable for f in right_schema if f.name in self._captured
-        }
-        output_nullable = {**right_nullable, **left_nullable}
-        for name in self._shared_tags:
-            output_nullable[name] = key_nullable(
-                left_nullable[name], right_nullable[name]
-            )
-        for name in self._colliding:
-            output_nullable[name] = False
-        # The system tags the sync path does not capture are nullable in a batch.
-        for schema in (right_schema, left_schema):
-            for field in schema:
-                if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
-                    output_nullable.setdefault(field.name, True)
+        output_nullable = _output_nullability(
+            left_schema, right_schema, self._shared_tags, self._colliding
+        )
         left_names = set(left_schema.names)
         suffixed = (set(right_schema.names) & left_names) - self._shared_tags
         for left_name, right_name in self._rename.items():
@@ -1002,13 +993,11 @@ class StreamingMergeJoin(StreamingJoinKernel):
                 joined = joined.add_column(index, base_name, column_data)
             else:
                 joined = joined.drop_columns([suffixed_name])
-        schema = pa.schema(
-            [
-                arrow_utils.source_info_field(name, output_types[name])
-                if name.startswith(constants.SOURCE_PREFIX)
-                else pa.field(name, output_types[name], nullable=output_nullable[name])
-                for name in joined.column_names
-            ]
+        schema = _output_schema(
+            joined.column_names,
+            output_types,
+            output_nullable,
+            (right_schema, left_schema),
         )
         return pa.Table.from_arrays(
             [

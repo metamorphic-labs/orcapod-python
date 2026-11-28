@@ -10,6 +10,7 @@ unless a live source has been bound via `bind`.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,7 @@ from orcapod.core.streams.base import (
     typed_zero_row_table,
 )
 from orcapod.protocols.core_protocols import SourceProtocol
+from orcapod.system_constants import constants
 from orcapod.types import ContentHash, Schema
 
 if TYPE_CHECKING:
@@ -147,6 +149,7 @@ class SourceProxy(RootSource):
         if errors:
             raise ValueError(f"Cannot bind source to SourceProxy: {'; '.join(errors)}")
 
+        self._validate_delegate_schema(source)
         self._delegate = source
         # Another source's data now stands behind the proxy (ITL-1102).
         self._update_modified_time()
@@ -243,6 +246,11 @@ class SourceProxy(RootSource):
     # Data access — delegate if bound, raise otherwise
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _validate_delegate_schema(delegate: SourceProtocol) -> None:
+        """Validate hidden system-tag fields without fetching the delegate's rows."""
+        validate_source_table(delegate.head(0, columns={"system_tags": True}).table)
+
     def _require_delegate(self) -> SourceProtocol:
         """Return the delegate or raise if not bound."""
         if self._delegate is None:
@@ -265,6 +273,7 @@ class SourceProxy(RootSource):
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         delegate = self._require_delegate()
+        self._validate_delegate_schema(delegate)
 
         def checked_rows() -> Iterator[tuple[TagProtocol, DataProtocol]]:
             for tag, data in delegate.iter_data():
@@ -279,8 +288,19 @@ class SourceProxy(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> pa.Table:
-        return validate_source_table(
-            self._require_delegate().as_table(columns=columns, all_info=all_info)
+        delegate = self._require_delegate()
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        table = validate_source_table(
+            delegate.as_table(columns=replace(config, system_tags=True))
+        )
+        if config.system_tags:
+            return table
+        return table.drop_columns(
+            [
+                name
+                for name in table.column_names
+                if name.startswith(constants.SYSTEM_TAG_PREFIX)
+            ]
         )
 
     def head(
@@ -292,6 +312,7 @@ class SourceProxy(RootSource):
     ) -> StreamView:
         """Return the bound source's head, or no rows when no live source is bound."""
         if self._delegate is not None:
+            self._validate_delegate_schema(self._delegate)
             view = self._delegate.head(n, columns=columns, all_info=all_info)
             validate_source_table(view.table)
             return head_of(view, self)

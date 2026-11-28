@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any, ClassVar, cast
 
 import numpy as np
@@ -69,6 +69,53 @@ def _output_types(
             assert known is not None
             resolved[name] = arrow_utils.normalize_to_large_types(known, keep_null=True)
     return resolved
+
+
+def _output_nullability(
+    left: pa.Schema,
+    right: pa.Schema,
+    shared_tags: Collection[str],
+    colliding_data: Collection[str],
+) -> dict[str, bool]:
+    """Derive the output flags from its input fields and the join's column roles."""
+    nullable = {field.name: field.nullable for field in right}
+    for field in left:
+        nullable[field.name] = field.nullable or nullable.get(field.name, False)
+    for name in shared_tags:
+        nullable[name] = key_nullable(
+            left.field(name).nullable, right.field(name).nullable
+        )
+    for name in colliding_data:
+        nullable[name] = False
+    return nullable
+
+
+def _output_schema(
+    names: Sequence[str],
+    types: dict[str, pa.DataType],
+    nullable: dict[str, bool],
+    input_schemas: tuple[pa.Schema, pa.Schema],
+) -> pa.Schema:
+    """Declare the output fields without consulting the matched rows."""
+    system_tags = {
+        field.name: field
+        for schema in input_schemas
+        for field in schema
+        if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+    }
+    return pa.schema(
+        [
+            arrow_utils.source_info_field(name, types[name])
+            if name.startswith(constants.SOURCE_PREFIX)
+            else pa.field(
+                name,
+                types[name],
+                nullable=nullable[name],
+                metadata=system_tags[name].metadata if name in system_tags else None,
+            )
+            for name in names
+        ]
+    )
 
 
 def _merged_list(
@@ -456,43 +503,13 @@ class MergeJoin(BinaryOperator):
         for key in sorted(shared_tag_keys):
             require_matchable_key("MergeJoin", key, output_types[key])
 
-        # The joined table is built from arrays with no field flags, so the
-        # flags are taken from the inputs. Only tag and data columns are
-        # captured: system tag and source columns are internally created with
-        # Arrow's all-nullable default; those fall through to null-count
-        # inference below.
-        captured_cols = (
-            set(left_tag_keys)
-            | set(left_data_keys)
-            | set(right_tag_keys)
-            | set(right_data_keys)
+        output_nullable = _output_nullability(
+            left_table.schema, right_table.schema, shared_tag_keys, colliding_keys
         )
-        left_nullable = {
-            f.name: f.nullable for f in left_table.schema if f.name in captured_cols
-        }
-        right_nullable = {
-            f.name: f.nullable for f in right_table.schema if f.name in captured_cols
-        }
-        # Build expected output nullable map
-        output_nullable: dict[str, bool] = {}
-        output_nullable.update(left_nullable)
-        for name, nullable in right_nullable.items():
-            if name not in output_nullable:
-                output_nullable[name] = nullable
-        # A shared tag key is nullable only when nullable in both inputs: a null
-        # key matches nothing (ITL-829). Equal flags give the flag as before.
-        for name in shared_tag_keys:
-            output_nullable[name] = key_nullable(
-                left_nullable[name], right_nullable[name]
-            )
-        # Merged (colliding) data columns become 2-element lists — always non-null
-        for col in colliding_keys:
-            output_nullable[col] = False
 
         # Inner join on the shared tag keys. A constant key makes the join a
         # cartesian product when the inputs share no tag; int8 explicitly, so a
         # zero-row table doesn't produce a null-typed column (same as Join).
-        output_nullable.pop(_COMMON_JOIN_KEY, None)
         left_table = _with_common_key(left_table)
         right_table = _with_common_key(right_table)
         join_keys = sorted(shared_tag_keys | {_COMMON_JOIN_KEY})
@@ -567,25 +584,11 @@ class MergeJoin(BinaryOperator):
         other_cols = [c for c in joined.column_names if c not in listed]
         joined = joined.select(tag_cols + data_cols + other_cols)
 
-        # Reconstruct the schema: every column takes the type decided above
-        # from the inputs (the large-normalized input type for pass-through
-        # columns; the list type built above for merged columns), and
-        # nullability comes from the captured input flags, falling back to
-        # null-count inference for system tags. The
-        # values are the inputs'.
-        result_schema = pa.schema(
-            [
-                arrow_utils.source_info_field(col_name, output_types[col_name])
-                if col_name.startswith(constants.SOURCE_PREFIX)
-                else pa.field(
-                    col_name,
-                    output_types[col_name],
-                    nullable=output_nullable.get(
-                        col_name, joined.column(i).null_count > 0
-                    ),
-                )
-                for i, col_name in enumerate(joined.column_names)
-            ]
+        result_schema = _output_schema(
+            joined.column_names,
+            output_types,
+            output_nullable,
+            (right_table.schema, left_table.schema),
         )
         # Only a column whose type differs is cast (a layout change): Arrow's cast of
         # a ``large_list<null>`` column to its own type corrupts it.

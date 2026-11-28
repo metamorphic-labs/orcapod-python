@@ -1423,6 +1423,25 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             require_same_data_context(row_context_key, self.data_context_key)
         output_table = output_table.drop([constants.CONTEXT_KEY])
 
+        declared = self._typed_zero_row_table()
+        if declared is not None:
+            expected_fields = {field.name: field for field in declared.schema}
+            actual_fields = {field.name: field for field in output_table.schema}
+            for name in sorted(expected_fields.keys() | actual_fields.keys()):
+                expected = expected_fields.get(name)
+                actual = actual_fields.get(name)
+                if (
+                    expected is not None
+                    and actual is not None
+                    and expected.equals(actual, check_metadata=True)
+                ):
+                    continue
+                raise InputValidationError(
+                    f"OperatorJobNode {self.label!r} output field {name!r} differs "
+                    f"from its declared type, nullability or metadata. "
+                    f"Declared {expected!r}; materialized {actual!r}."
+                )
+
         # The entry id of each row (ITL-1471) is computed from the row as the stream
         # gives it, before the bookkeeping columns are added.
         rows = list(stream.iter_data())

@@ -428,9 +428,6 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     description's field is not nullable) and the same field metadata. A
     ``null`` type of the description (anywhere in a column's type) is carried as
     ``large_string`` outside system tags, and only null values are taken there.
-    System-tag field metadata must match the description. Batches may differ in
-    their top-level provenance flags. The complete stream uses the declared system-tag
-    ``large_string`` outside system tags, and only null values are taken there.
     System-tag field metadata must match the description. Source-info fields in
     the resulting stream are nullable. A bound stream may declare a token type
     different from the slot's description. Every batch must agree on that type,

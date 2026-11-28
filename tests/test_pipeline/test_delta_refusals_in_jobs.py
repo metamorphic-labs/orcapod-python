@@ -1,17 +1,8 @@
-"""Jobs that reach a ``DeltaTableDatabase`` refusal of deltalake 1.5+ (ITL-1403).
+"""Job-level checks for an unstable operator schema and Delta column names.
 
-Pins the behaviour disclosed in the review of PR 504, so that a change to it is noticed:
-
-- finding 6: an operator whose result TYPE depends on its data (list items nullable only
-  when a value exceeds 10) in an operator node that logs (``CacheMode.LOG``): the run
-  whose result type differs from the stored one fails at the store, where Delta
-  refuses the commit (the flush raises it once), instead of silently changing the
-  table's recorded type. Such an operator is a bug of the
-  operator; ITL-1410 is to refuse it at the operator.
-- a function with output keys ``a`` and ``A`` (legal before) stops at its first write:
-  Delta column names are case-insensitive.
-
-Both on the sync and the async orchestrator.
+The cache refuses a value-derived output type before the write. A function with
+output keys ``a`` and ``A`` is refused because Delta names are case-insensitive.
+Both cases exercise the sync and async orchestrators (ITL-1403).
 """
 
 from __future__ import annotations
@@ -30,7 +21,6 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import (
     InputValidationError,
-    OrcapodDatabaseWriteError,
     UnstorableColumnError,
 )
 from orcapod.types import CacheMode
@@ -79,11 +69,12 @@ def _run(job: PipelineJob, use_async: bool) -> None:
 
 
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-def test_an_operator_whose_result_type_follows_its_data_fails_at_the_store(
+def test_an_operator_whose_result_type_follows_its_data_fails_before_the_write(
     tmp_path: Path, use_async: bool
 ) -> None:
+    database = DeltaTableDatabase(tmp_path)
+
     def run(keys: list[int], values: list[int]) -> None:
-        database = DeltaTableDatabase(tmp_path)
         job = PipelineJob(name="itl1403", database=database)
         with job:
             _ItemNullabilityFromValues()(_source(keys, values), label="shape")
@@ -91,16 +82,14 @@ def test_an_operator_whose_result_type_follows_its_data_fails_at_the_store(
         _run(job, use_async)
         database.flush()
 
-    run([1, 2], [1, 2])  # items non-nullable: stored
-    with pytest.raises(OrcapodDatabaseWriteError) as info:
-        run([3, 4], [11, 12])  # items nullable: the recorded type would change
-    # The flush is the point of truth (ITL-1403): Delta refuses the commit, and the
-    # flush raises it once, as the write error's cause; nothing stays queued.
-    cause = info.value.__cause__
-    assert isinstance(cause, InputValidationError), repr(cause)
-    assert "Delta refused the commit" in str(cause)
-    with pytest.raises(OrcapodDatabaseWriteError):
-        run([3, 4], [11, 12])  # the same rows fail the same way again, never queued
+    run([1, 2], [1, 2])
+    [path] = database.list_table_paths()
+    with pytest.raises(InputValidationError, match=r"output field 'v'.*nullability"):
+        run([3, 4], [11, 12])
+    database.flush()
+    stored = database.get_all_records(path, record_id_column="_record_hash")
+    assert stored is not None
+    assert stored.num_rows == 2
 
 
 @function_pod(output_keys=["a", "A"])

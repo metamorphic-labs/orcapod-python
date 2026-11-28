@@ -542,7 +542,12 @@ class Data(Datagram):
         if self._source_info_table is None and typed is not None:
             self._source_info_table = pa.Table.from_arrays(
                 typed.columns,
-                schema=pa.schema([pa.field(f.name, f.type) for f in typed.schema]),
+                schema=pa.schema(
+                    [
+                        arrow_utils.source_info_field(f.name, f.type)
+                        for f in typed.schema
+                    ]
+                ),
             )
         if self._source_info_table is None:
             import pyarrow as _pa

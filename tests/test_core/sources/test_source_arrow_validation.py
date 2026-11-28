@@ -626,7 +626,18 @@ def test_dataframe_source_validates_arrow_inputs_before_polars(
         assert data.stream_exports == 0
 
 
-@pytest.mark.parametrize("route", ["table", "rows", "async_rows", "head"])
+@pytest.mark.parametrize(
+    "route",
+    [
+        "bind",
+        "table",
+        "table_with_tags",
+        "rows",
+        "async_rows",
+        "head",
+        "head_with_tags",
+    ],
+)
 def test_bound_proxy_refuses_delegated_system_tag_metadata(
     route: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -646,7 +657,8 @@ def test_bound_proxy_refuses_delegated_system_tag_metadata(
         tags,
         data,
     )
-    proxy.bind(source)
+    if route != "bind":
+        proxy.bind(source)
     columns = {"system_tags": True}
     table = source.as_table(columns=columns)
     pos = table.schema.get_field_index("_tag_extra")
@@ -665,14 +677,16 @@ def test_bound_proxy_refuses_delegated_system_tag_metadata(
     with pytest.raises(
         InputValidationError, match=r"'_tag_extra'.*[Rr]emove.*field metadata"
     ):
-        if route == "table":
-            proxy.as_table(columns=columns)
+        if route == "bind":
+            proxy.bind(source)
+        elif route in ("table", "table_with_tags"):
+            proxy.as_table(columns=columns if route == "table_with_tags" else None)
         elif route == "rows":
             list(proxy.iter_data())
         elif route == "async_rows":
             asyncio.run(consume())
         else:
-            proxy.head(columns=columns)
+            proxy.head(columns=columns if route == "head_with_tags" else None)
 
 
 @pytest.mark.parametrize("stored_flag", [False, True])

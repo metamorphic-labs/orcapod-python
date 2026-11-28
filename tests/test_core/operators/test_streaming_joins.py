@@ -1483,3 +1483,120 @@ def test_tokens_that_show_fewer_levels_keep_their_streams_type(
     assert got.schema.field("_source_x").type == DEEP
     by_key = dict(zip(got.column("k").to_pylist(), got.column("_source_x").to_pylist()))
     assert by_key == {1: tokens[0], 2: tokens[1]}
+
+
+@pytest.mark.parametrize(
+    "make_kernel",
+    [_join_kernel, _merge_kernel, _semi_kernel],
+    ids=["join", "merge_join", "semi_join"],
+)
+def test_empty_batch_token_type_must_match_stream(
+    make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
+) -> None:
+    """A wrong token type is refused even without any rows in the batch."""
+    left = _token_stream([[["a"]], [["b"]]], DEEP)
+    right = ArrowTableStream(pa.table({"k": [1, 2], "y": [5, 6]}), tag_columns=["k"])
+    good = _sent(left).combine_chunks().to_batches()[0]
+    index = good.schema.get_field_index("_source_x")
+    empty_columns = list(good.slice(0, 0).columns)
+    empty_columns[index] = pa.nulls(0)
+    wrong = pa.RecordBatch.from_arrays(
+        empty_columns,
+        schema=good.schema.set(index, good.schema.field(index).with_type(pa.null())),
+    )
+    kernel = make_kernel((left, right))
+    with pytest.raises(ValueError, match=r"'_source_x'.*null.*large_list"):
+        kernel.push(0, wrong)
+    assert kernel.push(0, good.slice(0, 0)) == []
+    out = kernel.push(0, good) + kernel.push(
+        1, _sent(right).combine_chunks().to_batches()[0]
+    )
+    out += kernel.close(0) + kernel.close(1)
+    assert sum(batch.num_rows for batch in out) == 2
+
+
+@pytest.mark.parametrize("matched", [[1], [1, 2], [3]], ids=["subset", "all", "none"])
+def test_merge_join_preserves_system_tag_declarations(matched: list[int]) -> None:
+    """Prediction, Arrow tables, async rows and batches share the input fields."""
+    import asyncio
+
+    from orcapod.channels import Channel
+
+    fields = [
+        pa.field("_tag_nullable", pa.large_string(), metadata={b"owner": b"raw"}),
+        pa.field("_tag_required", pa.large_string(), nullable=False),
+    ]
+    left = ArrowTableStream(
+        pa.Table.from_arrays(
+            [
+                pa.array([1, 2]),
+                pa.array([3, 4]),
+                pa.array(["one", None], fields[0].type),
+                pa.array(["a", "b"], fields[1].type),
+            ],
+            schema=pa.schema(
+                [pa.field("k", pa.int64()), pa.field("x", pa.int64()), *fields]
+            ),
+        ),
+        tag_columns=["k"],
+    )
+    right = ArrowTableStream(
+        pa.table({"k": matched, "y": [5] * len(matched)}), tag_columns=["k"]
+    )
+    operator = MergeJoin()
+    node = operator(left, right)
+    result = operator.static_process(left, right)
+    kernel = StreamingMergeJoin(operator, (left, right))
+    config = {"system_tags": True}
+
+    def system_tag_fields(schema: pa.Schema) -> "list[pa.Field[Any]]":
+        return [field for field in schema if field.name.startswith("_tag_")]
+
+    expected = system_tag_fields(node.arrow_schema())
+    assert pa.schema(
+        [field.with_name(field.name.split("::")[0]) for field in expected]
+    ).equals(pa.schema(fields), check_metadata=True)
+    assert pa.schema(system_tag_fields(result.as_table(columns=config).schema)).equals(
+        pa.schema(expected), check_metadata=True
+    )
+    assert pa.schema(
+        system_tag_fields(kernel.zero_row_result.as_table(columns=config).schema)
+    ).equals(pa.schema(expected), check_metadata=True)
+    emitted = [
+        out
+        for i, stream in enumerate((left, right))
+        for batch in _sent(stream).to_batches()
+        for out in kernel.push(i, batch)
+    ]
+    assert sum(batch.num_rows for batch in emitted) == result.as_table().num_rows
+    assert all(
+        pa.schema(system_tag_fields(batch.schema)).equals(
+            pa.schema(expected), check_metadata=True
+        )
+        for batch in emitted
+    )
+
+    async def async_fields() -> list[pa.Schema]:
+        incoming = [Channel(buffer_size=4), Channel(buffer_size=4)]
+        out = Channel(buffer_size=4)
+        for stream, channel in zip((left, right), incoming, strict=True):
+            for row in stream.iter_data():
+                await channel.writer.send(row)
+            await channel.writer.close()
+        await operator.async_execute(
+            [channel.reader for channel in incoming],
+            out.writer,
+            input_pipeline_hashes=(left.pipeline_hash(), right.pipeline_hash()),
+        )
+        return [
+            tag.as_table(columns=config).schema for tag, _ in await out.reader.collect()
+        ]
+
+    actual = asyncio.run(async_fields())
+    assert len(actual) == result.as_table().num_rows
+    assert all(
+        pa.schema(system_tag_fields(schema)).equals(
+            pa.schema(expected), check_metadata=True
+        )
+        for schema in actual
+    )
