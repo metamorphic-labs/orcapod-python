@@ -436,9 +436,8 @@ class Data(Datagram):
             self._source_info: dict[str, SourceInfoValue] = self._source_info_of_row(
                 si_table
             )
-            # The row's source-info columns: the table's own, with their types; a
-            # token given as a value (``source_info``) is made here, so its column
-            # is typed from that value (ITL-1491).
+            # The row's token columns keep the table's types. A Python value
+            # supplies the type only when the table has no token column for it.
             typed = si_table if si_table.num_rows == 1 else None
         else:
             typed = None
@@ -464,9 +463,8 @@ class Data(Datagram):
             self._source_info = {**contained_source_info, **(source_info or {})}
 
         self._source_info_table: "pa.Table | None" = None
-        # The row's source-info columns as the Arrow table it was read from gave
-        # them, when it was read from one (here, or ``rows_of``); ``None``
-        # otherwise, and after any change of the columns or tokens.
+        # The row's typed token columns, read from Arrow or carried forward by a
+        # row operation. A row built from Python values starts without them.
         self._typed_source_info: "pa.Table | None" = typed
 
     @staticmethod
@@ -483,9 +481,30 @@ class Data(Datagram):
             The table without its source-info columns, and a table with one
             source-info column per data column (null where there is no token).
         """
+        untyped: dict[str, SourceInfoValue] = {}
+        for key, token in source_info.items():
+            name = f"{constants.SOURCE_PREFIX}{key}"
+            index = table.schema.get_field_index(name)
+            if index == -1 or token is None:
+                untyped[key] = token
+            elif (
+                key in table.column_names
+                and key != constants.CONTEXT_KEY
+                and not key.startswith(constants.META_PREFIX)
+            ):
+                field = table.schema.field(index)
+                kind = arrow_utils.normalize_to_large_types(field.type)
+                try:
+                    array = arrow_utils.source_info_replacement(
+                        token, kind, table.num_rows
+                    )
+                except (pa.ArrowInvalid, pa.ArrowTypeError) as error:
+                    error.add_note(f"Replacing source-info column {name!r}")
+                    raise
+                table = table.set_column(index, field.with_type(kind), array)
         data_table, prefixed_tables = arrow_utils.prepare_prefixed_columns(
             table,
-            {constants.SOURCE_PREFIX: source_info},
+            {constants.SOURCE_PREFIX: untyped},
             exclude_columns=[constants.CONTEXT_KEY],
             exclude_prefixes=[constants.META_PREFIX],
         )
@@ -790,8 +809,8 @@ class Data(Datagram):
     ) -> Self:
         """Create a copy with updated source-information entries.
 
-        A token given as a Python value is typed from that value: no Arrow type
-        exists for it. A token whose column type is known (an operator that
+        A Python replacement uses the row's held Arrow type when available.
+        A token whose column type is known (an operator that
         derives a token from its input's, as ``Index`` does) is given as an
         Arrow scalar of that type, and keeps it (ITL-1491). If both spellings of
         a column name are given, the later keyword wins.
@@ -817,6 +836,16 @@ class Data(Datagram):
                 )
             else:
                 token = value
+                name = f"{constants.SOURCE_PREFIX}{key}"
+                typed = self._typed_source_info
+                if typed is not None and name in typed.column_names:
+                    typed_given[key] = pa.chunked_array(
+                        [
+                            arrow_utils.source_info_replacement(
+                                token, typed.schema.field(name).type
+                            )
+                        ]
+                    )
             current[key] = token
         new_p = self.copy(include_cache=False)
         new_p._source_info = current

@@ -1483,7 +1483,9 @@ class Join(NonZeroInputOperator):
                     ],
                     schema=pa.schema(
                         [
-                            pa.field(f"{constants.SOURCE_PREFIX}{name}", declared[name])
+                            arrow_utils.source_info_field(
+                                f"{constants.SOURCE_PREFIX}{name}", declared[name]
+                            )
                             for name in typed_names
                         ]
                     ),

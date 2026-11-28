@@ -989,6 +989,43 @@ def source_info_field(name: str, kind: "pa.DataType") -> "pa.Field[Any]":
     return pa.field(name, kind, nullable=True)
 
 
+def source_info_replacement(
+    token: SourceInfoValue, kind: "pa.DataType", num_rows: int = 1
+) -> "pa.Array[Any]":
+    """Write a Python replacement under an existing token type.
+
+    Args:
+        token: The replacement token.
+        kind: The declared Arrow type, including any list item fields.
+        num_rows: The number of rows to fill with the replacement.
+
+    Returns:
+        An array of the declared type.
+
+    Raises:
+        pa.ArrowTypeError: If a token cannot fit the declaration.
+    """
+
+    def require_fit(value: SourceInfoValue, data_type: "pa.DataType") -> None:
+        """Check nested nullability and reject strings that Arrow would split."""
+        if value is None or not isinstance(
+            data_type, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)
+        ):
+            return
+        if not isinstance(value, list):
+            raise pa.ArrowTypeError(f"Expected a list token for type {data_type}")
+        child = data_type.value_field
+        for item in value:
+            if item is None and not child.nullable:
+                raise pa.ArrowTypeError(
+                    f"Token item {child.name!r} does not allow nulls"
+                )
+            require_fit(item, child.type)
+
+    require_fit(token, kind)
+    return pa.array([token] * num_rows, type=kind)
+
+
 def prepare_prefixed_columns(
     table: "pa.Table | pa.RecordBatch",
     prefix_info: Collection[str]

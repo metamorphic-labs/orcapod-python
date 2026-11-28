@@ -7,8 +7,10 @@ member.  `Data` must represent those without collapsing or crashing.
 from __future__ import annotations
 
 import pyarrow as pa
+import pytest
 
 from orcapod.core.datagrams import Data
+from orcapod.types import SourceInfoValue
 
 
 def _data_with_mixed_source_info() -> Data:
@@ -85,3 +87,36 @@ class TestListValuedSourceInfo:
         assert data.as_table(columns={"source": True}).column(
             "_source_path"
         ).to_pylist() == [["s0", "s1"]]
+
+
+@pytest.mark.parametrize("via_constructor", [True, False])
+@pytest.mark.parametrize(
+    "replacement",
+    [["new"], "wrong depth", [None]],
+    ids=["preserves-item-field", "refuses-scalar", "refuses-null-item"],
+)
+def test_python_token_replacement_uses_the_held_type(
+    via_constructor: bool, replacement: SourceInfoValue
+) -> None:
+    """Replacements use the declared list item name, metadata and nullability."""
+    kind = pa.large_list(
+        pa.field(
+            "leaf", pa.large_string(), nullable=False, metadata={b"unit": b"token"}
+        )
+    )
+    table = pa.table({"x": [[1]], "_source_x": pa.array([["old"]], type=kind)})
+
+    def replace() -> Data:
+        if via_constructor:
+            return Data(table, source_info={"x": replacement})
+        return Data(table).with_source_info(x=replacement)
+
+    if replacement != ["new"]:
+        with pytest.raises((pa.ArrowInvalid, pa.ArrowTypeError)):
+            _ = replace()
+        return
+    updated = replace().as_table(columns={"source": True})
+    assert updated.schema.field("_source_x").equals(
+        pa.field("_source_x", kind, nullable=True), check_metadata=True
+    )
+    assert updated["_source_x"].to_pylist() == [replacement]

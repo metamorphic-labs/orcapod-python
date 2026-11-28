@@ -153,32 +153,18 @@ def source(n: int = 7, source_id: str = "events") -> ArrowTableSource:
     )
 
 
-def shaped_source(kind: pa.DataType, n: int = 2) -> ArrowTableSource:
-    """``source(n)`` whose ``amplitude`` has the list layers of the token type ``kind``.
+def shaped_source(kind: pa.DataType, n: int = 2) -> ArrowTableStream:
+    """Return a stream whose amplitude and token have the declared list layers."""
+    from tests.token_shapes import nested_value, with_token_column
 
-    A token's list layers are its data's outer list layers (the token-shape rule,
-    ITL-1491), so a test that carries ``_source_amplitude`` as ``kind`` sends it as
-    this stream.
-    """
-    from tests.token_shapes import data_type_for, nested_value
-
-    data_type = data_type_for(kind, pa.float32())
-    return ArrowTableSource(
-        pa.table(
-            {
-                "subject": pa.array([f"m{i % 3}" for i in range(n)], pa.string()),
-                "trial": pa.array(range(n), pa.int16()),
-                "amplitude": pa.array(
-                    [nested_value(0.5 * i, data_type) for i in range(n)], data_type
-                ),
-                "note": pa.array(
-                    [None if i % 4 == 1 else f"n{i}" for i in range(n)], pa.string()
-                ),
-            }
-        ),
-        tag_columns=["subject", "trial"],
-        tag_only_columns=(),
-        source_id="shaped",
+    table = with_token_column(
+        source(n).as_table(columns=ALL),
+        "amplitude",
+        [nested_value("seed", kind)] * n,
+        kind,
+    )
+    return ArrowTableStream(
+        table, tag_columns=["subject", "trial"], data_tags=["trial"]
     )
 
 
@@ -2268,7 +2254,7 @@ ONE_TYPE_CASES: dict[
         pa.large_list(TOKEN_LISTS),
         [[[], [[]]], [[["b"]]]],
     ),
-    # A batch with no rows has no token and fixes no type.
+    # Without a declaration, an empty batch does not settle the token type.
     "zero_rows_first": (
         [(0, [], TOKEN), (0, [["a"]], TOKENS), (1, [["b"]], TOKENS)],
         TOKENS,
@@ -2283,6 +2269,12 @@ def test_batches_send_accepts_are_assembled(case: str) -> None:
     the complete table, each source-info column of the type its batches declare."""
     parts, declared, tokens = ONE_TYPE_CASES[case]
     stream = shaped_source(declared)
+    if case == "zero_rows_first":
+        stream = _UntypedStream(
+            stream.as_table(columns=ALL),
+            tag_columns=["subject", "trial"],
+            data_tags=["trial"],
+        )
     (batch,) = batches_of(stream)
 
     async def write() -> tuple[Any, Any]:
@@ -2325,7 +2317,11 @@ def test_a_batch_that_declares_another_token_type_is_refused_at_send(
         if order == "as_listed"
         else list(reversed(TWO_TYPE_CASES[case]))
     )
-    stream = shaped_source(first)
+    stream = _UntypedStream(
+        shaped_source(first).as_table(columns=ALL),
+        tag_columns=["subject", "trial"],
+        data_tags=["trial"],
+    )
     (batch,) = batches_of(stream)
 
     async def write() -> Any:
@@ -2422,3 +2418,93 @@ def test_channel_keeps_first_system_tag_declaration_and_entry_id() -> None:
         return ids
 
     assert run(lambda: read([first])) == run(lambda: read([first, second]))
+
+
+@pytest.mark.parametrize("num_rows", [0, 1])
+@pytest.mark.parametrize("wrong_type", [TOKEN, TOKENS])
+def test_concrete_channel_refuses_first_batch_with_a_different_token_type(
+    num_rows: int, wrong_type: pa.DataType
+) -> None:
+    """A concrete stream's declared token type also applies to its first batch."""
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+
+    declared = pa.large_list(pa.field("leaf", TOKEN, metadata={b"kind": b"token"}))
+    stream = ArrowTableStream(
+        pa.table(
+            {
+                "amplitude": pa.array([[1]], pa.large_list(pa.int64())),
+                "_source_amplitude": pa.array([["old"]], declared),
+            }
+        ),
+        tag_columns=[],
+    )
+    (batch,) = batches_of(stream)
+    values = ["wrong"] if wrong_type == TOKEN else [["wrong"]]
+    wrong = _with_amplitude_tokens(batch, 0, values[:num_rows], wrong_type)
+    with pytest.raises(SourceInfoTypesDisagree, match="_source_amplitude"):
+        _ = stream_from_batches(stream, [wrong])
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        reader = output.open_reader()
+        with pytest.raises(SourceInfoTypesDisagree, match="_source_amplitude"):
+            await output.send(wrong)
+        await output.send(batch)
+        await output.close()
+        delivered = await reader.receive()
+        assert delivered is not None
+        for schema in (
+            delivered.schema,
+            output.result().arrow_schema(),
+        ):
+            assert schema.field("_source_amplitude").equals(
+                stream.arrow_schema().field("_source_amplitude"), check_metadata=True
+            )
+
+    run(write)
+
+
+def test_unbound_slot_settles_only_its_provisional_token_type() -> None:
+    """An unbound slot's scalar token description can settle to a list declaration."""
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+
+    declared = pa.large_list(pa.field("leaf", TOKEN, metadata={b"kind": b"token"}))
+    tags, data = shaped_source(declared).output_schema()
+    slot = SourceJobNode(name="events", tag_schema=tags, data_schema=data)
+    assert slot.bound_source is None and not slot.arrow_types_declared
+    provisional = slot.arrow_schema()
+    assert provisional.field("_source_amplitude").type == TOKEN
+    (batch,) = batches_of(shaped_source(declared))
+    system_columns = iter(
+        batch.column(index)
+        for index, field in enumerate(batch.schema)
+        if field.name.startswith("_tag_")
+    )
+    index = provisional.get_field_index("_source_amplitude")
+    declared_field = batch.schema.field("_source_amplitude")
+    schema = provisional.set(index, declared_field)
+    settled = pa.RecordBatch.from_arrays(
+        [
+            next(system_columns)
+            if field.name.startswith("_tag_")
+            else batch.column(batch.schema.get_field_index(field.name))
+            for field in schema
+        ],
+        schema=schema,
+    )
+
+    async def write() -> None:
+        output = OutputChannel(slot)
+        reader = output.open_reader()
+        await output.send(settled)
+        with pytest.raises(SourceInfoTypesDisagree, match="_source_amplitude"):
+            await output.send(_with_amplitude_tokens(settled, 0, ["wrong"], TOKEN))
+        await output.close()
+        for result in (output.result(), await reader.to_stream()):
+            assert (
+                result.arrow_schema()
+                .field("_source_amplitude")
+                .equals(declared_field, check_metadata=True)
+            )
+
+    run(write)
