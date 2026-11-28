@@ -24,7 +24,6 @@ from upath import UPath
 
 from orcapod.hashing.file_hashers import FileHasher, FileHashKey
 from orcapod.hashing.hash_cachers import SqliteHashCacher
-from orcapod.hashing.hash_utils import SHA256_ALGORITHM
 from orcapod.types import PathLike
 
 logger = logging.getLogger(__name__)
@@ -244,7 +243,6 @@ def populate_hash_cache(
     *,
     min_size_bytes: int = _DEFAULT_MIN_SIZE_BYTES,
     db_path: UPath | PathLike | None = None,
-    algorithm: str = SHA256_ALGORITHM,
     buffer_size: int = 65536,
     max_workers: int = _DEFAULT_MAX_WORKERS,
     dry_run: bool = False,
@@ -254,7 +252,8 @@ def populate_hash_cache(
     """Recursively hash and cache all files >= ``min_size_bytes`` under ``path``.
 
     Pre-populates the SQLite file-hash cache so that subsequent pipeline runs
-    can skip expensive content hashing with a sub-millisecond DB lookup.
+    can skip expensive content hashing with a sub-millisecond DB lookup. Files
+    are hashed with ``sha256``, the only file hash algorithm (ITL-1155).
 
     All files under ``path`` are visited recursively, including hidden files.
     Symlinks are skipped. Per-file and per-directory errors are logged as warnings
@@ -277,7 +276,6 @@ def populate_hash_cache(
             supported — SQLite cannot operate on remote filesystems. Defaults to
             the ``ORCAPOD_HASH_CACHE_DB`` environment variable, or
             ``~/.orcapod/file_hash_cache.db`` if unset.
-        algorithm: Hash algorithm passed to ``FileHasher``. Defaults to ``"sha256"``.
         buffer_size: Read buffer size in bytes passed to ``FileHasher``.
             Defaults to 65536.
         max_workers: Number of threads for concurrent per-file hashing. Defaults
@@ -335,7 +333,7 @@ def populate_hash_cache(
             ]
         )
 
-        hasher = FileHasher(algorithm=algorithm, buffer_size=buffer_size)
+        hasher = FileHasher(buffer_size=buffer_size)
         if dry_run:
             visitor: _HashVisitor | _DryRunVisitor = _DryRunVisitor(
                 cacher, hasher, force=force

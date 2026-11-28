@@ -63,22 +63,6 @@ class TestHashFileReturnType:
         assert isinstance(result.digest, bytes)
         assert len(result.digest) == 32  # SHA-256 produces 32 bytes
 
-    def test_hash_file_xxh64_returns_content_hash(self, sample_file):
-        result = hash_file(sample_file, algorithm="xxh64")
-        assert isinstance(result, ContentHash)
-        assert result.method == "xxh64"
-
-    def test_hash_file_crc32_returns_content_hash(self, sample_file):
-        result = hash_file(sample_file, algorithm="crc32")
-        assert isinstance(result, ContentHash)
-        assert result.method == "crc32"
-        assert len(result.digest) == 4  # CRC32 produces 4 bytes
-
-    def test_hash_file_hash_path_returns_content_hash(self, sample_file):
-        result = hash_file(sample_file, algorithm="hash_path")
-        assert isinstance(result, ContentHash)
-        assert result.method == "hash_path"
-
     def test_hash_file_to_string_round_trips(self, sample_file):
         """ContentHash.to_string() / from_string() preserves method and digest."""
         original = hash_file(sample_file)
@@ -101,10 +85,9 @@ class TestFileHasherReturnType:
         assert isinstance(result, ContentHash)
 
     def test_method_matches_algorithm(self, sample_file):
-        for algo in ("sha256", "md5"):
-            hasher = FileHasher(algorithm=algo)
-            result = hasher.hash_file(sample_file)
-            assert result.method == algo
+        hasher = FileHasher(algorithm="sha256")
+        assert hasher.hash_file(sample_file).method == "sha256"
+        assert hasher.hash_algorithm == "sha256"
 
     def test_digest_is_bytes(self, file_hasher, sample_file):
         result = file_hasher.hash_file(sample_file)

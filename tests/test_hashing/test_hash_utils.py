@@ -183,35 +183,27 @@ class TestHashFile:
             hash_file(tmp_path / "does_not_exist.bin")
 
     def test_invalid_algorithm_raises_value_error(self, tmp_path):
-        """Bogus algorithm name raises ValueError with 'Invalid algorithm' (lines 159-161)."""
+        """An algorithm other than sha256 raises ValueError naming it (ITL-1155)."""
         from orcapod.hashing.hash_utils import hash_file
         import pytest
 
         f = tmp_path / "f.bin"
         f.write_bytes(b"hello")
-        with pytest.raises(ValueError, match="Invalid algorithm"):
+        with pytest.raises(ValueError, match="'bogus_algo_xyz'.*sha256 is the only"):
             hash_file(f, algorithm="bogus_algo_xyz")
 
-    def test_hash_path_algorithm(self, tmp_path):
-        """hash_path hashes the path string, not file content (line 126 area)."""
+    def test_hash_path_algorithm_is_gone(self, tmp_path):
+        """hash_path hashed the path string, not the content: refused (ITL-1155)."""
         from orcapod.hashing.hash_utils import hash_file
-
-        f = tmp_path / "f.bin"
-        f.write_bytes(b"hello")
-        result = hash_file(f, algorithm="hash_path")
-        assert result.method == "hash_path"
-        assert len(result.digest) == 32
-
-    def test_hash_path_ignores_content(self, tmp_path):
-        """Two files at the same path but different content hash identically with hash_path."""
-        from orcapod.hashing.hash_utils import hash_file
+        import pytest
 
         f = tmp_path / "f.bin"
         f.write_bytes(b"content A")
-        r1 = hash_file(f, algorithm="hash_path")
+        with pytest.raises(ValueError, match="'hash_path'.*sha256 is the only"):
+            hash_file(f, algorithm="hash_path")
+        before = hash_file(f)
         f.write_bytes(b"content B")
-        r2 = hash_file(f, algorithm="hash_path")
-        assert r1.digest == r2.digest
+        assert hash_file(f) != before
 
 
 class TestIsInString:

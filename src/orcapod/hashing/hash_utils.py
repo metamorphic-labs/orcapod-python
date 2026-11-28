@@ -3,12 +3,10 @@ import inspect
 import logging
 import types as _types
 import typing
-import zlib
 from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import xxhash
 from upath import UPath
 
 from orcapod.logical_types.identifier import logical_type_identifier
@@ -123,102 +121,76 @@ def _to_path(file_path: PathLike) -> Path | UPath:
 
 
 SHA256_ALGORITHM = "sha256"
-_PATH_HASH_ALGORITHM = "hash_path"
-_XXH64_ALGORITHM = "xxh64"
-_CRC32_ALGORITHM = "crc32"
+_SHA256_DIGEST_SIZE = 32
 
-_FIXED_DIGEST_SIZES = {
-    _PATH_HASH_ALGORITHM: 32,
-    _XXH64_ALGORITHM: 8,
-    _CRC32_ALGORITHM: 4,
-}
+
+def require_file_hash_algorithm(algorithm: object) -> None:
+    """Require the one file hash algorithm, ``sha256``.
+
+    The file content hash carries the label ``sha256``, the name of the digest
+    function applied to the file's bytes. No other algorithm has a defined label,
+    so no other one is accepted (ITL-1155), as the directory hasher accepts none.
+
+    Args:
+        algorithm: The algorithm name given.
+
+    Raises:
+        ValueError: If ``algorithm`` is not exactly ``"sha256"``; the message names
+            the algorithm given.
+    """
+    if not isinstance(algorithm, str) or str.__eq__(algorithm, SHA256_ALGORITHM) is not True:
+        raise ValueError(
+            f"Unsupported file hash algorithm {algorithm!r}: "
+            f"{SHA256_ALGORITHM} is the only file hash algorithm"
+        )
 
 
 def file_hash_digest_size(algorithm: str) -> int:
     """Return the digest length in bytes of a ``hash_file`` hash made with ``algorithm``.
 
     Args:
-        algorithm: An algorithm ``hash_file`` accepts (its hashes' label).
+        algorithm: The file hash algorithm (its hashes' label): ``"sha256"``.
 
     Returns:
-        The exact length of every digest ``hash_file`` returns for ``algorithm``.
+        The exact length of every digest ``hash_file`` returns.
 
     Raises:
-        ValueError: If the algorithm name is unsupported or its digest has no
-            fixed length.
+        ValueError: If ``algorithm`` is not ``"sha256"``, the only file hash
+            algorithm.
     """
-    if algorithm in _FIXED_DIGEST_SIZES:
-        return _FIXED_DIGEST_SIZES[algorithm]
-    try:
-        size = hashlib.new(algorithm).digest_size
-    except (ValueError, TypeError):  # hashlib may use TypeError for an embedded NUL
-        raise ValueError(f"No file hash algorithm named {algorithm!r}") from None
-    if size == 0:  # an extendable-output function (shake_*): no fixed length
-        raise ValueError(
-            f"File hash algorithm {algorithm!r} has no fixed digest length"
-        )
-    return size
+    require_file_hash_algorithm(algorithm)
+    return _SHA256_DIGEST_SIZE
 
 
 def hash_file(
-    file_path: PathLike, algorithm=SHA256_ALGORITHM, buffer_size=65536
+    file_path: PathLike, algorithm: str = SHA256_ALGORITHM, buffer_size: int = 65536
 ) -> ContentHash:
-    """Calculate the hash of a file using the specified algorithm.
+    """Calculate the SHA-256 hash of a file's content.
 
     Supports both local ``pathlib.Path`` and remote ``UPath`` objects.
 
     Args:
         file_path: Path to the file to hash.
-        algorithm: Hash algorithm to use — options include:
-            'md5', 'sha1', 'sha256', 'sha512', 'xxh64', 'crc32', 'hash_path'.
+        algorithm: The hash algorithm. ``"sha256"`` is the only file hash
+            algorithm; anything else is refused.
         buffer_size: Size of chunks to read from the file at a time.
 
     Returns:
-        A ContentHash with method set to the algorithm name and digest
-        containing the raw hash bytes.
+        A ContentHash with method ``"sha256"`` and digest containing the raw
+        hash bytes.
+
+    Raises:
+        ValueError: If ``algorithm`` is not ``"sha256"``; the message names the
+            algorithm given. Raised before the file is looked at.
+        FileNotFoundError: If ``file_path`` is not a file.
     """
+    require_file_hash_algorithm(algorithm)
     path = _to_path(file_path)
 
     if not path.is_file():
         raise FileNotFoundError(f"The file {file_path} does not exist")
 
-    # Hash the path string itself rather than file content
-    if algorithm == _PATH_HASH_ALGORITHM:
-        hasher = hashlib.sha256()
-        hasher.update(str(file_path).encode("utf-8"))
-        return ContentHash(method=algorithm, digest=hasher.digest())
-
-    if algorithm == _XXH64_ALGORITHM:
-        hasher = xxhash.xxh64()
-        with path.open("rb") as file:
-            while True:
-                data = file.read(buffer_size)
-                if not data:
-                    break
-                hasher.update(data)
-        return ContentHash(method=algorithm, digest=hasher.digest())
-
-    if algorithm == _CRC32_ALGORITHM:
-        crc = 0
-        with path.open("rb") as file:
-            while True:
-                data = file.read(buffer_size)
-                if not data:
-                    break
-                crc = zlib.crc32(data, crc)
-        return ContentHash(
-            method=algorithm,
-            digest=(crc & 0xFFFFFFFF).to_bytes(4, byteorder="big"),
-        )
-
-    try:
-        hasher = hashlib.new(algorithm)
-    except ValueError:
-        valid_algorithms = ", ".join(sorted(hashlib.algorithms_available))
-        raise ValueError(
-            f"Invalid algorithm: {algorithm}. Available algorithms: {valid_algorithms}, xxh64, crc32"
-        )
-
+    hasher = hashlib.sha256()
     with path.open("rb") as file:
         while True:
             data = file.read(buffer_size)
@@ -226,7 +198,7 @@ def hash_file(
                 break
             hasher.update(data)
 
-    return ContentHash(method=algorithm, digest=hasher.digest())
+    return ContentHash(method=SHA256_ALGORITHM, digest=hasher.digest())
 
 
 def _is_in_string(line: str, pos: int) -> bool:

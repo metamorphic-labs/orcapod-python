@@ -11,8 +11,6 @@ from pathlib import Path
 import typer
 from upath import UPath
 
-from orcapod.hashing.hash_utils import SHA256_ALGORITHM
-
 _DEFAULT_MIN_SIZE_MB: float = 500.0
 
 
@@ -31,12 +29,6 @@ def warm_cache(
             "Path to the SQLite hash-cache database. "
             "Defaults to $ORCAPOD_HASH_CACHE_DB or ~/.orcapod/file_hash_cache.db."
         ),
-    ),
-    algorithm: str = typer.Option(
-        SHA256_ALGORITHM,
-        "--algorithm",
-        help="Hash algorithm (sha256, xxh64, md5, …). Default: sha256.",
-        show_default=True,
     ),
     buffer_size: int = typer.Option(
         65536,
@@ -95,7 +87,6 @@ def warm_cache(
         path,
         min_size_bytes=min_size_bytes,
         db_path=_db_path,
-        algorithm=algorithm,
         buffer_size=buffer_size,
         max_workers=max_workers,
         dry_run=dry_run,

@@ -6,6 +6,7 @@ from orcapod.hashing.hash_utils import (
     SHA256_ALGORITHM,
     file_hash_digest_size,
     hash_file,
+    require_file_hash_algorithm,
 )
 from orcapod.protocols.hashing_protocols import (
     CacherProtocol,
@@ -32,7 +33,8 @@ class FileHashKey:
         mtime_ns: Last-modified time in nanoseconds (``path.stat().st_mtime_ns``).
         size: File size in bytes (``path.stat().st_size``).
         algorithm: PROVISIONAL. Hash label of the algorithm (``ContentHash.method`` of the
-            hash, e.g. ``"sha256"``).
+            hash): ``"sha256"``, the only file hash algorithm (ITL-1155). A key
+            with any other label is refused on ``put`` and a miss on ``get``.
     """
 
     path: UPath
@@ -68,8 +70,8 @@ def require_storable(algorithm: str, method: str, digest: bytes) -> int:
         The validated digest size.
 
     Raises:
-        ValueError: If the labels differ, the label names no algorithm with a fixed
-            digest length, or the digest has another length.
+        ValueError: If the labels differ, the label is not ``sha256`` (the only
+            file hash algorithm), or the digest has another length.
     """
     if str.__eq__(algorithm, method) is not True:
         raise ValueError(
@@ -137,11 +139,19 @@ def parse_stored_file_hash(
 
 
 class FileHasher:
-    """Hash file content using a configurable algorithm.
+    """Hash file content with SHA-256.
+
+    ``sha256`` is the only file hash algorithm (ITL-1155): the file content hash
+    carries the label ``sha256``, and no other algorithm has a defined label.
 
     Args:
-        algorithm: Hashing algorithm to use. Defaults to ``"sha256"``.
+        algorithm: The hash algorithm. Only ``"sha256"``, the default, is
+            accepted.
         buffer_size: Read buffer size in bytes. Defaults to 65536.
+
+    Raises:
+        ValueError: If ``algorithm`` is not ``"sha256"``; the message names the
+            algorithm given.
     """
 
     def __init__(
@@ -149,6 +159,7 @@ class FileHasher:
         algorithm: str = SHA256_ALGORITHM,
         buffer_size: int = 65536,
     ):
+        require_file_hash_algorithm(algorithm)
         self.algorithm = algorithm
         self.buffer_size = buffer_size
 
@@ -189,10 +200,8 @@ class CachedFileHasher:
     ``FileContentHasherProtocol`` — callers do not need to know which they
     have.
 
-    The inner hasher's label must name an algorithm a cache can store: a
-    ``hashlib`` algorithm with a fixed digest length, or ``hash_path``, ``xxh64``
-    or ``crc32`` (every algorithm ``FileHasher`` can hash with qualifies). Any
-    other label is refused here, before a file is hashed.
+    The inner hasher's label must be ``sha256``, the only file hash algorithm
+    (ITL-1155). Any other label is refused here, before a file is hashed.
 
     Args:
         file_hasher: Inner hasher that performs the actual content hashing.
@@ -200,8 +209,8 @@ class CachedFileHasher:
             ``CacherProtocol[FileHashKey, ContentHash]``.
 
     Raises:
-        ValueError: If ``file_hasher.hash_algorithm`` names no algorithm with a fixed
-            digest length.
+        ValueError: If ``file_hasher.hash_algorithm`` is not ``"sha256"``; the
+            message names the label given.
     """
 
     def __init__(
@@ -209,7 +218,7 @@ class CachedFileHasher:
         file_hasher: FileContentHasherProtocol,
         cacher: "CacherProtocol[FileHashKey, ContentHash]",
     ) -> None:
-        _ = file_hash_digest_size(file_hasher.hash_algorithm)
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
         self.file_hasher = file_hasher
         self.cacher = cacher
 

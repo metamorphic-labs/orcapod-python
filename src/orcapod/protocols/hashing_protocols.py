@@ -146,8 +146,7 @@ class FileContentHasherProtocol(Protocol):
 
         A file hash cache uses it to return an entry only to a hasher of the same
         algorithm (ITL-1488). To be cached (``CachedFileHasher``), the label must
-        name a ``hashlib`` algorithm with a fixed digest length, or ``hash_path``,
-        ``xxh64`` or ``crc32``.
+        be ``sha256``, the only file hash algorithm (ITL-1155).
         """
         ...
 

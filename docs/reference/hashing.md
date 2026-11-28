@@ -93,7 +93,7 @@ The labels of v0.3:
 | `batch_v1` | the folded source id and record id of `Batch` (site 6b) | `BATCH_FOLD_LABEL`, `core/operators/batch.py` |
 | `group_v1` | the folded source id and record id of `GroupBy` (site 6b), and the merged source-info token of a data-tag group key | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
 | `join_v1` | the merged source-info token of a key that is a data-tag on several inputs of a `Join` (site 6b) | `JOIN_FOLD_LABEL`, `core/operators/join.py` |
-| `sha256` | the file content hash: SHA-256 of the file's bytes | the file hasher's `algorithm` |
+| `sha256` | the file content hash: SHA-256 of the file's bytes | `SHA256_ALGORITHM`, `hashing/hash_utils.py` |
 
 Where a hash appears, and in which form:
 
@@ -317,7 +317,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 |---|---|---|---|---|
 | structure hasher | a Python value as a tagged JSON tree | SHA-256 of canonical JSON, `semantic_v1` | every `content_hash()` / `pipeline_hash()`, type and function hash; the names built on schema hashes | `hashing/semantic_hashing/semantic_hasher.py:SemanticAwarePythonHasher._hash_to_content_hash` |
 | Arrow hasher | a table after the semantic visitor | starfix, `arrow_v1` (a table Orcapod built: float rule on); `hash_table_strict`: `arrow_strict_v1` (a pyarrow table given as a value: every bit counts); `hash_table_ordered`: `arrow_ordered_v1` (a library value's digest: every bit counts); `hash_schema`: `arrow_schema_v1` | row data hashes, entry ids, row keys, default source ids, table values; every schema in an identity | `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_strict`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_ordered`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_schema`, `hashing/arrow_hashers.py:StarfixArrowHasher._digest`, `hashing/starfix_digest.py:_digest_table`, `hashing/starfix_digest.py:digest_schema` |
-| file hasher | a file's bytes | the configured digest function, label = its name (`sha256` in the data context; others: ITL-1155) | `File` value hash | `hashing/hash_utils.py:hash_file`, `hashing/hash_cachers.py:SqliteHashCacher.get`, `hashing/hash_cachers.py:SqliteHashCacher.put` |
+| file hasher | a file's bytes | SHA-256 of the bytes, label `sha256`, the only file hash algorithm: `hash_file`, `FileHasher`, `CachedFileHasher`, the file hash cachers and a data context file refuse any other name (ITL-1155) | `File` value hash | `hashing/hash_utils.py:hash_file`, `hashing/hash_cachers.py:SqliteHashCacher.get`, `hashing/hash_cachers.py:SqliteHashCacher.put` |
 | directory hasher | a directory tree | Merkle tree of SHA-256 entries, `directory_v1`; file leaves taken with their label | `Directory` value hash | `hashing/directory_hashers.py:BasicDirectoryHasher.hash_directory`, `hashing/directory_hashers.py:_hash_dir` |
 | array value hash | an array: element digest, then order, byte order, struct layout | SHA-256, `ndarray_v1` (the element digest is a step of the same algorithm) | `numpy.ndarray` value hash | `logical_types/numpy_type.py:array_value_digest`, `logical_types/array_format.py:array_digest_v1` |
 | tensor value hash | element digest, flags, strides, class | SHA-256, `torch_tensor_v1` | `torch.Tensor` value hash | `logical_types/torch_type.py:tensor_digest` |
