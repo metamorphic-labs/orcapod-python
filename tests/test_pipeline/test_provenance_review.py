@@ -19,16 +19,18 @@ together they also cover the review's list of missing coverage. The rules they h
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
+from typing_extensions import override
 
 from orcapod import FunctionPod, PipelineJob, function_pod
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError, ProvenanceInconsistencyError
+from orcapod.protocols.core_protocols import DataFunctionProtocol
 from orcapod.types import Schema
 from orcapod.operators import (
     Batch,
@@ -1034,12 +1036,17 @@ def test_public_function_pod_validates_custom_declared_outputs(
 ) -> None:
     class CustomFunction(PythonDataFunction):
         @property
+        @override
         def output_data_schema(self) -> Schema:
             return Schema(dict.fromkeys(outputs, int))
 
-    custom = CustomFunction(_pair_for_reserved_outputs, output_keys=["left", "right"])
+    custom = cast(
+        object,
+        CustomFunction(_pair_for_reserved_outputs, output_keys=["left", "right"]),
+    )
+    assert isinstance(custom, DataFunctionProtocol)
     with pytest.raises(InputValidationError, match="'_content_hash'.*'_foo'"):
-        FunctionPod(data_function=custom)
+        _ = FunctionPod(data_function=custom)
 
 
 @pytest.mark.parametrize("missing_callable", [False, True], ids=["importable", "proxy"])
