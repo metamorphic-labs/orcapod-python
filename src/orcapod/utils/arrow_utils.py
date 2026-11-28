@@ -1796,31 +1796,33 @@ def _parse_system_tag_column(
 
 def _system_tag_position_groups(
     names: Collection[str],
-) -> dict[str, dict[str, dict[str, str]]]:
-    """Group system-tag columns by provenance path, position, and field kind."""
-    groups: dict[str, dict[str, dict[str, str]]] = {}
+    tied_positions: Sequence[Sequence[int]],
+) -> dict[tuple[str, int], dict[str, dict[str, str]]]:
+    """Group system-tag columns by path within each full pipeline hash tie."""
+    tie_by_position = {position: tie[0] for tie in tied_positions for position in tie}
+    groups: dict[tuple[str, int], dict[str, dict[str, str]]] = {}
     for name in names:
         if (parsed := _parse_system_tag_column(name)) is not None:
             field_type, provenance_path, position = parsed
-            groups.setdefault(provenance_path, {}).setdefault(position, {})[
-                field_type
-            ] = name
+            if (tie := tie_by_position.get(int(position))) is not None:
+                groups.setdefault((provenance_path, tie), {}).setdefault(position, {})[
+                    field_type
+                ] = name
     return groups
 
 
-def _tied_custom_system_tags(
+def _tied_system_tag_bundles(
     names: Collection[str],
     tied_positions: Sequence[Sequence[int]],
-) -> list[dict[int, list[str]]]:
-    """Group whole system-tag declarations for ties that include a custom tag."""
+) -> list[tuple[bool, dict[int, list[str]]]]:
+    """Return ties that must move as bundles, flagged if they include custom tags."""
     by_position: dict[int, list[str]] = {
         position: [] for group in tied_positions for position in group
     }
+    base_names: dict[int, set[str]] = {position: set() for position in by_position}
     custom: set[int] = set()
     ids = {constants.SYSTEM_TAG_SOURCE_ID_PREFIX, constants.SYSTEM_TAG_RECORD_ID_PREFIX}
     for name in names:
-        if not name.startswith(constants.SYSTEM_TAG_PREFIX):
-            continue
         parsed = _parse_system_tag_column(name)
         if parsed is None:
             continue
@@ -1828,13 +1830,17 @@ def _tied_custom_system_tags(
         position = int(suffix)
         if position in by_position:
             by_position[position].append(name)
+            base_names[position].add(name.rsplit(constants.FIELD_SEPARATOR, 1)[0])
             if f"{constants.SYSTEM_TAG_PREFIX}{kind}" not in ids:
                 custom.add(position)
-    return [
-        {position: by_position[position] for position in group}
-        for group in tied_positions
-        if custom.intersection(group)
-    ]
+    bundles: list[tuple[bool, dict[int, list[str]]]] = []
+    for group in tied_positions:
+        has_custom = not custom.isdisjoint(group)
+        if has_custom or any(
+            base_names[position] != base_names[group[0]] for position in group
+        ):
+            bundles.append((has_custom, {pos: by_position[pos] for pos in group}))
+    return bundles
 
 
 def _sort_equally_declared_system_tags(tables: list["pa.Table"]) -> list["pa.Table"]:
@@ -1863,38 +1869,54 @@ def _sort_equally_declared_system_tags(tables: list["pa.Table"]) -> list["pa.Tab
     return [stacked.take(pa.array(rows, type=pa.int64())) for rows in rows_by_position]
 
 
-def has_tied_custom_system_tags(
+def has_tied_system_tag_bundles(
     names: Collection[str], tied_positions: Sequence[Sequence[int]]
 ) -> bool:
-    """Whether tied Join operands include a custom system tag."""
-    return bool(_tied_custom_system_tags(names, tied_positions))
+    """Whether any tied Join operands need to move as whole declarations."""
+    return bool(_tied_system_tag_bundles(names, tied_positions))
 
 
-def sort_tied_custom_system_tags(
+def sort_tied_system_tag_bundles(
     table: "pa.Table", tied_positions: Sequence[Sequence[int]]
-) -> "pa.Table":
-    """Assign tied operands with custom tags to canonical positions.
+) -> tuple["pa.Table", dict[str, str]]:
+    """Assign tied operands with custom or asymmetric tags to canonical positions.
 
     Order whole system-tag declarations first. Only between operands with the
     same declaration, order each matched row's values as a bundle. In either
     case every field and value stays with its operand's other system tags.
+    Return the table and a mapping from original names to their new names.
     """
-    groups = _tied_custom_system_tags(table.column_names, tied_positions)
+    groups = _tied_system_tag_bundles(table.column_names, tied_positions)
     if not groups:
-        return table
+        return table, {}
     replacements: dict[str, tuple[pa.Field[Any], pa.ChunkedArray[Any]]] = {}
-    for positions in groups:
-        by_layout: dict[bytes, list[tuple[list[str], pa.Table]]] = defaultdict(list)
+    renamed: dict[str, str] = {}
+    for has_custom, positions in groups:
+        by_layout: dict[tuple[int, bytes], list[tuple[list[str], pa.Table]]] = (
+            defaultdict(list)
+        )
         for names in positions.values():
-            names = sorted(names)
+            names = sorted(
+                names,
+                key=lambda name: (
+                    not has_custom
+                    and name.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX),
+                    name,
+                ),
+            )
             bundle = table.select(names).rename_columns(
                 [name.rsplit(constants.BLOCK_SEPARATOR, 1)[0] for name in names]
             )
             # Serialize the declaration, including all nested flags and metadata,
-            # with system tags laid out by name.
+            # in a consistent field order.
             signature = bundle.schema.remove_metadata().serialize().to_pybytes()
-            by_layout[signature].append((names, bundle))
+            # For ID-only ties, keep the more complete declaration first, as
+            # when the old pair sort put a present record ID before a null.
+            by_layout[(0 if has_custom else -len(names), signature)].append(
+                (names, bundle)
+            )
         target_positions = iter(sorted(positions))
+        group_fields: dict[str, tuple[pa.Field[Any], pa.ChunkedArray[Any]]] = {}
         for signature in sorted(by_layout):
             inputs = by_layout[signature]
             ordered = _sort_equally_declared_system_tags(
@@ -1906,36 +1928,52 @@ def sort_tied_custom_system_tags(
                     names, bundle.schema, bundle.columns, strict=True
                 ):
                     prefix = name.rsplit(constants.FIELD_SEPARATOR, 1)[0]
-                    replacements[name] = (field.with_name(f"{prefix}:{target}"), array)
+                    renamed[name] = f"{prefix}:{target}"
+                    group_fields[name] = (field.with_name(renamed[name]), array)
+        if has_custom:
+            replacements.update(group_fields)
+        else:
+            # Place the canonical ID bundles in the same order for every
+            # permutation, even when a field was absent at an earlier position.
+            slots = (name for name in table.column_names if name in group_fields)
+            replacements.update(zip(slots, group_fields.values(), strict=True))
     columns = [
         replacements.get(field.name, (field, column))
         for field, column in zip(table.schema, table.columns, strict=True)
     ]
-    return pa.Table.from_arrays(
-        [column for _, column in columns],
-        schema=pa.schema(
-            [field for field, _ in columns],
-            metadata=cast(
-                "dict[bytes | str, bytes | str] | None", table.schema.metadata
+    return (
+        pa.Table.from_arrays(
+            [column for _, column in columns],
+            schema=pa.schema(
+                [field for field, _ in columns],
+                metadata=cast(
+                    "dict[bytes | str, bytes | str] | None", table.schema.metadata
+                ),
             ),
         ),
+        renamed,
     )
 
 
 def sorted_system_tag_nullability(
     nullable_by_name: Mapping[str, bool],
-    tied_positions: Sequence[Sequence[int]] = (),
+    tied_positions: Sequence[Sequence[int]],
 ) -> dict[str, bool]:
     """Return nullability for the source/record fields rebuilt by a tied sort."""
-    custom_tags = {
+    if not tied_positions:
+        return {}
+
+    bundled_tags = {
         name
-        for group in _tied_custom_system_tags(nullable_by_name.keys(), tied_positions)
+        for _, group in _tied_system_tag_bundles(
+            nullable_by_name.keys(), tied_positions
+        )
         for bundle in group.values()
         for name in bundle
     }
     nullable: dict[str, bool] = {}
     for positions in _system_tag_position_groups(
-        nullable_by_name.keys() - custom_tags
+        nullable_by_name.keys() - bundled_tags, tied_positions
     ).values():
         if len(positions) <= 1:
             continue
@@ -1945,9 +1983,7 @@ def sorted_system_tag_nullability(
         ):
             kind = prefix.removeprefix(constants.SYSTEM_TAG_PREFIX)
             names = [fields[kind] for fields in positions.values() if kind in fields]
-            can_hold_null = len(names) != len(positions) or any(
-                nullable_by_name[name] for name in names
-            )
+            can_hold_null = any(nullable_by_name[name] for name in names)
             nullable.update(dict.fromkeys(names, can_hold_null))
     return nullable
 
@@ -1958,23 +1994,19 @@ def sorted_system_tag_field(field: "pa.Field[Any]", nullable: bool) -> "pa.Field
 
 
 def sort_system_tag_values(
-    table: "pa.Table", *, tied_positions: Sequence[Sequence[int]] = ()
+    table: "pa.Table", *, tied_positions: Sequence[Sequence[int]]
 ) -> "pa.Table":
-    """Sort paired system tag values for columns that share the same provenance path.
+    """Canonicalize system tags within each explicit full pipeline hash tie.
 
-    System tag columns come in (source_id, record_id) pairs. Columns that differ
-    only by their canonical position (the final :N) represent streams with the same
-    pipeline_hash that were joined. For commutativity, paired (source_id, record_id)
-    tuples must be sorted together per row so that the result is independent of
-    input order.
-
-    Algorithm:
-    1. Parse each system tag column into (field_type, provenance_path, position)
-    2. Group by provenance_path — source_id and record_id at the same path+position
-       are paired
-    3. For each group with >1 position, sort per-row by (source_id, record_id) tuples
-    4. Assign sorted values back to both columns at each position
+    For symmetric ID-only inputs, sort the (source_id, record_id) pairs per row
+    within each provenance path. A printed path can include a shortened hash,
+    so matching paths alone never make positions eligible to exchange IDs.
+    Ties with custom tags or asymmetric field sets move whole declarations
+    with their arrays, so a value cannot move into a field that is absent.
     """
+    if not tied_positions:
+        return table
+
     sys_tag_cols = [
         c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
     ]
@@ -1986,8 +2018,8 @@ def sort_system_tag_values(
         {name: table.schema.field(name).nullable for name in sys_tag_cols},
         tied_positions,
     )
-    groups = _system_tag_position_groups(nullable.keys())
-    table = sort_tied_custom_system_tags(table, tied_positions)
+    groups = _system_tag_position_groups(nullable.keys(), tied_positions)
+    table, _ = sort_tied_system_tag_bundles(table, tied_positions)
 
     source_id_field = constants.SYSTEM_TAG_SOURCE_ID_PREFIX[
         len(constants.SYSTEM_TAG_PREFIX) :

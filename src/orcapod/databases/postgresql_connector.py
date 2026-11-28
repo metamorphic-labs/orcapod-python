@@ -20,12 +20,28 @@ import re
 import threading
 import uuid
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 
-from orcapod.databases.utils import is_direct_projection
-from orcapod.errors import UnstorableTableNameError
+from orcapod.databases._sql_store import (
+    STORE_PATH_CATALOG,
+    STORE_PATH_CATALOG_FIELDS,
+    STORE_PATH_LAYOUT_VERSION,
+    TABLE_PATH_ENTRY_KIND,
+    catalog_name_pattern,
+    require_catalog_layout,
+    require_catalog_pair,
+)
+from orcapod.databases.utils import (
+    SQL_FROM_TABLE,
+    is_direct_projection,
+    match_direct_projection,
+    sql_table_identifier,
+    unquote_sql_identifier,
+)
+from orcapod.errors import OrcapodDatabaseError, UnstorableTableNameError
 from orcapod.types import ColumnInfo
 from orcapod.utils.lazy_module import LazyModule
 
@@ -258,6 +274,16 @@ def _coerce_pg_value(value: Any, arrow_type: "pa.DataType") -> Any:
     return value
 
 
+def _require_persistent_store_schema(schema: str, temporary: object) -> None:
+    """Refuse a store namespace that would disappear with a PostgreSQL session."""
+    # PostgreSQL's namespace checks omit the current session's temporary
+    # TOAST namespace, whose name uses this reserved system prefix.
+    if temporary or schema.startswith("pg_toast_temp_"):
+        raise OrcapodDatabaseError(
+            f"Cannot use temporary PostgreSQL schema {schema!r} for a connector store"
+        )
+
+
 def _resolve_column_type_lookup(
     query: str,
     connector: "PostgreSQLConnector",
@@ -281,22 +307,16 @@ def _resolve_column_type_lookup(
     # tables, multiple FROM clauses, subqueries, etc.) return {} so callers
     # fall back to treating all columns as pa.large_string().
 
-    # Fast path: any JOIN keyword means multi-table.
-    if re.search(r"\bJOIN\b", query, re.IGNORECASE):
-        return {}
-
-    # Find all FROM <table> occurrences.  We only proceed when there is
-    # exactly one (multiple FROMs indicate subqueries or CTEs).
-    from_pattern = re.compile(
-        r'\bFROM\b\s+(?:"([^"]+)"|(\w+))',
-        re.IGNORECASE,
-    )
-    from_matches = list(from_pattern.finditer(query))
-    if len(from_matches) != 1:
-        return {}
-
-    match = from_matches[0]
-    table_name = match.group(1) or match.group(2)
+    match = match_direct_projection(query)
+    if match is None:
+        if re.search(r"\bJOIN\b", query, re.IGNORECASE):
+            return {}
+        # A non-projection is ambiguous if it has several FROM clauses.
+        from_matches = list(SQL_FROM_TABLE.finditer(query))
+        if len(from_matches) != 1:
+            return {}
+        match = from_matches[0]
+    table_name = _normalize_pg_identifier(match["table"])
 
     # Inspect the text after the table name up to the next major SQL clause.
     # A comma before the clause boundary means comma-joined tables ("FROM a, b").
@@ -312,7 +332,24 @@ def _resolve_column_type_lookup(
     if "," in from_tail:
         return {}
 
-    return {ci.name: ci for ci in connector.get_column_info(table_name)}
+    namespace = match["schema"]
+    columns = (
+        connector.get_column_info(table_name)
+        if namespace is None
+        else connector.get_column_info(
+            table_name, schema=_normalize_pg_identifier(namespace)
+        )
+    )
+    return {ci.name: ci for ci in columns}
+
+
+def _normalize_pg_identifier(identifier: str) -> str:
+    """Resolve a parsed PostgreSQL identifier as the server would."""
+    if identifier.startswith('"'):
+        return unquote_sql_identifier(identifier)
+    return identifier.translate(
+        str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    )
 
 
 def _field_has_metadata(field: pa.Field) -> bool:
@@ -392,6 +429,7 @@ class PostgreSQLConnector:
         self._conn: Any = psycopg.connect(dsn, autocommit=False)
         self._lock = threading.RLock()  # RLock required: iter_batches → _resolve_column_type_lookup → get_column_info re-enters the lock
         self._cursor_seq = itertools.count()
+        self._store_transaction_active = False
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -415,7 +453,7 @@ class PostgreSQLConnector:
         """Return all user table names in this database (sorted, excludes views)."""
         with self._lock:
             conn = self._require_open()
-            with conn.cursor() as cur:
+            with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT table_name
@@ -426,6 +464,173 @@ class PostgreSQLConnector:
                     """
                 )
                 return [row[0] for row in cur.fetchall()]
+
+    def get_store_table_paths(
+        self, name: str, *, exact: bool = False, schema: str | None = None
+    ) -> list[tuple[str, str, str]]:
+        """Return registered record tables matching a physical name or prefix."""
+        from psycopg import sql as pg_sql
+
+        conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
+        # Rolling back the read scope also releases its catalog lock when
+        # psycopg uses a savepoint inside a caller-owned transaction.
+        with self._lock, conn.transaction(force_rollback=True), conn.cursor() as cur:
+            _ = cur.execute(
+                """
+                SELECT ns.nspname, ns.oid,
+                       ns.oid = pg_my_temp_schema() OR pg_is_other_temp_schema(ns.oid),
+                       rel.oid IS NOT NULL
+                FROM pg_catalog.pg_namespace AS ns
+                LEFT JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = ns.oid
+                  AND rel.relname = %s AND rel.relkind = 'r'
+                WHERE ns.nspname = COALESCE(%s, current_schema())
+                """,
+                (STORE_PATH_CATALOG, schema),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return []
+            schema = cast(str, row[0])
+            _require_persistent_store_schema(schema, row[2])
+            if not row[3]:
+                return []
+            # Psycopg scans percent signs even inside quoted identifiers when
+            # the statement also has bound parameters.
+            catalog = pg_sql.Identifier(schema.replace("%", "%%"), STORE_PATH_CATALOG)
+            match = pg_sql.SQL("= %s" if exact else "LIKE %s ESCAPE '!'")
+            _ = cur.execute(
+                pg_sql.SQL("""
+                    SELECT paths.table_name, paths.entry_value, paths.layout_version,
+                           physical.oid IS NOT NULL
+                    FROM {catalog} AS paths
+                    LEFT JOIN pg_catalog.pg_class AS physical ON physical.relname = paths.table_name
+                      AND physical.relnamespace = %s AND physical.relkind IN ('r', 'p')
+                    WHERE paths.table_name {match}
+                      AND paths.entry_kind = %s AND paths.entry_name = ''
+                    """).format(catalog=catalog, match=match),
+                (
+                    row[1],
+                    name if exact else catalog_name_pattern(name),
+                    TABLE_PATH_ENTRY_KIND,
+                ),
+            )
+            paths: list[tuple[str, str, str]] = []
+            for table_name, path_json, version, exists in cast(
+                "list[tuple[str, str, int, bool]]", cur.fetchall()
+            ):
+                if exists:
+                    require_catalog_layout(table_name, version)
+                    paths.append((schema, table_name, path_json))
+            return paths
+
+    def get_current_store_schema(self) -> str:
+        """Return the persistent schema selected for connector stores."""
+        conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
+        with self._lock, conn.transaction(force_rollback=True), conn.cursor() as cur:
+            _ = cur.execute(
+                """
+                SELECT ns.nspname,
+                       ns.oid = pg_my_temp_schema() OR pg_is_other_temp_schema(ns.oid)
+                FROM pg_catalog.pg_namespace AS ns
+                WHERE ns.nspname = current_schema()
+                """
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise OrcapodDatabaseError("PostgreSQL has no current schema")
+            schema = cast(str, row[0])
+            _require_persistent_store_schema(schema, row[1])
+            return schema
+
+    @contextmanager
+    def store_table_transaction(
+        self, table_name: str, path_json: str, *, schema: str
+    ) -> Iterator[tuple[str, bool]]:
+        """Register and write a record table, yielding whether it already exists."""
+        from psycopg import sql as pg_sql
+
+        with self._lock:
+            conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
+            self._store_transaction_active = True
+            try:
+                with conn.cursor() as cur:
+                    # Serialize registrations in this schema, including when the
+                    # catalog does not exist yet. 0x4F524341 is the Orcapod lock key.
+                    _ = cur.execute(
+                        """
+                        SELECT oid = pg_my_temp_schema() OR pg_is_other_temp_schema(oid),
+                               pg_advisory_xact_lock(%s, oid::integer)
+                        FROM pg_catalog.pg_namespace WHERE nspname = %s
+                        """,
+                        (0x4F524341, schema),
+                    )
+                    location = cur.fetchone()
+                    if location is None:
+                        raise OrcapodDatabaseError(
+                            f"PostgreSQL store schema {schema!r} no longer exists"
+                        )
+                    _require_persistent_store_schema(schema, location[0])
+                    catalog = pg_sql.Identifier(schema, STORE_PATH_CATALOG)
+                    fields = pg_sql.SQL(STORE_PATH_CATALOG_FIELDS).format(
+                        layout_version=pg_sql.Literal(STORE_PATH_LAYOUT_VERSION)
+                    )
+                    _ = cur.execute(
+                        pg_sql.SQL("CREATE TABLE IF NOT EXISTS {} {}").format(
+                            catalog, fields
+                        )
+                    )
+                    catalog = pg_sql.Identifier(
+                        schema.replace("%", "%%"), STORE_PATH_CATALOG
+                    )
+                    _ = cur.execute(
+                        pg_sql.SQL("""
+                            SELECT entry_value, layout_version FROM {}
+                            WHERE table_name = %s AND entry_kind = %s AND entry_name = ''
+                            """).format(catalog),
+                        (table_name, TABLE_PATH_ENTRY_KIND),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        require_catalog_layout(table_name, row[1])
+                    _ = cur.execute(
+                        """
+                        SELECT rel.relkind FROM pg_catalog.pg_class AS rel
+                        JOIN pg_catalog.pg_namespace AS ns ON ns.oid = rel.relnamespace
+                        WHERE ns.nspname = %s AND rel.relname = %s
+                        """,
+                        (schema, table_name),
+                    )
+                    physical = cur.fetchone()
+                    if physical is not None and physical[0] not in ("r", "p"):
+                        raise OrcapodDatabaseError(
+                            f"Relation {table_name!r} is not a record table"
+                        )
+                    require_catalog_pair(
+                        table_name,
+                        physical is not None,
+                        cast(str, row[0]) if row else None,
+                        path_json,
+                    )
+                    if row is None:
+                        _ = cur.execute(
+                            pg_sql.SQL("""
+                                INSERT INTO {} (table_name, entry_kind, entry_name, entry_value, layout_version)
+                                VALUES (%s, %s, '', %s, %s)
+                                """).format(catalog),
+                            (
+                                table_name,
+                                TABLE_PATH_ENTRY_KIND,
+                                path_json,
+                                STORE_PATH_LAYOUT_VERSION,
+                            ),
+                        )
+                yield schema, physical is not None
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                self._store_transaction_active = False
 
     def current_location(self) -> tuple[str, int, str, str]:
         """Return the server, database and schema the connection reached.
@@ -448,7 +653,7 @@ class PostgreSQLConnector:
         with self._lock:
             conn = self._require_open()
             host, port = conn.info.host, conn.info.port
-            with conn.cursor() as cur:
+            with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute("SELECT current_database(), current_schema()")
                 row = cur.fetchone()
         if row is None or row[0] is None or row[1] is None:
@@ -510,7 +715,7 @@ class PostgreSQLConnector:
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
-            with conn.cursor() as cur:
+            with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT kcu.column_name
@@ -528,22 +733,23 @@ class PostgreSQLConnector:
                 )
                 return [row[0] for row in cur.fetchall()]
 
-    def get_column_info(self, table_name: str) -> list[ColumnInfo]:
+    def get_column_info(
+        self, table_name: str, *, schema: str | None = None
+    ) -> list[ColumnInfo]:
         """Return column metadata with Arrow-mapped types."""
         self._require_table_name(table_name)
         with self._lock:
             conn = self._require_open()
-            self._validate_table_name(table_name)
-            with conn.cursor() as cur:
+            with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT column_name, data_type, udt_name, is_nullable
                     FROM information_schema.columns
-                    WHERE table_schema = current_schema()
+                    WHERE table_schema = COALESCE(%s, current_schema())
                       AND table_name   = %s
                     ORDER BY ordinal_position
                     """,
-                    (table_name,),
+                    (schema, table_name),
                 )
                 return [
                     ColumnInfo(
@@ -631,6 +837,8 @@ class PostgreSQLConnector:
         table_name: str,
         columns: list[ColumnInfo],
         pk_column: str,
+        *,
+        schema: str | None = None,
     ) -> None:
         """Create a table with the given columns if it does not already exist."""
         self._require_table_name(table_name)
@@ -649,15 +857,17 @@ class PostgreSQLConnector:
                 pk = " PRIMARY KEY" if col.name == pk_column else ""
                 escaped = col.name.replace('"', '""')
                 col_defs.append(f'    "{escaped}" {pg_type}{not_null}{pk}')
-            ddl = f'CREATE TABLE IF NOT EXISTS "{table_name}" (\n'
+            ddl = f"CREATE TABLE IF NOT EXISTS {sql_table_identifier(table_name, schema)} (\n"
             ddl += ",\n".join(col_defs)
             ddl += "\n)"
             try:
                 with conn.cursor() as cur:
                     cur.execute(ddl)
-                conn.commit()
+                if not self._store_transaction_active:
+                    conn.commit()
             except Exception:
-                conn.rollback()
+                if not self._store_transaction_active:
+                    conn.rollback()
                 raise
 
     def upsert_records(
@@ -666,6 +876,8 @@ class PostgreSQLConnector:
         records: pa.Table,
         id_column: str,
         skip_existing: bool = False,
+        *,
+        schema: str | None = None,
     ) -> None:
         """Write records to a table using upsert semantics."""
         self._require_table_name(table_name)
@@ -693,17 +905,22 @@ class PostgreSQLConnector:
                 else:
                     conflict_clause = f'ON CONFLICT ("{escaped_id}") DO NOTHING'
 
+            target = sql_table_identifier(table_name, schema)
+            if schema is not None:
+                target = target.replace("%", "%%")
             sql = (
-                f'INSERT INTO "{table_name}" ({col_list}) VALUES ({placeholders}) '
+                f"INSERT INTO {target} ({col_list}) VALUES ({placeholders}) "
                 f"{conflict_clause}"
             )
             rows_iter = (tuple(row[c] for c in cols) for row in records.to_pylist())
             try:
                 with conn.cursor() as cur:
                     cur.executemany(sql, rows_iter)
-                conn.commit()
+                if not self._store_transaction_active:
+                    conn.commit()
             except Exception:
-                conn.rollback()
+                if not self._store_transaction_active:
+                    conn.rollback()
                 raise
 
     @property

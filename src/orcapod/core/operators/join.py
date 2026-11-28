@@ -600,7 +600,7 @@ class Join(NonZeroInputOperator):
                     )
                     system_tag_fields[new_name] = col_type
                     names[col_name] = new_name
-        if arrow_utils.has_tied_custom_system_tags(
+        if arrow_utils.has_tied_system_tag_bundles(
             system_tag_fields.keys(), tied_positions
         ):
             fields = [
@@ -611,14 +611,15 @@ class Join(NonZeroInputOperator):
             ]
             if len(fields) == len(system_tag_fields):
                 declared = pa.schema(fields).empty_table()
-                canonical = arrow_utils.sort_tied_custom_system_tags(
+                canonical, renamed = arrow_utils.sort_tied_system_tag_bundles(
                     declared, tied_positions
                 )
-                renamed = dict(
-                    zip(declared.column_names, canonical.column_names, strict=True)
-                )
+                types_by_name = {
+                    renamed.get(name, name): kind
+                    for name, kind in system_tag_fields.items()
+                }
                 system_tag_fields = {
-                    renamed[name]: kind for name, kind in system_tag_fields.items()
+                    name: types_by_name[name] for name in canonical.column_names
                 }
         nullable = arrow_utils.sorted_system_tag_nullability(
             {

@@ -2358,9 +2358,9 @@ class TestSortSystemTagValues:
             "_tag_source_id::abc123:1": "a_source",
             "_tag_record_id::abc123:1": "a_record",
         }
-        result = sort_system_tag_values(pa.Table.from_pylist([merged_sys])).to_pylist()[
-            0
-        ]
+        result = sort_system_tag_values(
+            pa.Table.from_pylist([merged_sys]), tied_positions=((0, 1),)
+        ).to_pylist()[0]
 
         # After sorting, position 0 should have the smaller values
         assert result["_tag_source_id::abc123:0"] == "a_source"
@@ -2374,9 +2374,9 @@ class TestSortSystemTagValues:
             "_tag_source_id::abc123:0": "only_source",
             "_tag_record_id::abc123:0": "only_record",
         }
-        result = sort_system_tag_values(pa.Table.from_pylist([merged_sys])).to_pylist()[
-            0
-        ]
+        result = sort_system_tag_values(
+            pa.Table.from_pylist([merged_sys]), tied_positions=()
+        ).to_pylist()[0]
         assert result == merged_sys
 
     def test_non_system_tag_keys_ignored(self):
@@ -2386,9 +2386,9 @@ class TestSortSystemTagValues:
             "_tag_source_id::abc123:0": "src0",
             "_tag_record_id::abc123:0": "rec0",
         }
-        result = sort_system_tag_values(pa.Table.from_pylist([merged_sys])).to_pylist()[
-            0
-        ]
+        result = sort_system_tag_values(
+            pa.Table.from_pylist([merged_sys]), tied_positions=()
+        ).to_pylist()[0]
         assert result["regular_key"] == "value"
 
 

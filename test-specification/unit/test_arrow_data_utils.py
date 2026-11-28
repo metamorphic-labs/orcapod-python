@@ -140,7 +140,7 @@ class TestSortSystemTagValues:
             source_ids="src1",
             record_ids=[_make_row_identifier(), _make_row_identifier()],
         )
-        result = sort_system_tag_values(table_with_tags)
+        result = sort_system_tag_values(table_with_tags, tied_positions=())
         assert result.num_rows == table_with_tags.num_rows
 
 
