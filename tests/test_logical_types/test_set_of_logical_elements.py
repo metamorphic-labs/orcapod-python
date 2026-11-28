@@ -6,16 +6,18 @@ from its elements' values alone. A set of a logical type whose storage value is 
 ``canonical_order.sort_set_elements``, as a set of a plain Arrow type is: a NaN, two
 elements with one storage value and elements that cannot be ordered are refused.
 
-A set of a logical type stored as a struct (a user class: a dataclass, a structural
-class, a pydantic model) is left as it was, ordered by the ``repr`` of the storage
-values, pending the developer's decision in ITL-922. The tests at the end pin that order,
-so a later change of it is visible.
+Struct storage is compared by declared field order, recursively through lists and
+nested structs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
+import os
+import subprocess
+import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -60,7 +62,7 @@ class LogicalReading(BaseLogicalType):
     @override
     def get_arrow_extension_type(self) -> pa.ExtensionType:
         """Return the reading extension type."""
-        return self._arrow_ext_class()
+        return self._arrow_ext_class()  # pyright: ignore[reportCallIssue]  # factory fixes the extension name and storage type
 
     def get_polars_extension_type(self) -> pl.BaseExtension:
         """Return the equivalent Polars type."""
@@ -104,7 +106,7 @@ class LogicalWord(BaseLogicalType):
     @override
     def get_arrow_extension_type(self) -> pa.ExtensionType:
         """Return the word extension type."""
-        return self._arrow_ext_class()
+        return self._arrow_ext_class()  # pyright: ignore[reportCallIssue]  # factory fixes the extension name and storage type
 
     def get_polars_extension_type(self) -> pl.BaseExtension:
         """Return the equivalent Polars type."""
@@ -184,7 +186,9 @@ def _stored(source: DictSource) -> dict[str, list[Any]]:
     column = table.column("s").combine_chunks()
     if isinstance(column, pa.ExtensionArray):
         column = column.storage
-    return dict(zip(table.column("site").to_pylist(), column.to_pylist()))
+    sites = cast(list[str], table.column("site").to_pylist())
+    values = cast(list[list[Any]], column.to_pylist())
+    return dict(zip(sites, values))
 
 
 def _row_hashes(source: DictSource) -> dict[str, str]:
@@ -393,12 +397,7 @@ class TestBuiltInScalarStoredElements:
         assert stored_directories == sorted(stored_directories)
 
 
-# ── struct-stored elements (user classes): today's order, pinned ─────────────
-#
-# Pending the developer's decision in ITL-922. A user class is stored as a struct, which
-# has no canonical order yet, so its sets keep the order they had: by the ``repr`` of the
-# storage values (text order: 10 before 2). These tests pin that order so that a change
-# of it, which moves the row hash of every such set, is visible.
+# ── struct-stored elements ──────────────────────────────────────────────────
 
 
 @dataclasses.dataclass(frozen=True)
@@ -428,9 +427,157 @@ class ModelPoint(pydantic.BaseModel):
 
 @pytest.mark.parametrize("point", [ExactPoint, StructuralPoint, ModelPoint])
 @pytest.mark.parametrize("arrangement", ARRANGEMENTS)
-def test_user_class_elements_keep_their_order(point: Any, arrangement: str) -> None:
-    """A set of a user class is stored in the ``repr`` order of its structs (ITL-922)."""
-    points = [point(a=2, b="a"), point(a=1, b="b"), point(a=10, b="c")]
+def test_user_class_elements_are_stored_in_field_order(
+    point: Any, arrangement: str
+) -> None:
+    """A set of a user class is stored in numeric and then text order."""
+    points = [
+        point(a=2, b="z"),
+        point(a=-10, b="b"),
+        point(a=10, b="c"),
+        point(a=2, b="a"),
+    ]
     stored = _stored(_source([set(points), set(reversed(points))], point, arrangement))
-    expected = [{"a": 1, "b": "b"}, {"a": 10, "b": "c"}, {"a": 2, "b": "a"}]
+    expected = [
+        {"a": -10, "b": "b"},
+        {"a": 2, "b": "a"},
+        {"a": 2, "b": "z"},
+        {"a": 10, "b": "c"},
+    ]
     assert stored == {"site0": expected, "site1": expected}
+
+
+@dataclasses.dataclass(frozen=True)
+class PointSubclass(ExactPoint):
+    """A distinct value that stores only the base class's fields."""
+
+    extra: int
+
+
+@dataclasses.dataclass(frozen=True)
+class Measurement:
+    """A nested struct with an optional numeric field and a sequence."""
+
+    z: float | None
+    a: list[float | None]
+
+    @override
+    def __hash__(self) -> int:
+        """Hash the sequence's items so a measurement can belong to a set."""
+        return hash((self.z, tuple(self.a)))
+
+
+@dataclasses.dataclass(frozen=True)
+class Sample:
+    """A class whose fields are declared out of alphabetical order."""
+
+    z: Measurement
+    a: str
+
+    def __lt__(self, other: Sample) -> bool:
+        """Fail if storage ever asks the user class to compare instances."""
+        raise AssertionError("the user comparator must not run")
+
+
+def _samples(*, integral_values: bool = True) -> set[Sample]:
+    """Return input values that exercise every level of the sort key."""
+    whole = int if integral_values else float
+    return {
+        Sample(Measurement(whole(10), []), "a"),
+        Sample(Measurement(2.5, [whole(10)]), "a"),
+        Sample(Measurement(2.5, [whole(2)]), "z"),
+        Sample(Measurement(2.5, [whole(2)]), "b"),
+        Sample(Measurement(2.5, [None]), "z"),
+        Sample(Measurement(2.5, []), "z"),
+        Sample(Measurement(whole(-2), []), "z"),
+        Sample(Measurement(None, []), "z"),
+    }
+
+
+_SAMPLE_STORAGE = [
+    {"z": {"z": None, "a": []}, "a": "z"},
+    {"z": {"z": -2.0, "a": []}, "a": "z"},
+    {"z": {"z": 2.5, "a": []}, "a": "z"},
+    {"z": {"z": 2.5, "a": [None]}, "a": "z"},
+    {"z": {"z": 2.5, "a": [2.0]}, "a": "b"},
+    {"z": {"z": 2.5, "a": [2.0]}, "a": "z"},
+    {"z": {"z": 2.5, "a": [10.0]}, "a": "a"},
+    {"z": {"z": 10.0, "a": []}, "a": "a"},
+]
+
+
+def test_nested_structs_and_lists_sort_by_storage_value() -> None:
+    """Use declared field order, list order and scalar order, including nulls."""
+    assert _stored(_source([_samples()], Sample)) == {"site0": _SAMPLE_STORAGE}
+
+
+def test_subclass_with_equal_stored_fields_is_refused() -> None:
+    """The declared base's storage is identical for two distinct set elements."""
+    points = {ExactPoint(2, "a"), PointSubclass(2, "a", 9)}
+    assert len(points) == 2
+    with pytest.raises(CanonicalOrderError, match=r"Column 's': .*duplicate"):
+        _source([points], ExactPoint).as_table()
+
+
+def test_incomparable_struct_field_values_are_refused() -> None:
+    """Report the column when corresponding storage fields cannot be compared."""
+    points = {ExactPoint(2, "a"), ExactPoint(cast(Any, "2"), "a")}
+    with pytest.raises(CanonicalOrderError, match=r"Column 's': .*cannot be ordered"):
+        _source([points], ExactPoint).as_table()
+
+
+def test_nan_in_nested_list_is_refused() -> None:
+    """A NaN deep in a single element is refused even when no comparison is needed."""
+    values = {Sample(Measurement(1, [2, float("nan")]), "a")}
+    with pytest.raises(CanonicalOrderError, match=r"Column 's': .*NaN"):
+        _source([values], Sample).as_table()
+
+
+def _produce_samples(low: float) -> set[Sample]:
+    """Produce the test set, or a set with a nested NaN for the failing row."""
+    if low < 0:
+        return {Sample(Measurement(1.0, [low, float("nan")]), "a")}
+    return _samples(integral_values=False)
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_function_returns_canonically_stored_structs(mode: str) -> None:
+    """Both paths store ordered structs and diagnose a nested NaN by column."""
+    job = op.PipelineJob(
+        name="itl922_struct", database=op.databases.InMemoryArrowDatabase()
+    )
+    pod = op.function_pod(output_keys="samples")(_produce_samples).pod
+    with job:
+        pod(_inputs([(0.0, 1.0), (-2.0, 1.0)], "tags_first"), label="produce")
+    with pytest.warns(
+        RowFailuresWarning, match=r"CanonicalOrderError.*Column 'samples': .*NaN"
+    ):
+        _run(job, mode)
+    table = job.nodes["produce"].as_table()
+    assert table.column("site").to_pylist() == ["site0"]
+    column = table.column("samples").combine_chunks()
+    assert isinstance(column, pa.ExtensionArray)
+    assert column.storage.to_pylist() == [_SAMPLE_STORAGE]
+
+
+def test_struct_storage_order_and_hash_are_independent_of_hash_seed() -> None:
+    """Two interpreters serialize and hash the same class set identically."""
+    script = """
+import json
+from tests.test_logical_types.test_set_of_logical_elements import Sample, _row_hashes, _samples, _source, _stored
+
+source = _source([_samples()], Sample)
+print(json.dumps([_stored(source), _row_hashes(source)]))
+"""
+    results = [
+        json.loads(
+            subprocess.check_output(
+                [sys.executable, "-c", script],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+                text=True,
+            )
+        )
+        for seed in ("1", "2")
+    ]
+    assert results[0] == results[1]
+    assert results[0][0] == {"site0": _SAMPLE_STORAGE}

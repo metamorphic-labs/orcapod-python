@@ -17,6 +17,8 @@ The order is defined on storage values (what the converter produces):
   ``0.0`` store different bytes and hash differently, like any float value.
 * ``str``: Unicode code point (never locale). ``bytes``: unsigned bytewise.
 * ``date``, ``datetime`` (by instant), ``time``, ``timedelta``: natural order.
+* Structs in sets: lexicographically by the declared storage fields, in field order.
+* Lists in sets: lexicographically by their items, with a proper prefix sorting first.
 
 Keys or elements that cannot be ordered against each other, and two keys or elements
 with the same storage value, raise ``CanonicalOrderError``.
@@ -33,11 +35,13 @@ from decimal import Decimal
 from itertools import pairwise
 from typing import Any, TypeVar, cast, get_args, get_origin
 
+import pyarrow as pa
+
 from orcapod.errors import CanonicalOrderError
 
 _T = TypeVar("_T")
 
-# A sort key: ``(0,)`` for None, ``(1, value)`` otherwise.
+# A sort key starts with 0 for None or 1 followed by the value or its child ranks.
 _Rank = tuple[Any, ...]
 
 
@@ -55,11 +59,69 @@ def _key_rank(key: object) -> _Rank:
     return (1, key)
 
 
+def _storage_ranker(storage_type: pa.DataType) -> Callable[[Any], _Rank]:
+    """Build the rank function for a set element's declared storage type."""
+    if isinstance(storage_type, pa.StructType):
+        fields = tuple(
+            (field.name, _storage_ranker(field.type)) for field in storage_type
+        )
+
+        def rank_struct(value: Any) -> _Rank:
+            if value is None:
+                return (0,)
+            if isinstance(value, dict):
+                return (1, *(rank(value.get(name)) for name, rank in fields))
+            if isinstance(value, tuple) and len(value) == len(fields):
+                return (1, *(rank(item) for (_, rank), item in zip(fields, value)))
+            raise CanonicalOrderError("expected a struct storage value")
+
+        return rank_struct
+    if isinstance(
+        storage_type,
+        (
+            pa.ListType,
+            pa.LargeListType,
+            pa.FixedSizeListType,
+            pa.ListViewType,
+            pa.LargeListViewType,
+        ),
+    ):
+        rank_item = _storage_ranker(storage_type.value_type)
+
+        def rank_list(value: Any) -> _Rank:
+            if value is None:
+                return (0,)
+            if isinstance(value, (str, bytes, dict, set, frozenset)):
+                raise CanonicalOrderError("expected a list storage value")
+            try:
+                items = iter(value)
+            except TypeError as exc:
+                raise CanonicalOrderError("expected a list storage value") from exc
+            return (1, *(rank_item(item) for item in items))
+
+        return rank_list
+    if isinstance(storage_type, pa.ExtensionType):
+        return _storage_ranker(storage_type.storage_type)
+    if pa.types.is_nested(storage_type):
+
+        def rank_unsupported(value: Any) -> _Rank:
+            if value is None:
+                return (0,)
+            raise CanonicalOrderError(f"storage type {storage_type} cannot be ordered")
+
+        return rank_unsupported
+    return _key_rank
+
+
 def _is_nan(value: object) -> bool:
     """Return whether ``value`` is a NaN of any numeric type.
 
     Integers are never NaN and are not converted (a large ``int`` does not fit a float).
     """
+    if isinstance(value, float):
+        return math.isnan(value)
+    if type(value) in (int, bool, str, bytes):
+        return False
     if isinstance(value, Decimal):
         return value.is_nan()
     if isinstance(value, numbers.Real) and not isinstance(value, numbers.Integral):
@@ -74,12 +136,12 @@ def _sorted_by_rank(items: list[tuple[_Rank, _T]]) -> list[_T]:
         CanonicalOrderError: If two ranks cannot be compared or are equal.
     """
     try:
-        items = sorted(items, key=lambda item: item[0])
+        items.sort(key=lambda item: item[0])
+        for (previous, _), (current, _) in pairwise(items):
+            if previous == current:
+                raise CanonicalOrderError("duplicate key or set element")
     except TypeError as exc:
-        raise CanonicalOrderError(f"values cannot be ordered: {exc}") from exc
-    for (previous, _), (current, payload) in pairwise(items):
-        if previous == current:
-            raise CanonicalOrderError(f"duplicate key or set element: {payload!r}")
+        raise CanonicalOrderError("values cannot be ordered") from exc
     return [payload for _, payload in items]
 
 
@@ -99,11 +161,15 @@ def sort_dict_entries(entries: list[dict[str, _T]]) -> list[dict[str, _T]]:
     return _sorted_by_rank([(_key_rank(entry["key"]), entry) for entry in entries])
 
 
-def sort_set_elements(elements: list[_T]) -> list[_T]:
+def sort_set_elements(
+    elements: list[_T], storage_type: pa.DataType | None = None
+) -> list[_T]:
     """Return the storage elements of one set value in canonical order.
 
     Args:
         elements: The converted elements of a set.
+        storage_type: The declared Arrow element storage type, when available.
+            It supplies struct field order and list item types.
 
     Returns:
         A new list holding the same elements, sorted.
@@ -112,7 +178,8 @@ def sort_set_elements(elements: list[_T]) -> list[_T]:
         CanonicalOrderError: For a NaN element, elements that cannot be ordered against
             each other, or two elements with the same storage value.
     """
-    return _sorted_by_rank([(_key_rank(element), element) for element in elements])
+    rank = _key_rank if storage_type is None else _storage_ranker(storage_type)
+    return _sorted_by_rank([(rank(element), element) for element in elements])
 
 
 def canonical_python_value(

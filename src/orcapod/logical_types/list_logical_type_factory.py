@@ -344,13 +344,8 @@ class ListLogicalType(BaseLogicalType):
 
         For ``set[T]`` (``is_set=True``), the storage values are put in the canonical
         order of ``canonical_order.sort_set_elements``, whatever order the set iterates
-        in: for a plain Arrow element and for a logical element alike (ITL-922). A NaN,
-        two elements with one storage value and elements that cannot be ordered are
-        refused.
-
-        The one exception, pending the developer's decision in ITL-922: a logical
-        element stored as a struct (a user class) has no canonical order yet, so its
-        set keeps the order it had, by the ``repr`` of the storage values.
+        in. Struct fields are compared in declared order and list items in sequence,
+        recursively (ITL-922).
 
         Args:
             value: A Python list (or set) of elements of type ``element_python_type``,
@@ -362,9 +357,8 @@ class ListLogicalType(BaseLogicalType):
             For set semantics the list is sorted.
 
         Raises:
-            CanonicalOrderError: For a set holding a NaN, elements that cannot be
-                ordered, or two elements with one storage value (not for a set of a
-                struct-stored element, see above).
+            CanonicalOrderError: For a NaN at any depth, elements that cannot be
+                ordered, or two elements with one storage value.
         """
         if value is None:
             return []
@@ -376,18 +370,9 @@ class ListLogicalType(BaseLogicalType):
                 for item in value
             ]
         if self._is_set:
-            if pa.types.is_struct(self._storage_type.value_type):
-                # TODO(ITL-922): pending the developer's decision. A struct (a user
-                # class's storage) has no canonical order yet, so a set of one keeps
-                # the order it always had: by the ``repr`` of the storage values. A
-                # change here moves the stored order, so the row hash, of such sets.
-                return sorted(elements, key=repr)
-            # One canonical order for every other set (ITL-905, ITL-611, ITL-922): it
-            # refuses a NaN, a repeated storage value and values with no order, and
-            # never falls back to another order.
             from orcapod.semantic_types.canonical_order import sort_set_elements
 
-            return sort_set_elements(elements)
+            return sort_set_elements(elements, self._storage_type.value_type)
         return elements
 
     def storage_to_python(

@@ -45,6 +45,12 @@ can return. For example, a returned object with `None` in an `int` field raises
 values deliberately. Pydantic's own validation still applies whenever it
 constructs a model.
 
+A `set[T]` of user-class instances is stored in declared field order. Orcapod compares
+the stored field values, descending into nested classes and lists and placing `None`
+first. A class's own comparison methods have no effect on storage order. Unorderable
+values, NaNs anywhere in an element, and distinct elements that store the same fields
+raise `CanonicalOrderError`. See [canonical set order](../reference/hashing.md#1e-dict-and-set-values-canonical-order).
+
 ## `op.dataclass` in a notebook
 
 `op.dataclass` is used like `dataclasses.dataclass` and returns a real dataclass. Define
