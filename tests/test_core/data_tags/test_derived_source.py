@@ -267,31 +267,35 @@ def test_tags_as_data_over_a_data_tag_source() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_binding_enters_the_identity_through_the_origin_and_the_schema() -> None:
-    with_data_tags = _function_job(InMemoryArrowDatabase()).nodes["double"].as_source()
+def test_the_binding_enters_the_content_and_pipeline_identity_through_the_schema() -> (
+    None
+):
+    with_data_tags = (
+        _function_job(InMemoryArrowDatabase())
+        .nodes["double"]
+        .as_source(source_id="stored")
+    )
     plain = (
         _function_job(InMemoryArrowDatabase(), tag_only=True)
         .nodes["double"]
-        .as_source()
+        .as_source(source_id="stored")
     )
     assert plain.keys() == (("unit", "time"), ("y",))
-    # Plain form: the content hash is the origin node's, which carries the binding.
-    assert with_data_tags.identity_structure() == (
-        with_data_tags._origin.content_hash(),  # pyright: ignore[reportPrivateUsage]  # the identity rule under test
-    )
-    assert with_data_tags.content_hash() != plain.content_hash()
-    # Pipeline hash: schema only, the Arrow schemas (ITL-640); a data-tag is in both
-    # halves of it.
     tag_schema, data_schema = with_data_tags.arrow_schemas
     assert "unit" in tag_schema.names
     assert "unit" in data_schema.names
-    assert with_data_tags.pipeline_identity_structure() == arrow_schema_identity(
+    schema_identity = arrow_schema_identity(
         tag_schema, data_schema, with_data_tags.data_context
     )
+    assert with_data_tags.source_id == plain.source_id
+    assert with_data_tags.identity_structure() == (
+        with_data_tags.source_id,
+        schema_identity,
+        (),
+    )
+    assert with_data_tags.content_hash() != plain.content_hash()
+    assert with_data_tags.pipeline_identity_structure() == schema_identity
     assert with_data_tags.pipeline_hash() != plain.pipeline_hash()
-    # The default source id keeps its construction: derived:<label>:<hex> of the origin.
-    assert with_data_tags.source_id.startswith("derived_v1:")
-    assert with_data_tags.source_id != plain.source_id
 
 
 def test_equal_origins_give_equal_derived_sources() -> None:

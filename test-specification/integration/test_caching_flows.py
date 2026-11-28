@@ -118,7 +118,7 @@ class TestDerivedSourceReingestion:
         node.run()
 
         # Create DerivedSource from the node's results
-        derived = node.as_source()
+        derived = node.as_source(source_id="stored")
         assert isinstance(derived, DerivedSource)
 
         # Should be able to iterate data from derived source

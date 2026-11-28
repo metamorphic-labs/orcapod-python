@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
+from orcapod.contexts import get_default_context
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.sources.derived_source import DerivedSource
@@ -400,8 +401,9 @@ class TestDerivedSource:
     def _make_mock_origin(self, records=None):
         """Create a mock origin node for DerivedSource testing."""
         mock_origin = MagicMock()
-        mock_origin.content_hash.return_value = MagicMock(
-            to_string=MagicMock(return_value="abcdef1234567890")
+        mock_origin.job_name = ("demo", "stored")
+        mock_origin.content_hash.return_value = (
+            get_default_context().semantic_hasher.hash_object("mock_origin")
         )
         mock_origin.output_schema.return_value = (
             Schema({"tag_col": str}),
@@ -433,10 +435,12 @@ class TestDerivedSource:
         assert "data_col" in table.column_names
 
     def test_source_id_derived_prefix(self):
-        """DerivedSource auto-generates a source_id with the 'derived_v1:' kind part."""
+        """DerivedSource defaults to the versioned kind, job path and node hash."""
         mock_origin = self._make_mock_origin(records=None)
         source = DerivedSource(origin=mock_origin)
-        assert source.source_id.startswith("derived_v1:")
+        assert source.source_id == (
+            f"derived_v1:demo/stored:{mock_origin.content_hash().to_string()}"
+        )
 
     def test_explicit_source_id(self):
         """An explicit source_id is the name, after the kind part (ITL-1425)."""
